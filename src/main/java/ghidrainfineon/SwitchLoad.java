@@ -28,6 +28,7 @@ import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.pcode.*;
 
 /**
@@ -73,9 +74,16 @@ public class SwitchLoad extends InjectPayloadCallother {
 		if (isSwitch && segmentUseropIndex >= 0) {
 			// This is a switch table load - emit segment(dpp, ptr & 0x3FFF) then load
 			// The mask is needed because segmentop no longer masks (for indirect access support)
-			Long dppValue = getDppForPointer(program, currentAddr, ptrInput);
+			Long dppValue = getImmediateExtpPage(program, currentAddr);
+			if (dppValue == null && !hasAddressOverride(program, currentAddr)) {
+				dppValue = getDppForPointer(program, currentAddr, ptrInput);
+			}
+
+			// An unresolved EXTP-register/EXTS override or unknown DPP is not a
+			// license to read page zero.  Keeping the raw 16-bit load is less
+			// precise, but prevents arbitrary bytes from becoming switch targets.
 			if (dppValue == null) {
-				dppValue = 0L; // Default to DPP0
+				return emitRawLoad(currentAddr, ptrInput, output, ramSpace, constSpace);
 			}
 			
 			int seqnum = 0;
@@ -106,17 +114,46 @@ public class SwitchLoad extends InjectPayloadCallother {
 			ops[2] = new PcodeOp(currentAddr, seqnum++, PcodeOp.LOAD, loadInputs, output);
 			
 			return ops;
-		} else {
-			// Not a switch - do normal load: output = *ptr
-			int seqnum = 0;
-			PcodeOp[] ops = new PcodeOp[1];
-			
-			Varnode spaceId = new Varnode(constSpace.getAddress(ramSpace.getSpaceID()), 4);
-			Varnode[] loadInputs = new Varnode[] { spaceId, ptrInput };
-			ops[0] = new PcodeOp(currentAddr, seqnum++, PcodeOp.LOAD, loadInputs, output);
-			
-			return ops;
 		}
+
+		return emitRawLoad(currentAddr, ptrInput, output, ramSpace, constSpace);
+	}
+
+	private PcodeOp[] emitRawLoad(Address addr, Varnode ptr, Varnode output,
+			AddressSpace ramSpace, AddressSpace constSpace) {
+		Varnode spaceId = new Varnode(constSpace.getAddress(ramSpace.getSpaceID()), 4);
+		return new PcodeOp[] {
+			new PcodeOp(addr, 0, PcodeOp.LOAD, new Varnode[] { spaceId, ptr }, output)
+		};
+	}
+
+	/**
+	 * Resolve an immediate EXTP override at the table load.  EXTP replaces
+	 * the DPP page for every long/indirect access in its instruction range.
+	 */
+	private Long getImmediateExtpPage(Program program, Address addr) {
+		ProgramContext context = program.getProgramContext();
+		if (!isContextOne(context, "ExtpEn", addr)) {
+			return null;
+		}
+		if (isContextOne(context, "ExtpRegMode", addr)) {
+			return null;
+		}
+
+		Register extp = context.getRegister("Extp");
+		BigInteger value = extp == null ? null : context.getValue(extp, addr, false);
+		return value == null ? null : value.longValue() & 0x3ffL;
+	}
+
+	private boolean hasAddressOverride(Program program, Address addr) {
+		ProgramContext context = program.getProgramContext();
+		return isContextOne(context, "ExtpEn", addr) || isContextOne(context, "ExtsEn", addr);
+	}
+
+	private boolean isContextOne(ProgramContext context, String registerName, Address addr) {
+		Register register = context.getRegister(registerName);
+		BigInteger value = register == null ? null : context.getValue(register, addr, false);
+		return BigInteger.ONE.equals(value);
 	}
 	
 	/**
@@ -142,8 +179,9 @@ public class SwitchLoad extends InjectPayloadCallother {
 	}
 	
 	/**
-	 * Get the DPP value for the given pointer register.
-	 * Uses the upper 2 bits of a typical switch table address pattern.
+	 * Get the DPP value for the given pointer register when no EXTP/EXTS
+	 * override is active. Uses the upper two bits of the table offset to select
+	 * DPP0..DPP3.
 	 */
 	private Long getDppForPointer(Program program, Address context, Varnode ptrInput) {
 		// For switch tables, we need to determine which DPP based on the pointer value
@@ -178,7 +216,7 @@ public class SwitchLoad extends InjectPayloadCallother {
 										return dppValue.longValue() & 0x3FFL;
 									}
 								}
-								return (long) dppIndex; // Fallback to index as value
+								return null;
 							}
 						}
 					}
@@ -192,4 +230,3 @@ public class SwitchLoad extends InjectPayloadCallother {
 		return null;
 	}
 }
-

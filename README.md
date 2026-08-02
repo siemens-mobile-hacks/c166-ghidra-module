@@ -4,6 +4,13 @@
 
 A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** microcontroller binaries. Features advanced support for C166's segmented memory model including DPP (Data Page Pointer) address translation and switch table analysis.
 
+## Differences from [Upstream](https://github.com/keyhana/c166-ghidra-module)
+
+- Builds a static call graph from every discovered function and safely creates missing call targets.
+- Resolves EXTP-backed switch tables without falling back to an incorrect DPP page.
+- Adds conservative TASKING function-start patterns for broader automatic code discovery.
+- Provides `install-local.sh` for atomic local extension updates with backups.
+
 ## Features
 
 ### Core Functionality
@@ -11,6 +18,8 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
 - **DPP Address Translation** — Automatic resolution of 16-bit addresses to 24-bit physical addresses
 - **EXTP/EXTS Support** — Extended page and segment override handling
 - **Switch Table Analysis** — Automatic switch detection
+- **Call Graph Discovery** — Scans every existing function, records static calls, disassembles targets, and creates functions
+- **Function Start Patterns** — Conservative TASKING prologue detection after C166 return instructions
 
 ### Included Scripts
 
@@ -54,6 +63,18 @@ export GHIDRA_INSTALL_DIR=/path/to/ghidra
 
 # Output: dist/ghidra_*_GhidraInfineon.zip
 ```
+
+For local development, after installing the extension once, rebuild and replace
+the installed extension with:
+
+```bash
+./install-local.sh
+```
+
+The script uses `GHIDRA_INSTALL_DIR` (default: `/opt/ghidra`) to select the
+matching Ghidra user directory. Override `GHIDRA_USER_DIR` when needed. Restart
+Ghidra after replacement because processor modules are loaded once per process.
+The previous extension is saved under `ExtensionBackups`.
 
 ## Usage Tips
 

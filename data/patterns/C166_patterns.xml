@@ -1,0 +1,22 @@
+<patternlist>
+  <!--
+    Conservative TASKING-style function starts.  A candidate must follow a
+    return and begin with either three saved registers or two saved registers
+    plus a stack allocation.  Shorter prologues are deliberately omitted:
+    their byte patterns occur too often in C166 data tables.
+  -->
+  <patternpairs totalbits="32" postbits="16">
+    <prepatterns>
+      <data>0xcb 0x00</data> <!-- ret -->
+      <data>0xdb 0x00</data> <!-- rets -->
+      <data>0xfb 0x88</data> <!-- reti -->
+    </prepatterns>
+
+    <postpatterns>
+      <data>0x88 ....0000 0x88 ....0000 0x88 ....0000</data>
+      <data>0x88 ....0000 0x88 ....0000 0x26 0xf0 ........ ........</data>
+      <align mark="0" bits="1"/>
+      <funcstart validcode="6" validcodemax="20" contiguous="true"/>
+    </postpatterns>
+  </patternpairs>
+</patternlist>

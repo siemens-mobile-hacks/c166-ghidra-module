@@ -58,16 +58,20 @@ The C166 is a **16-bit microcontroller** with a **24-bit address space**. The ke
 ```
 GhidraInfineon/
 ├── data/
-│   └── languages/
-│       ├── c166.slaspec       # Main SLEIGH entry point
-│       ├── c166.sinc          # SLEIGH instruction definitions
-│       ├── c166.cspec         # Compiler specification (calling conventions, callotherfixup)
-│       ├── c166.ldefs         # Language definitions
-│       ├── c166cr.pspec       # Processor spec for C167CR (includes segmentop)
-│       ├── c167cs.pspec       # Processor spec for C167CS (includes segmentop)
-│       └── c166.sla           # Compiled SLEIGH (auto-generated, delete to rebuild)
+│   ├── languages/
+│   │   ├── c166.slaspec       # Main SLEIGH entry point
+│   │   ├── c166.sinc          # SLEIGH instruction definitions
+│   │   ├── c166.cspec         # Compiler specification (calling conventions, callotherfixup)
+│   │   ├── c166.ldefs         # Language definitions
+│   │   ├── c166cr.pspec       # Processor spec for C167CR (includes segmentop)
+│   │   ├── c167cs.pspec       # Processor spec for C167CS (includes segmentop)
+│   │   └── c166.sla           # Compiled SLEIGH (auto-generated, delete to rebuild)
+│   └── patterns/
+│       ├── patternconstraints.xml # Associates patterns with both C166 languages
+│       └── C166_patterns.xml      # Conservative TASKING function starts
 ├── src/main/java/ghidrainfineon/
 │   ├── C166AddressAnalyzer.java   # DPP-aware address resolution analyzer
+│   ├── C166CallTargetAnalyzer.java # Builds the static graph from all functions
 │   ├── PcodeInject.java           # PCode injection library registration
 │   ├── GetPagedOffset.java        # Injector for static address paging
 │   ├── SwitchLoad.java            # Injector for switch table loads
@@ -486,4 +490,3 @@ Far (24-bit) pointers are partially supported. The module defines 3-byte pointer
 - [Ghidra SLEIGH Documentation](https://ghidra.re/courses/languages/html/sleigh.html)
 - [Ghidra PCode Reference](https://ghidra.re/courses/languages/html/pcoderef.html)
 - [Ghidra Source - PcodeInjectLibrary](https://github.com/NationalSecurityAgency/ghidra/tree/master/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang)
-
