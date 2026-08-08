@@ -42,6 +42,7 @@ import ghidra.util.task.TaskMonitor;
  */
 public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 
+	private static final int MAX_DIAGNOSTIC_EXAMPLES = 8;
 	private static final Set<String> SUPPORTED_PROCESSORS =
 		Set.of("Infineon C167CR", "Infineon C167CS");
 	private final Set<Program> analyzedPrograms =
@@ -95,11 +96,16 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 		int functionCount = 0;
 		int referenceCount = 0;
 		int scannedFunctionCount = 0;
-		int unalignedCount = 0;
-		int nonExecutableCount = 0;
-		int dataCount = 0;
-		int invalidCodeCount = 0;
-		int failedDisassemblyCount = 0;
+		int callInstructionCount = 0;
+		int targetOccurrenceCount = 0;
+		Set<Address> uniqueTargets = new HashSet<>();
+		Set<Address> acceptedTargets = new HashSet<>();
+		TargetDiagnostics unmapped = new TargetDiagnostics();
+		TargetDiagnostics nonExecutable = new TargetDiagnostics();
+		TargetDiagnostics unaligned = new TargetDiagnostics();
+		TargetDiagnostics definedData = new TargetDiagnostics();
+		TargetDiagnostics invalidCode = new TargetDiagnostics();
+		TargetDiagnostics failedDisassembly = new TargetDiagnostics();
 
 		while (!pendingFunctions.isEmpty()) {
 			monitor.checkCancelled();
@@ -123,18 +129,27 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 				if (!instruction.getFlowType().isCall()) {
 					continue;
 				}
+				callInstructionCount++;
 
 				for (Address target : getCallTargets(program, instruction)) {
 					monitor.checkCancelled();
+					targetOccurrenceCount++;
+					uniqueTargets.add(target);
+					Address source = instruction.getAddress();
 					MemoryBlock block = memory.getBlock(target);
-					if (block == null || !block.isExecute()) {
-						nonExecutableCount++;
+					if (block == null) {
+						unmapped.record(source, target, null);
+						continue;
+					}
+					if (!block.isExecute()) {
+						nonExecutable.record(source, target,
+							"block=" + block.getName() + " " + permissions(block));
 						continue;
 					}
 
 					int alignment = program.getLanguage().getInstructionAlignment();
 					if (alignment > 1 && Long.remainderUnsigned(target.getOffset(), alignment) != 0) {
-						unalignedCount++;
+						unaligned.record(source, target, "alignment=" + alignment);
 						continue;
 					}
 
@@ -142,7 +157,9 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 					if (targetInstruction == null) {
 						// Never replace user-defined data merely because a call points at it.
 						if (listing.getDefinedDataContaining(target) != null) {
-							dataCount++;
+							definedData.record(source, target,
+								"type=" + listing.getDefinedDataContaining(target)
+									.getDataType().getDisplayName());
 							continue;
 						}
 
@@ -152,7 +169,9 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 						pseudoDisassembler.setMaxInstructions(20);
 						if (!pseudoDisassembler.checkValidSubroutine(target, true, false, true) ||
 							pseudoDisassembler.getLastCheckValidInstructionCount() < 2) {
-							invalidCodeCount++;
+							invalidCode.record(source, target,
+								"valid-instructions=" +
+									pseudoDisassembler.getLastCheckValidInstructionCount());
 							continue;
 						}
 
@@ -160,16 +179,19 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 							new DisassembleCommand(target, memory.getExecuteSet(), true);
 						disassemble.enableCodeAnalysis(false);
 						if (!disassemble.applyTo(program, monitor)) {
-							failedDisassemblyCount++;
+							failedDisassembly.record(source, target,
+								normalizeStatus(disassemble.getStatusMsg()));
 							continue;
 						}
 						targetInstruction = listing.getInstructionAt(target);
 						if (targetInstruction == null) {
-							failedDisassemblyCount++;
+							failedDisassembly.record(source, target,
+								"command succeeded but created no instruction");
 							continue;
 						}
 						disassembledCount++;
 					}
+					acceptedTargets.add(target);
 
 					if (!hasCallReference(references, instruction.getAddress(), target)) {
 						references.addMemoryReference(instruction.getAddress(), target,
@@ -197,13 +219,21 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 			}
 		}
 
-		log.appendMsg(getName(), "Scanned " + scannedFunctionCount +
-			" function(s), added " + referenceCount + " call reference(s), disassembled " +
-			disassembledCount + " target(s), created " + functionCount + " function(s); " +
-			"rejected " + unalignedCount + " unaligned, " + nonExecutableCount +
-			" non-executable, " + dataCount + " data, " + invalidCodeCount +
-			" invalid-code target(s), and " + failedDisassemblyCount +
-			" disassembly failure(s).");
+		log.appendMsg(getName(), "Scanned " + scannedFunctionCount + " function(s) and " +
+			callInstructionCount + " call instruction(s): " + targetOccurrenceCount +
+			" target occurrence(s), " + uniqueTargets.size() + " unique, " +
+			acceptedTargets.size() + " accepted.");
+		log.appendMsg(getName(), "Changes: added " + referenceCount +
+			" call reference(s), disassembled " + disassembledCount +
+			" target(s), created " + functionCount + " function(s)." +
+			(referenceCount == 0 && disassembledCount == 0 && functionCount == 0
+					? " Static call graph was already complete." : ""));
+		appendDiagnostics(log, "Unmapped", unmapped);
+		appendDiagnostics(log, "Non-executable", nonExecutable);
+		appendDiagnostics(log, "Unaligned", unaligned);
+		appendDiagnostics(log, "Defined data", definedData);
+		appendDiagnostics(log, "Invalid code", invalidCode);
+		appendDiagnostics(log, "Disassembly failed", failedDisassembly);
 		return true;
 	}
 
@@ -238,5 +268,42 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 			}
 		}
 		return targets;
+	}
+
+	private void appendDiagnostics(MessageLog log, String label, TargetDiagnostics diagnostics) {
+		if (diagnostics.occurrences == 0) {
+			return;
+		}
+		log.appendMsg(getName(), label + ": " + diagnostics.occurrences +
+			" occurrence(s), " + diagnostics.uniqueTargets.size() + " unique target(s)." +
+			" Examples: " + String.join(", ", diagnostics.examples));
+	}
+
+	private String permissions(MemoryBlock block) {
+		return (block.isRead() ? "r" : "-") + (block.isWrite() ? "w" : "-") +
+			(block.isExecute() ? "x" : "-");
+	}
+
+	private String normalizeStatus(String status) {
+		return status == null || status.isBlank() ? "no status message" : status;
+	}
+
+	private static class TargetDiagnostics {
+		private int occurrences;
+		private final Set<Address> uniqueTargets = new HashSet<>();
+		private final Set<String> examples = new LinkedHashSet<>();
+
+		void record(Address source, Address target, String detail) {
+			occurrences++;
+			uniqueTargets.add(target);
+			if (examples.size() >= MAX_DIAGNOSTIC_EXAMPLES) {
+				return;
+			}
+			String example = source + " -> " + target;
+			if (detail != null && !detail.isBlank()) {
+				example += " (" + detail + ")";
+			}
+			examples.add(example);
+		}
 	}
 }
