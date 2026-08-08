@@ -10,11 +10,14 @@ import java.util.WeakHashMap;
 
 import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.cmd.function.CreateFunctionCmd;
+import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.services.AbstractAnalyzer;
 import ghidra.app.services.AnalysisPriority;
 import ghidra.app.services.AnalyzerType;
+import ghidra.app.services.ConsoleService;
 import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.importer.MessageLog;
+import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Function;
@@ -29,6 +32,7 @@ import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
@@ -219,21 +223,21 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 			}
 		}
 
-		log.appendMsg(getName(), "Scanned " + scannedFunctionCount + " function(s) and " +
+		report(program, "Scanned " + scannedFunctionCount + " function(s) and " +
 			callInstructionCount + " call instruction(s): " + targetOccurrenceCount +
 			" target occurrence(s), " + uniqueTargets.size() + " unique, " +
 			acceptedTargets.size() + " accepted.");
-		log.appendMsg(getName(), "Changes: added " + referenceCount +
+		report(program, "Changes: added " + referenceCount +
 			" call reference(s), disassembled " + disassembledCount +
 			" target(s), created " + functionCount + " function(s)." +
 			(referenceCount == 0 && disassembledCount == 0 && functionCount == 0
 					? " Static call graph was already complete." : ""));
-		appendDiagnostics(log, "Unmapped", unmapped);
-		appendDiagnostics(log, "Non-executable", nonExecutable);
-		appendDiagnostics(log, "Unaligned", unaligned);
-		appendDiagnostics(log, "Defined data", definedData);
-		appendDiagnostics(log, "Invalid code", invalidCode);
-		appendDiagnostics(log, "Disassembly failed", failedDisassembly);
+		appendDiagnostics(program, "Unmapped", unmapped);
+		appendDiagnostics(program, "Non-executable", nonExecutable);
+		appendDiagnostics(program, "Unaligned", unaligned);
+		appendDiagnostics(program, "Defined data", definedData);
+		appendDiagnostics(program, "Invalid code", invalidCode);
+		appendDiagnostics(program, "Disassembly failed", failedDisassembly);
 		return true;
 	}
 
@@ -270,13 +274,27 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 		return targets;
 	}
 
-	private void appendDiagnostics(MessageLog log, String label, TargetDiagnostics diagnostics) {
+	private void appendDiagnostics(Program program, String label,
+			TargetDiagnostics diagnostics) {
 		if (diagnostics.occurrences == 0) {
 			return;
 		}
-		log.appendMsg(getName(), label + ": " + diagnostics.occurrences +
+		report(program, label + ": " + diagnostics.occurrences +
 			" occurrence(s), " + diagnostics.uniqueTargets.size() + " unique target(s)." +
 			" Examples: " + String.join(", ", diagnostics.examples));
+	}
+
+	private void report(Program program, String message) {
+		AutoAnalysisManager manager = AutoAnalysisManager.getAnalysisManager(program);
+		PluginTool tool = manager.getAnalysisTool();
+		if (tool != null) {
+			ConsoleService console = tool.getService(ConsoleService.class);
+			if (console != null) {
+				console.addMessage(getName(), message);
+				return;
+			}
+		}
+		Msg.info(this, getName() + "> " + message);
 	}
 
 	private String permissions(MemoryBlock block) {
