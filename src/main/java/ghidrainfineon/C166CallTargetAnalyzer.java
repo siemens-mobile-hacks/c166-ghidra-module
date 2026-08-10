@@ -3,6 +3,7 @@ package ghidrainfineon;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Queue;
 import java.util.Set;
@@ -21,7 +22,6 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Function;
-import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
@@ -29,6 +29,7 @@ import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.SourceType;
@@ -37,7 +38,9 @@ import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
 
 /**
- * Builds the static C166 call graph from every existing function.
+ * Extends the static C166 call graph from newly analyzed functions.  A full
+ * memory scope, as supplied by One Shot without a selection, scans every
+ * existing function.
  *
  * Ghidra normally follows direct calls while initially disassembling a flow, but
  * an imported/raw program can already contain isolated instructions without the
@@ -54,8 +57,8 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 
 	public C166CallTargetAnalyzer() {
 		super("C166 Call Graph Analyzer",
-			"Builds the static call graph from all existing functions, disassembles " +
-				"known call targets, and creates missing functions.",
+			"Extends the static call graph from changed functions, disassembles known " +
+				"call targets, and scans the whole program when run as a full One Shot.",
 			AnalyzerType.INSTRUCTION_ANALYZER);
 		// Run after function-start and ordinary function analyzers so the seed
 		// queue really contains every function discovered by earlier passes.
@@ -83,11 +86,14 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 		Memory memory = program.getMemory();
 		FunctionManager functions = program.getFunctionManager();
 		ReferenceManager references = program.getReferenceManager();
+		boolean fullScan = set == null || set.isEmpty() || set.contains(memory);
 		Queue<Address> pendingFunctions = new ArrayDeque<>();
 		Set<Address> queuedFunctions = new HashSet<>();
 		Set<Address> processedFunctions = new HashSet<>();
 
-		FunctionIterator existingFunctions = functions.getFunctions(true);
+		Iterator<Function> existingFunctions = fullScan
+				? functions.getFunctions(true)
+				: functions.getFunctionsOverlapping(set);
 		while (existingFunctions.hasNext()) {
 			Address entry = existingFunctions.next().getEntryPoint();
 			if (queuedFunctions.add(entry)) {
@@ -158,6 +164,7 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 					}
 
 					Instruction targetInstruction = listing.getInstructionAt(target);
+					boolean discoveredCode = false;
 					if (targetInstruction == null) {
 						// Never replace user-defined data merely because a call points at it.
 						if (listing.getDefinedDataContaining(target) != null) {
@@ -194,6 +201,7 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 							continue;
 						}
 						disassembledCount++;
+						discoveredCode = true;
 					}
 					acceptedTargets.add(target);
 
@@ -204,15 +212,21 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 					}
 
 					Function targetFunction = functions.getFunctionContaining(target);
+					boolean createdFunction = false;
 					if (targetFunction == null) {
 						CreateFunctionCmd createFunction = new CreateFunctionCmd(target);
 						if (createFunction.applyTo(program, monitor)) {
 							functionCount++;
+							createdFunction = true;
 							targetFunction = createFunction.getFunction();
-					}
+						}
 					}
 
-					if (targetFunction != null) {
+					// A full One Shot walks every existing function.  Incremental analysis
+					// follows only code/functions discovered from the changed seed set;
+					// entering an already-known callee would reopen the whole old graph.
+					if (targetFunction != null &&
+						(fullScan || discoveredCode || createdFunction)) {
 						Address targetEntry = targetFunction.getEntryPoint();
 						if (queuedFunctions.add(targetEntry)) {
 							pendingFunctions.add(targetEntry);
@@ -223,7 +237,8 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 			}
 		}
 
-		report(program, "Scanned " + scannedFunctionCount + " function(s) and " +
+		report(program, (fullScan ? "Full" : "Incremental") + " scan: " +
+			scannedFunctionCount + " function(s) and " +
 			callInstructionCount + " call instruction(s): " + targetOccurrenceCount +
 			" target occurrence(s), " + uniqueTargets.size() + " unique, " +
 			acceptedTargets.size() + " accepted.");
@@ -262,6 +277,17 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 		Set<Address> targets = new LinkedHashSet<>();
 		for (Address target : instruction.getFlows()) {
 			targets.add(target);
+		}
+		// On C166, deleting the only stored call reference can also make
+		// Instruction.getFlows() empty.  The direct CALL target is still present
+		// in the instruction p-code, so use it to make analysis xrefs rebuildable.
+		for (PcodeOp operation : instruction.getPcode()) {
+			if (operation.getOpcode() == PcodeOp.CALL && operation.getNumInputs() != 0) {
+				Address target = operation.getInput(0).getAddress();
+				if (target != null && target.isMemoryAddress()) {
+					targets.add(target);
+				}
+			}
 		}
 
 		Reference[] references =

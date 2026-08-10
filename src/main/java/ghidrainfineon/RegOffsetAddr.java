@@ -34,8 +34,7 @@ import ghidra.program.model.pcode.*;
  * PCode injection for [rwm+#offset] address calculation.
  * 
  * If register is r0 (stack pointer) and offset < STACK_THRESHOLD: emit direct zext for stack analysis
- * If offset < STACK_THRESHOLD (non-r0): emit segment(0, reg + offset)
- * If offset >= STACK_THRESHOLD: emit segment(dpp, reg + (offset & 0x3FFF)) for DPP-paged access
+ * Other accesses use the active EXTP/EXTS override or the selected DPP register.
  * 
  * This allows stack accesses to work cleanly while still supporting DPP paging for memory.
  */
@@ -83,7 +82,7 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 		long offset = offsetInput.getOffset();
 
 		// Use instruction address to create unique temp addresses
-		long uniqueOffset = uniqueBase + ((currentAddr.getOffset() & 0xFFFFFF) >> 1) * 16;
+		long uniqueOffset = uniqueBase + ((currentAddr.getOffset() & 0xFFFFFF) >> 1) * 32;
 
 		// EXTP / EXTS overrides take precedence over the stack-pointer
 		// special case. With a segment override active in front of a
@@ -141,29 +140,6 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 	}
 	
 	/**
-	 * Emit segment(0, reg + offset) for non-stack access with small offsets
-	 */
-	private PcodeOp[] emitSimpleSegment(Address addr, Varnode reg, long offset, Varnode output,
-			AddressSpace constSpace, AddressSpace uniqueSpace, long uniqueOffset) {
-		
-		int seqnum = 0;
-		PcodeOp[] ops = new PcodeOp[2];
-		
-		// 1. sum = reg + offset
-		Varnode offsetConst = new Varnode(constSpace.getAddress(offset), 2);
-		Varnode sum = new Varnode(uniqueSpace.getAddress(uniqueOffset), 2);
-		ops[0] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD, new Varnode[] { reg, offsetConst }, sum);
-		
-		// 2. output = segment(0, sum)
-		Varnode useropId = new Varnode(constSpace.getAddress(segmentUseropIndex), 4);
-		Varnode zeroConst = new Varnode(constSpace.getAddress(0), 2);
-		ops[1] = new PcodeOp(addr, seqnum++, PcodeOp.CALLOTHER, 
-				new Varnode[] { useropId, zeroConst, sum }, output);
-		
-		return ops;
-	}
-	
-	/**
 	 * Emit a paged-memory address calc for [rwm + #imm] when imm >= STACK_THRESHOLD.
 	 *
 	 * Resolution priority — same hierarchy as the C166 hardware:
@@ -193,7 +169,7 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 					return emitPagedSegment(addr, reg, offset & 0x3FFF, extp.immValue & 0x3FFL,
 							output, constSpace, uniqueSpace, uniqueOffset);
 				}
-				return emitShiftViaReg(addr, reg, offset & 0x3FFFL, extp.gpRegister, 14,
+				return emitRuntimePagedSegment(addr, reg, offset & 0x3FFFL, extp.gpRegister,
 						output, constSpace, uniqueSpace, uniqueOffset);
 			}
 			return emitRawFallback(addr, reg, offset, output, constSpace, uniqueSpace, uniqueOffset);
@@ -221,9 +197,33 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 			return emitPagedSegment(addr, reg, offset & 0x3FFF, dppValue,
 					output, constSpace, uniqueSpace, uniqueOffset);
 		}
+		Register dppRegister = program.getRegister("DPP" + dppIndex);
+		if (dppRegister != null) {
+			if (segmentUseropIndex < 0) {
+				return emitRawFallback(addr, reg, offset, output, constSpace, uniqueSpace,
+					uniqueOffset);
+			}
+			return emitRuntimePagedSegment(addr, reg, offset & 0x3fffL, dppRegister,
+				output, constSpace, uniqueSpace, uniqueOffset);
+		}
 
-		// 4. Nothing known — raw 16-bit fallback
+		// 4. The language unexpectedly has no matching architectural DPP register.
 		return emitRawFallback(addr, reg, offset, output, constSpace, uniqueSpace, uniqueOffset);
+	}
+
+	private PcodeOp[] emitRuntimePagedSegment(Address address, Varnode register, long offset,
+			Register pageRegister, Varnode output,
+			AddressSpace constantSpace, AddressSpace uniqueSpace, long uniqueOffset) {
+		Varnode offsetConstant = new Varnode(constantSpace.getAddress(offset), 2);
+		Varnode inner = new Varnode(uniqueSpace.getAddress(uniqueOffset), 2);
+		Varnode page = new Varnode(pageRegister.getAddress(), pageRegister.getMinimumByteSize());
+		Varnode userop = new Varnode(constantSpace.getAddress(segmentUseropIndex), 4);
+		return new PcodeOp[] {
+			new PcodeOp(address, 0, PcodeOp.INT_ADD,
+				new Varnode[] { register, offsetConstant }, inner),
+			new PcodeOp(address, 1, PcodeOp.CALLOTHER,
+				new Varnode[] { userop, page, inner }, output)
+		};
 	}
 
 	/**
@@ -475,4 +475,3 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 		return null;
 	}
 }
-

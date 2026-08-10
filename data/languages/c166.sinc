@@ -123,12 +123,12 @@ macro setDivFlags(a) {
 
 macro Push(a) {
 	r0 = r0 - 2;
-	local sp_push:3 = segment(0:2, r0);
+	local sp_push:3 = zext(r0);
 	*:2 sp_push = a;
 }
 
 macro Pop(a) {
-	local sp_pop:3 = segment(0:2, r0);
+	local sp_pop:3 = zext(r0);
 	a = *:2 sp_pop;
 	r0 = r0 + 2;
 }
@@ -197,17 +197,17 @@ DataImmB: "#"^data16  is data16 { export *[const]:1 data16; }
 # r0 (stack pointer) - direct access (rwi & rwi=0: define first, then constrain)
 IndexImmW: [rwi] is rwi & rwi=0 & idx_imm=1 & idx_mode=0 { export *:2 rwi; }
 IndexImmW: [rwi^"+"] is rwi & rwi=0 & idx_imm=1 & idx_mode=1 { export *:2 rwi; rwi = rwi + 2; }
-# Other registers - use segment
-IndexImmW: [rwi] is idx_imm=1 & idx_mode=0 & rwi { local addr:3 = segment(0:2, rwi); export *:2 addr; }
-IndexImmW: [rwi^"+"] is idx_imm=1 & idx_mode=1 & rwi { local addr:3 = segment(0:2, rwi); export *:2 addr; rwi = rwi + 2; }
+# Other near pointers address the zero-extended 16-bit near-data space.
+IndexImmW: [rwi] is idx_imm=1 & idx_mode=0 & rwi { local addr:3 = zext(rwi); export *:2 addr; }
+IndexImmW: [rwi^"+"] is idx_imm=1 & idx_mode=1 & rwi { local addr:3 = zext(rwi); export *:2 addr; rwi = rwi + 2; }
 IndexImmW: "#"^data3 is idx_imm=0 & data3 { export *[const]:2 data3; }
 
 # r0 (stack pointer) - direct access for bytes (rwi & rwi=0: define first, then constrain)
 IndexImmB: [rwi] is rwi & rwi=0 & idx_imm=1 & idx_mode=0 { export *:1 rwi; }
 IndexImmB: [rwi^"+"] is rwi & rwi=0 & idx_imm=1 & idx_mode=1 { export *:1 rwi; rwi = rwi + 1; }
-# Other registers - use segment for bytes
-IndexImmB: [rwi] is idx_imm=1 & idx_mode=0 & rwi { local addr:3 = segment(0:2, rwi); export *:1 addr; }
-IndexImmB: [rwi^"+"] is idx_imm=1 & idx_mode=1 & rwi { local addr:3 = segment(0:2, rwi); export *:1 addr; rwi = rwi + 1; }
+# Other near pointers address the zero-extended 16-bit near-data space.
+IndexImmB: [rwi] is idx_imm=1 & idx_mode=0 & rwi { local addr:3 = zext(rwi); export *:1 addr; }
+IndexImmB: [rwi^"+"] is idx_imm=1 & idx_mode=1 & rwi { local addr:3 = zext(rwi); export *:1 addr; rwi = rwi + 1; }
 IndexImmB: "#"^data3 is idx_imm=0 & data3 { export *[const]:1 data3; }
 
 
@@ -229,6 +229,13 @@ ShortMemAddrW: regoff is ExtrEn=0 & reg=0x06 & reg [ regoff = 0xFE00 + (2 * reg)
 ShortMemAddrW: regoff is ExtrEn=0 & reg=0x07 & reg [ regoff = 0xFE00 + (2 * reg); ] { export MDL; }
 ShortMemAddrW: regoff is ExtrEn=0 & reg=0x87 & reg [ regoff = 0xFE00 + (2 * reg); ] { export MDC; }
 ShortMemAddrW: regoff is ExtrEn=0 & reg=0x08 & reg [ regoff = 0xFE00 + (2 * reg); ] { export CP; }
+
+# DPP registers are memory-mapped SFRs. Export the architectural registers
+# directly so data flow sees DPP1 rather than an unrelated Ram00fe02 global.
+ShortMemAddrW: regoff is ExtrEn=0 & reg=0x00 & reg [ regoff = 0xFE00 + (2 * reg); ] { export DPP0; }
+ShortMemAddrW: regoff is ExtrEn=0 & reg=0x01 & reg [ regoff = 0xFE00 + (2 * reg); ] { export DPP1; }
+ShortMemAddrW: regoff is ExtrEn=0 & reg=0x02 & reg [ regoff = 0xFE00 + (2 * reg); ] { export DPP2; }
+ShortMemAddrW: regoff is ExtrEn=0 & reg=0x03 & reg [ regoff = 0xFE00 + (2 * reg); ] { export DPP3; }
 
 BitoffAddr: regoff is ExtrEn=0 & bitoff_high_bit=0 & reg_high < 0xf & bitoff [ regoff = 0xFD00 + (2 * bitoff); ] { local tmp:3 = regoff; export *:2tmp; }
 BitoffAddr: regoff is ExtrEn=0 & bitoff_high_bit=1 & reg_high < 0xf & bitoff [ regoff = 0xFF00 + (2 * bitoff); ] { local tmp:3 = regoff; export *:2tmp; }
@@ -267,6 +274,10 @@ LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe0c & mem [ memoff = 0 + me
 LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe0e & mem [ memoff = 0 + mem; ] { export MDL; }
 LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xff0e & mem [ memoff = 0 + mem; ] { export MDC; }
 LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe10 & mem [ memoff = 0 + mem; ] { export CP; }
+LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe00 & mem [ memoff = 0 + mem; ] { export DPP0; }
+LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe02 & mem [ memoff = 0 + mem; ] { export DPP1; }
+LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe04 & mem [ memoff = 0 + mem; ] { export DPP2; }
+LongMemAddrW: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xfe06 & mem [ memoff = 0 + mem; ] { export DPP3; }
 LongMemAddrB: memoff is ExtsEn=0 & ExtpEn=0 & mem=0xff1e & mem [ memoff = 0 + mem; ] { local tmp:1 = 0xff; export tmp; }
 
 # r0 (stack pointer) - direct access without segment for stack analysis (define first, then constrain)
@@ -1818,7 +1829,7 @@ define pcodeop __service_watchdog;
 :scxt ShortMemAddrW, DataImmW is ExtCountDec & op=0xC6 & reg_high=0xf & reg_low=0 & ShortMemAddrW; DataImmW {
 	local oldSP:2 = r0;
 	r0 = DataImmW;
-	local sp_push:3 = segment(0:2, oldSP - 2);
+	local sp_push:3 = zext(oldSP - 2);
 	*:2 sp_push = oldSP;
 }
 
@@ -1833,7 +1844,7 @@ define pcodeop __service_watchdog;
 	local oldSP:2 = r0;
 	local newval:2 = LongMemAddrW;
 	r0 = newval;
-	local sp_push:3 = segment(0:2, oldSP - 2);
+	local sp_push:3 = zext(oldSP - 2);
 	*:2 sp_push = oldSP;
 }
 

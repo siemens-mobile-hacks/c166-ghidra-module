@@ -61,7 +61,9 @@ GhidraInfineon/
 │   ├── languages/
 │   │   ├── c166.slaspec       # Main SLEIGH entry point
 │   │   ├── c166.sinc          # SLEIGH instruction definitions
+│   │   ├── c166_tasking_classic_large.slaspec # TASKING Classic language entry point
 │   │   ├── c166.cspec         # Compiler specification (calling conventions, callotherfixup)
+│   │   ├── c166_tasking_classic_large.cspec # TASKING Classic 7.5 large ABI
 │   │   ├── c166.ldefs         # Language definitions
 │   │   ├── c166cr.pspec       # Processor spec for C167CR (includes segmentop)
 │   │   ├── c167cs.pspec       # Processor spec for C167CS (includes segmentop)
@@ -71,7 +73,9 @@ GhidraInfineon/
 │       └── C166_patterns.xml      # Conservative TASKING function starts
 ├── src/main/java/ghidrainfineon/
 │   ├── C166AddressAnalyzer.java   # DPP-aware address resolution analyzer
-│   ├── C166CallTargetAnalyzer.java # Builds the static graph from all functions
+│   ├── C166CallTargetAnalyzer.java # Incrementally extends the static call graph
+│   ├── C166FarPointerAnalyzer.java # Infers PAGE:OFFSET parameters from data flow
+│   ├── C166VariadicCallAnalyzer.java # Repairs typed variadic call sites
 │   ├── PcodeInject.java           # PCode injection library registration
 │   ├── GetPagedOffset.java        # Injector for static address paging
 │   ├── SwitchLoad.java            # Injector for switch table loads
@@ -88,6 +92,8 @@ GhidraInfineon/
 | File | Purpose |
 |------|---------|
 | **c166.sinc** | Defines all C166 instructions, registers, and pcodeops. This is where `GetPagedOffset`, `segment`, and `c166_switch_load` are defined. |
+| **c166_tasking_classic_large.slaspec** | Compiles the shared instructions under the distinct TASKING Classic large-model language ID; legacy languages use `c166.slaspec`. |
+| **c166_tasking_classic_large.cspec** | Defines the TASKING Classic 7.5 large-model data organization and ABI. |
 | **c166.cspec** | Defines `callotherfixup` entries that map pcodeops to Java injectors. The `dynamic="true"` attribute enables runtime PCode injection. |
 | **c166cr.pspec / c167cs.pspec** | Defines `segmentop` which tells the decompiler how to interpret `segment()` PCode for address calculation. |
 | **PcodeInject.java** | Registers custom PCode injectors (`GetPagedOffset`, `SwitchLoad`) with Ghidra's language system. |
@@ -445,7 +451,12 @@ Switches compiled with unusual optimization may not match the expected pattern. 
 
 ### 4. Far Pointers
 
-Far (24-bit) pointers are partially supported. The module defines 3-byte pointer size but some operations may not handle them correctly.
+The legacy language keeps its original 3-byte pointer model.  TASKING C166
+Classic 7.5 large-model programs must use the separate
+`tasking-classic-large` language/compiler spec, which models C pointers as
+4-byte `_far` `PAGE:OFFSET` values.  The huge model instead defaults to 4-byte
+`_huge` `SEGMENT:OFFSET` pointers and is not supported by this language.
+Aggregate returns and generic far-pointer arithmetic remain incomplete.
 
 ---
 

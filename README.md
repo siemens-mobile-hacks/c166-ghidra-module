@@ -4,11 +4,19 @@
 
 A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** microcontroller binaries. Features advanced support for C166's segmented memory model including DPP (Data Page Pointer) address translation and switch table analysis.
 
+> [!IMPORTANT]
+> Use this module with [ghidra-patched](https://github.com/siemens-mobile-hacks/ghidra-patched/releases).
+> Stock Ghidra does not preserve resolved TASKING large-model far pointers correctly, causing broken addresses, strings, symbols, and decompiler navigation.
+
 ## Differences from [Upstream](https://github.com/keyhana/c166-ghidra-module)
 
-- Builds a static call graph from every discovered function and safely creates missing call targets.
+- Incrementally extends the static call graph from new code, with a full-program One Shot, and safely creates missing call targets.
 - Resolves EXTP-backed switch tables without falling back to an incorrect DPP page.
+- Treats memory-mapped DPP0-DPP3 accesses as the architectural registers, so
+  constant propagation no longer invents unrelated `Ram00fe00` globals.
 - Adds conservative TASKING function-start patterns for broader automatic code discovery.
+- Adds a TASKING C166 Classic 7.5 large-model ABI with true four-byte C pointers.
+- Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
 - Provides `install-local.sh` for atomic local extension updates with backups.
 
 ## Features
@@ -18,7 +26,7 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
 - **DPP Address Translation** — Automatic resolution of 16-bit addresses to 24-bit physical addresses
 - **EXTP/EXTS Support** — Extended page and segment override handling
 - **Switch Table Analysis** — Automatic switch detection
-- **Call Graph Discovery** — Scans every existing function, records static calls, disassembles targets, and creates functions
+- **Call Graph Discovery** — Extends the graph from newly disassembled code; a full One Shot scans every function
 - **Function Start Patterns** — Conservative TASKING prologue detection after C166 return instructions
 
 ### Included Scripts
@@ -48,7 +56,7 @@ The module attempts to resolve these translations automatically, though manual i
 
 ## Installation
 
-1. **Download** the latest `.zip` from [Releases](https://github.com/keyhana/c166-ghidra-module/releases)
+1. **Download** the latest `.zip` from [Releases](https://github.com/siemens-mobile-hacks/c166-ghidra-module/releases)
 2. **Install** in Ghidra: `File` → `Install Extensions...` → `+` → Select `.zip`
 3. **Restart** Ghidra
 
@@ -61,8 +69,11 @@ export GHIDRA_INSTALL_DIR=/path/to/ghidra
 # Build extension
 ./gradlew buildExtension
 
-# Output: dist/ghidra_*_GhidraInfineon.zip
+# Output: dist/ghidra_*_c166-ghidra-module.zip
 ```
+
+The patched Ghidra distribution required by the TASKING far-pointer model is
+maintained in [siemens-mobile-hacks/ghidra-patched](https://github.com/siemens-mobile-hacks/ghidra-patched).
 
 For local development, after installing the extension once, rebuild and replace
 the installed extension with:
@@ -77,6 +88,11 @@ Ghidra after replacement because processor modules are loaded once per process.
 The previous extension is saved under `ExtensionBackups`.
 
 ## Usage Tips
+
+Automatic analysis limits Call Graph, TASKING Far Pointer, and TASKING
+Variadic processing to newly changed code. To rescan the whole program, clear
+the current selection and run the corresponding action under
+`Analysis` → `One Shot`.
 
 ### Switch Tables Not Detected?
 1. Place cursor on `jmpi` instruction
@@ -94,24 +110,91 @@ For best results, set DPP register values in Ghidra:
 2. `Right-click` → `Set Register Values`
 3. Set `DPP0`-`DPP3` to appropriate page values
 
-## Calling Conventions
+## Compiler and Calling Conventions
 
-The module ships two calling conventions; pick per function via the
-function signature editor (`F` in the listing) or set automatically by
-the *Decompiler Parameter ID* analyzer.
+For firmware built by **TASKING C166 Classic 7.5 in the large model**, select
+language `C166:LE:16:tasking-classic-large` (or the corresponding
+`C166:CS:LE:16:tasking-classic-large` C167CS variant) and compiler ID
+`tasking-classic-large` when importing the binary. Its default calling
+convention is `__tasking_c166_classic`. The separate language ID is required
+because Ghidra attaches segmented-pointer semantics to a processor spec rather
+than to an individual compiler spec.
+Functions left at Ghidra's `default` or `unknown` convention use this model
+automatically; assigning `__stdcall` manually is not required.
 
-| Name | Compiler | Word params | 32-bit / pointer pairs | Return word | Notes |
-|------|----------|-------------|------------------------|-------------|-------|
-| `__stdcall` (default) | Tasking c166 / generic | R12, R13, R14, R15 | R13/R12, R15/R14 | R4 (RL4 char) | Tasking convention; suitable for binaries built with Tasking c166 or unknown toolchains. |
-| `__keil_c166` | Keil Cx66 / µVision | R8, R9, R10, R11, R12 | R9/R8, R11/R10 | R4 (RL4 char) | Keil convention; common in automotive ECUs and other Infineon C16x application code. Bit parameters (R15.0, R15.1, …) are not modeled. |
+ABI source: [TASKING C166/ST10 Classic v7.5 manuals](https://www.tasking.com/support/c166-classic/MAN_PDF_V7.5.ZIP), sections 3.2.1.6 and 3.5.
 
-Both conventions return 32-bit values (long, far pointer) in the **R4/R5**
-pair and assume **R0** as user stack pointer.
+| Language / compiler ID | Convention | Word parameters | 32-bit / far-pointer storage | Default C pointer |
+|------------------------|------------|-----------------|------------------------------|-------------------|
+| `C166:LE:16:tasking-classic-large` / `tasking-classic-large` | `__tasking_c166_classic` | R12, R13, R14, R15 | Any consecutive register pair, then adjacent stack words | 4 bytes |
+| `C166:LE:16:default` / `tasking` | `__stdcall` | R12, R13, R14, R15 | Legacy/incomplete model | 3 bytes |
+| `C166:LE:16:default` / `tasking` | `__keil_c166` | R8, R9, R10, R11, R12 | R9/R8 or R11/R10 | 3 bytes |
 
-If the decompiler shows parameters on the stack and ignores values being
-read from R8–R12 in a Keil-built binary, switch the function's calling
-convention to `__keil_c166` — the decompiler will then recover the
-parameters correctly.
+In Ghidra join notation the most significant register is printed first. Thus
+`R14/R13` means that TASKING's low word is in R13 and its high word is in R14.
+Classic returns `char` in RL4, 16-bit values in R4, and 32-bit values or far
+pointers in R5/R4. R0 is the downward-growing user-stack pointer.
+
+The new compiler spec also models the Classic spill rule: once an argument does
+not fit in the remaining parameter registers, it and all following arguments
+use the user stack. Fixed parameters of variadic functions still use registers;
+only the `...` portion is forced to the stack. Floating-point and aggregate
+arguments are stack-passed. Precise aggregate return semantics are not yet
+modeled.
+
+TASKING **VX** uses a different ABI and is not currently supported by this
+module. Do not use `tasking-classic-large` for VX-generated binaries. Keil C166
+is also a separate ABI; use the legacy `tasking` compiler spec and select
+`__keil_c166` for those functions.
+
+TASKING Classic's **huge** memory model is also distinct and is not modeled by
+this language. Large-model default pointers are `_far` `PAGE:OFFSET` values
+with a 14-bit offset; huge-model default pointers are `_huge` `SEGMENT:OFFSET`
+values with a 16-bit offset. Do not use `tasking-classic-large` for huge-model
+firmware.
+
+The four-byte pointer size fixes C type layout and parameter/return storage.
+Far data pointers contain `PAGE:OFFSET`, where the physical address is
+`((page & 0x3ff) << 14) | (offset & 0x3fff)`. Constant far pointers passed to
+correctly typed functions are resolved to physical addresses, so a call such as
+`strcmp(input, far_string)` can decompile as `strcmp(input, "text")` when the
+target is defined as string data in a read-only memory block. This is driven by
+the pointer type and segmented-address model, not by function names, firmware
+addresses, or string contents.
+
+The **C166 TASKING Far Pointer Inference** analyzer joins an argument pair only
+when decompiler data flow proves that its high word supplies PAGE and its low
+word supplies OFFSET to a DPP0/EXTP paged access. It supports all documented
+positions R12/R13, R13/R14, and R14/R15, plus adjacent stack words after the
+register bank is proven exhausted. It retains other live register/stack inputs,
+propagates typed pointers through direct and identity tail calls, refines
+`void *` to `char *` from typed data flow, and joins adjacent global words only
+when their PAGE:OFFSET use is proven. Function names, firmware addresses,
+string contents, and constant values are not evidence. The TASKING data-type
+analyzer also normalizes imported `size_t` to the compiler's 16-bit
+`unsigned int`. This includes replacing the incompatible 32-bit
+`size_t.conflict` introduced by Ghidra's generic C library archive and updating
+dependent prototypes such as `snprintf`.
+
+The patched Ghidra distribution converts typed PAGE:OFFSET joins through the
+standard segmented-pointer operation and suppresses representation-only
+24-to-32-bit pointer conversions. This removes raw `CONCAT22`/`ZEXT34` output;
+for example, a resolved call becomes `takes_string("text")`. The module uses one
+canonical `segmentop` and no synthetic call registers. Its auxiliary
+`__tasking_c166_classic_vararg_*` models are generated only for conservative
+call-site overrides and are not calling conventions users need to select.
+
+Ghidra may initially recover a typed variadic call as individual 16-bit words.
+The **C166 TASKING Variadic Calls** analyzer creates conservative call-site
+prototype overrides when the declared fixed parameters consume R12-R15; this
+repairs calls such as `sprintf(dst, "%d", value)` and uses the same far-pointer
+types recovered for its fixed parameters. A fixed parameter which spills after
+a failed register join also exhausts the register bank, so layouts such as
+`snprintf(dst, size, format, value)` are recovered correctly. Existing generated
+overrides with obsolete argument widths are replaced automatically. Assign the
+function's typed signature first, then rerun Auto Analyze if it was assigned
+after the initial analysis. Calls for which unused parameter registers make the
+argument count ambiguous are deliberately left unchanged.
 
 ## Supported Processors
 
@@ -122,6 +205,9 @@ parameters correctly.
 
 - Manually overridden switches show case labels as addresses (e.g., `case 0x12345:`) instead of indices
 - Nested switches may require manual script invocation for each `jmpi`
+- TASKING Classic aggregate returns and generic `PAGE:OFFSET` pointer arithmetic are not fully modeled
+- TASKING Classic huge-model `SEGMENT:OFFSET` pointers are not yet supported
+- Variadic calls with unused parameter registers remain ambiguous without additional type information
 
 ## Project Structure
 

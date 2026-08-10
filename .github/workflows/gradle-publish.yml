@@ -10,7 +10,8 @@ on:
 
 env:
   GHIDRA_VERSION: "12.1.2"
-  GHIDRA_BUILD_DATE: "20260605"
+  GHIDRA_PATCHED_RELEASE: "12.1.2-3"
+  GHIDRA_PATCHED_ARCHIVE: "ghidra_12.1.2_DEV_20260810.zip"
 
 jobs:
   build:
@@ -27,21 +28,22 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Download Ghidra
+      - name: Download patched Ghidra
         run: |
           mkdir -p build
           cd build
-          wget -q https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD_DATE}.zip
-          unzip -q ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD_DATE}.zip
-          rm ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD_DATE}.zip
+          wget -q "https://github.com/siemens-mobile-hacks/ghidra-patched/releases/download/${GHIDRA_PATCHED_RELEASE}/${GHIDRA_PATCHED_ARCHIVE}"
+          unzip -q "${GHIDRA_PATCHED_ARCHIVE}"
+          rm "${GHIDRA_PATCHED_ARCHIVE}"
 
       - name: Set Ghidra environment variable
-        run: echo "GHIDRA_INSTALL_DIR=$GITHUB_WORKSPACE/build/ghidra_${GHIDRA_VERSION}_PUBLIC" >> $GITHUB_ENV
+        run: echo "GHIDRA_INSTALL_DIR=$GITHUB_WORKSPACE/build/ghidra_${GHIDRA_VERSION}_DEV" >> $GITHUB_ENV
 
-      - name: Build with Gradle
+      - name: Build and test
         run: |
-          chmod +x gradlew
-          ./gradlew buildExtension
+          chmod +x gradlew tools/test-tasking-abi.sh tools/test-patched-decompiler.sh
+          ./tools/test-tasking-abi.sh
+          ./tools/test-patched-decompiler.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

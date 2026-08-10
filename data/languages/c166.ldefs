@@ -15,6 +15,20 @@
     <description>Infineon C166/C167CS</description>
     <compiler name="tasking" spec="c166.cspec" id="tasking"/>
   </language> 
+  <language processor="Infineon C167CR"
+            endian="little"
+            size="16"
+            variant="C167CR TASKING Classic large"
+            version="1.0"
+            slafile="c166_tasking_classic_large.sla"
+            processorspec="c166cr_tasking_classic_large.pspec"
+            manualindexfile="../manuals/C166.idx"
+            id="C166:LE:16:tasking-classic-large">
+    <description>Infineon C166/C167CR, TASKING Classic large model</description>
+    <compiler name="TASKING C166 Classic 7.5 (large)"
+              spec="c166_tasking_classic_large.cspec"
+              id="tasking-classic-large"/>
+  </language>
   <language processor="Infineon C167CS"
             endian="little"
             size="16"
@@ -27,4 +41,18 @@
     <description>Infineon C167CS Dual CAN</description>
     <compiler name="tasking" spec="c166.cspec" id="tasking"/>
   </language> 
+  <language processor="Infineon C167CS"
+            endian="little"
+            size="16"
+            variant="C167CS TASKING Classic large"
+            version="1.0"
+            slafile="c166_tasking_classic_large.sla"
+            processorspec="c167cs_tasking_classic_large.pspec"
+            manualindexfile="../manuals/C166.idx"
+            id="C166:CS:LE:16:tasking-classic-large">
+    <description>Infineon C167CS Dual CAN, TASKING Classic large model</description>
+    <compiler name="TASKING C166 Classic 7.5 (large)"
+              spec="c166_tasking_classic_large.cspec"
+              id="tasking-classic-large"/>
+  </language>
 </language_definitions>

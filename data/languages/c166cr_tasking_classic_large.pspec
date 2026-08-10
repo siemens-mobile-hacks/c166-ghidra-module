@@ -12,19 +12,18 @@
     <programcounter register="IP"/>
     <data_space space="ram"/>
 
-    <!-- C166 segment operation: base is DPP page value, inner is offset -->
-    <!-- Final address = (base << 14) | inner -->
-    <!-- For indirect access: segment(0, reg) just zero-extends -->
-    <!-- For switches: SwitchLoad masks inner to 14 bits before calling -->
-    <segmentop space="ram" userop="segment" farpointer="no">
+    <!-- TASKING Classic large-model data pointer: four-byte PAGE:OFFSET. -->
+    <!-- This processor-spec variant is selected only by the Classic language ID. -->
+    <segmentop space="ram" userop="segment" farpointer="yes">
         <pcode>
-            <input name="base" size="2"/>
-            <input name="inner" size="2"/>
+            <input name="page" size="2"/>
+            <input name="offset" size="2"/>
             <output name="res" size="3"/>
             <body><![CDATA[
-                res = (zext(base) << 14) | zext(inner);
+                res = (((zext(page) & 0x3ff) << 14) | (zext(offset) & 0x3fff));
             ]]></body>
         </pcode>
+        <!-- TASKING Classic 7.5 manual, 3.2.1.6: DPP0 is the far-pointer scratch page. -->
         <constresolve>
             <register name="DPP0"/>
         </constresolve>

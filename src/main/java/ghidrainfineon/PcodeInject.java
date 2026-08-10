@@ -36,8 +36,8 @@ public class PcodeInject extends PcodeInjectLibrary {
 		uniqueBase += 0x10000;
 		// SwitchLoad uses uniqueBase + ((addr >> 1) * 8) for full 24-bit address space
 		implementedOps.put("c166_switch_load", new SwitchLoad("c166_switch_load", l, this.getUniqueBase()));
-		uniqueBase += 0x1000000; // Reserve space for SwitchLoad
-		// RegOffsetAddr uses uniqueBase + ((addr >> 1) * 16) for [rwm+#imm] calculations
+		uniqueBase += 0x4000000; // Reserve full 24-bit range at 8 bytes/instruction
+		// RegOffsetAddr uses uniqueBase + ((addr >> 1) * 32) for [rwm+#imm] calculations
 		implementedOps.put("c166_reg_offset_addr", new RegOffsetAddr("c166_reg_offset_addr", l, this.getUniqueBase()));
 	}
 	

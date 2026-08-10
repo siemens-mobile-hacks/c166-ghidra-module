@@ -69,6 +69,7 @@ public class C166AddressAnalyzer extends ConstantPropagationAnalyzer {
 	private Register extsReg;
 	private Register extpRegMode;
 	private Register extsRegMode;
+	private Program cachedProgram;
 
 	public C166AddressAnalyzer() {
 		super(PROCESSOR_NAME);
@@ -120,9 +121,10 @@ public class C166AddressAnalyzer extends ConstantPropagationAnalyzer {
 	}
 
 	private void cacheRegisters(Program program) {
-		if (dppRegisters[0] != null) {
+		if (cachedProgram == program) {
 			return;
 		}
+		cachedProgram = program;
 
 		for (int i = 0; i < dppRegisters.length; i++) {
 			dppRegisters[i] = program.getRegister("DPP" + i);

@@ -1,0 +1,5 @@
+# SLEIGH specification for the TASKING C166 Classic large-model language.
+
+@define ENDIAN "little"
+
+@include "c166.sinc"
