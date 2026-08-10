@@ -65,7 +65,7 @@ headless_status=${PIPESTATUS[0]}
 set -e
 
 if (( headless_status != 0 )) ||
-	rg -q 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${headless_log}"; then
+	grep -Eq 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${headless_log}"; then
 	printf 'Patched decompiler regression test failed.\n' >&2
 	exit 1
 fi

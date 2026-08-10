@@ -64,8 +64,8 @@ run_headless() {
 	set -e
 
 	if (( status != 0 )) ||
-		rg -q 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${output}" ||
-		! rg -q "${expected}" "${output}"; then
+		grep -Eq 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${output}" ||
+		! grep -Fq -- "${expected}" "${output}"; then
 		printf '%s regression test failed.\n' "${name}" >&2
 		return 1
 	fi
