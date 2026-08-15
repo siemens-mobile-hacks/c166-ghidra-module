@@ -28,6 +28,7 @@ import ghidra.program.model.lang.ParameterPieces;
 import ghidra.program.model.lang.PrototypeModel;
 import ghidra.program.model.lang.PrototypePieces;
 import ghidra.program.model.listing.VariableStorage;
+import ghidrainfineon.C166CodePointerAnalyzer;
 import ghidrainfineon.C166FarPointerAnalyzer;
 import ghidrainfineon.C166TaskingDataTypeAnalyzer;
 import ghidrainfineon.C166VariadicCallAnalyzer;
@@ -40,6 +41,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 	protected void run() throws Exception {
 		String compilerId = currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString();
 		if ("tasking".equals(compilerId)) {
+			check(!new C166CodePointerAnalyzer().canAnalyze(currentProgram),
+				"code-pointer analyzer leaked into legacy compiler spec");
 			check(!new C166FarPointerAnalyzer().canAnalyze(currentProgram),
 				"far-pointer analyzer leaked into legacy compiler spec");
 			check(!new C166VariadicCallAnalyzer().canAnalyze(currentProgram),
@@ -62,6 +65,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 		}
 		check("tasking-classic-large".equals(compilerId),
 			"wrong compiler spec: " + compilerId);
+		check(new C166CodePointerAnalyzer().canAnalyze(currentProgram),
+			"code-pointer analyzer does not accept TASKING Classic large");
 		check(new C166FarPointerAnalyzer().canAnalyze(currentProgram),
 			"far-pointer analyzer does not accept TASKING Classic large");
 		check(new C166VariadicCallAnalyzer().canAnalyze(currentProgram),

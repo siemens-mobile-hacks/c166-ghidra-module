@@ -17,6 +17,8 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
 - Adds conservative TASKING function-start patterns for broader automatic code discovery.
 - Adds a TASKING C166 Classic 7.5 large-model ABI with true four-byte C pointers.
 - Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
+- Joins constant far code-pointer arguments as four-byte function pointers
+  when their `SEGMENT:OFFSET` encoding names an executable function entry.
 - Provides `install-local.sh` for atomic local extension updates with backups.
 
 ## Features

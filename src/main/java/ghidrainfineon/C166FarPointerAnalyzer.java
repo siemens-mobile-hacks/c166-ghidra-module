@@ -27,6 +27,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.AbstractIntegerDataType;
 import ghidra.program.model.data.DataUtilities;
 import ghidra.program.model.data.DataUtilities.ClearDataMode;
+import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.TypeDef;
@@ -55,6 +56,7 @@ import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressOutOfBoundsException;
 import ghidra.program.model.address.AddressSpace;
+import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Reference;
@@ -82,8 +84,11 @@ import ghidra.util.task.TaskMonitor;
  * joined only when its high word reaches PAGE and its adjacent low word reaches
  * OFFSET.
  * <p>
- * No function names, firmware addresses, constant values, strings, or mapped
- * data are used as evidence.
+ * Constant call arguments are also accepted as a seed, but only with repeated
+ * independent call-site evidence and only when the high word is a valid C166
+ * data PAGE which cannot be a 24-bit code SEGMENT.  The decoded PAGE:OFFSET
+ * must name mapped program memory.  No function names or firmware-specific
+ * addresses are used as evidence.
  */
 public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
@@ -94,6 +99,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	private static final int DECOMPILE_TIMEOUT_SECONDS = 30;
 	private static final int MAX_TRACE_DEPTH = 32;
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
+	private static final int MIN_CONSTANT_CALL_SITES = 2;
 
 	public C166FarPointerAnalyzer() {
 		super("C166 TASKING Far Pointer Inference",
@@ -117,6 +123,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		boolean fullScan = set == null || set.isEmpty() || set.contains(program.getMemory());
 		int legacyReferencesRemoved =
 			removeLegacyCallReferences(program, set, fullScan, monitor);
+		CallSiteSeedStats seedStats = seedConstantDataPointers(program, set, fullScan,
+			monitor, log);
 		CandidateGraph graph = buildCandidateGraph(program, set, fullScan, monitor);
 		SccSchedule schedule = buildSccSchedule(graph, monitor);
 		monitor.initialize(Math.max(1, graph.functions().size()),
@@ -163,6 +171,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			stats.referenceSources.getNumAddresses() +
 			" parameter setup instruction(s), created " + stats.globalPointersCreated +
 			" global far-pointer object(s), " +
+			"seeded " + seedStats.parameters() + " parameter(s) in " +
+			seedStats.functions() + " function(s) from " + seedStats.occurrences() +
+			" unambiguous constant call-site occurrence(s), " +
 			"removed " + legacyReferencesRemoved + " legacy call-site reference(s), " +
 			stats.ambiguousFunctions.size() + " ambiguous, " + stats.failedFunctions.size() +
 			" decompilation failure(s), " + stats.recursivePasses +
@@ -248,6 +259,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 			Set<Integer> pairStarts = retainSupportedPairs(function, inference.pairStarts(),
 				inference.liveSlots());
+			pairStarts = removeFunctionPointerConflicts(function, pairStarts);
 			if (pairStarts.isEmpty() || signatureMatches(function, pairStarts,
 				inference.liveSlots(), inference.pointerTypes())) {
 				return false;
@@ -297,6 +309,201 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		private int globalPointersCreated;
 		private int recursivePasses;
 		private int nonConvergentComponents;
+	}
+
+	/**
+	 * Seeds otherwise opaque pass-through/store functions from their callers.
+	 * A PAGE above 0xff is decisive on C166: it is legal for the 10-bit data
+	 * page field, but cannot be the 8-bit segment of a 24-bit code pointer.
+	 * Requiring two separate calls and mapped, canonical PAGE:OFFSET values keeps
+	 * ordinary adjacent scalar arguments out of the type system.
+	 */
+	private CallSiteSeedStats seedConstantDataPointers(Program program,
+			AddressSetView set, boolean fullScan, TaskMonitor monitor, MessageLog log)
+			throws CancelledException {
+		Iterator<Function> scoped = fullScan
+			? program.getFunctionManager().getFunctions(true)
+			: program.getFunctionManager().getFunctionsOverlapping(set);
+		Set<Function> scopedFunctions = new HashSet<>();
+		scoped.forEachRemaining(scopedFunctions::add);
+		Set<Function> callers = new HashSet<>(scopedFunctions);
+		if (!fullScan) {
+			for (Function target : scopedFunctions) {
+				callers.addAll(directCallers(program, target));
+			}
+		}
+
+		BasicBlockModel blocks = new BasicBlockModel(program);
+		Map<Function, Map<Integer, Set<Address>>> occurrences = new HashMap<>();
+		Set<Address> scannedCalls = new HashSet<>();
+		Set<Function> discoveredTargets = new HashSet<>();
+		scanConstantCallers(program, callers, blocks, occurrences, scannedCalls,
+			discoveredTargets, monitor);
+		if (!fullScan) {
+			Set<Function> corroboratingCallers = new HashSet<>();
+			for (Function target : discoveredTargets) {
+				corroboratingCallers.addAll(directCallers(program, target));
+			}
+			scanConstantCallers(program, corroboratingCallers, blocks, occurrences,
+				scannedCalls, discoveredTargets, monitor);
+		}
+
+		int seededFunctions = 0;
+		int seededParameters = 0;
+		int acceptedOccurrences = 0;
+		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
+				occurrences.entrySet()) {
+			monitor.checkCancelled();
+			Function target = targetEntry.getKey();
+			Map<Integer, Integer> scores = new HashMap<>();
+			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
+				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
+					!overlapsExistingPointer(target, pair.getKey())) {
+					scores.put(pair.getKey(), pair.getValue().size());
+				}
+			}
+			List<Integer> candidates = new ArrayList<>(scores.keySet());
+			Collections.sort(candidates);
+			Selection selection = selectPairs(candidates, scores, 0, new HashMap<>());
+			if (selection.ambiguous() || selection.starts().isEmpty()) {
+				continue;
+			}
+
+			Set<Integer> liveSlots = existingParameterSlots(target);
+			Map<Integer, DataType> pointerTypes = new HashMap<>();
+			for (int start : selection.starts()) {
+				for (int slot = 0; slot <= start + 1; slot++) {
+					liveSlots.add(slot);
+				}
+				pointerTypes.put(start, new PointerDataType(VoidDataType.dataType,
+					program.getDataTypeManager()));
+				acceptedOccurrences += targetEntry.getValue().get(start).size();
+			}
+			Set<Integer> supported = retainSupportedPairs(target, selection.starts(), liveSlots);
+			if (supported.isEmpty() || signatureMatches(target, supported, liveSlots,
+				pointerTypes)) {
+				continue;
+			}
+			try {
+				updateSignature(program, target, supported, liveSlots, pointerTypes);
+				seededFunctions++;
+				seededParameters += supported.size();
+			}
+			catch (DuplicateNameException | InvalidInputException e) {
+				log.appendException(e);
+			}
+		}
+		return new CallSiteSeedStats(seededFunctions, seededParameters,
+			acceptedOccurrences);
+	}
+
+	private void scanConstantCallers(Program program, Set<Function> callers,
+			BasicBlockModel blocks, Map<Function, Map<Integer, Set<Address>>> occurrences,
+			Set<Address> scannedCalls, Set<Function> discoveredTargets, TaskMonitor monitor)
+			throws CancelledException {
+		monitor.initialize(Math.max(1, callers.size()),
+			"C166 far-pointer inference: scanning constant call arguments");
+		for (Function caller : orderedFunctions(callers)) {
+			monitor.checkCancelled();
+			InstructionIterator instructions =
+				program.getListing().getInstructions(caller.getBody(), true);
+			while (instructions.hasNext()) {
+				Instruction call = instructions.next();
+				if (!call.getFlowType().isCall() || !scannedCalls.add(call.getAddress())) {
+					continue;
+				}
+				Function target = directTarget(program, call);
+				if (target == null || !mayAnalyze(target)) {
+					continue;
+				}
+				discoveredTargets.add(target);
+				C166TaskingCallArguments.CallWords words =
+					C166TaskingCallArguments.recover(program, caller, call, blocks, monitor);
+				for (Map.Entry<Integer, C166TaskingCallArguments.WordValue> entry :
+						words.words().entrySet()) {
+					int start = entry.getKey();
+					if (!isLegalPairStart(start) ||
+						(start >= 4 && !words.registerBankOccupied())) {
+						continue;
+					}
+					C166TaskingCallArguments.WordValue low = entry.getValue();
+					C166TaskingCallArguments.WordValue high = words.words().get(start + 1);
+					if (!isUnambiguousConstantDataPointer(program, low, high)) {
+						continue;
+					}
+					occurrences.computeIfAbsent(target, ignored -> new HashMap<>())
+						.computeIfAbsent(start, ignored -> new HashSet<>())
+						.add(call.getAddress());
+				}
+			}
+			monitor.incrementProgress(1);
+		}
+	}
+
+	private boolean isUnambiguousConstantDataPointer(Program program,
+			C166TaskingCallArguments.WordValue low,
+			C166TaskingCallArguments.WordValue high) {
+		if (low == null || high == null || low.constant() == null ||
+			high.constant() == null) {
+			return false;
+		}
+		long page = high.constant();
+		long offset = low.constant();
+		if (page <= 0xff || page > 0x3ff || offset > 0x3fff) {
+			return false;
+		}
+		return physicalPointerAddress(program, page, offset) != null;
+	}
+
+	private boolean overlapsExistingPointer(Function function, int candidateStart) {
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (start == null || !isPointerType(parameter.getFormalDataType())) {
+				continue;
+			}
+			int span = Math.max(1, parameter.getVariableStorage().size() / 2);
+			if (candidateStart < start + span && start < candidateStart + 2) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Set<Integer> existingParameterSlots(Function function) {
+		Set<Integer> slots = new HashSet<>();
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (start == null) {
+				continue;
+			}
+			int span = Math.max(1, parameter.getVariableStorage().size() / 2);
+			for (int slot = start; slot < start + span; slot++) {
+				slots.add(slot);
+			}
+		}
+		return slots;
+	}
+
+	private Function directTarget(Program program, Instruction instruction) {
+		for (Address flow : instruction.getFlows()) {
+			Function target = program.getFunctionManager().getFunctionAt(flow);
+			if (target != null) {
+				return target;
+			}
+		}
+		for (Reference reference : instruction.getReferencesFrom()) {
+			if (reference.getReferenceType().isCall()) {
+				Function target = program.getFunctionManager()
+					.getFunctionAt(reference.getToAddress());
+				if (target != null) {
+					return target;
+				}
+			}
+		}
+		return null;
+	}
+
+	private record CallSiteSeedStats(int functions, int parameters, int occurrences) {
 	}
 
 	private record CandidateGraph(Set<Function> functions,
@@ -1082,7 +1289,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			int start = entry.getKey();
 			HighSymbol symbol = entry.getValue();
 			DataType type = symbol.getDataType();
-			if (!isPointerType(type) || type.getLength() != 4 ||
+			if (!isPointerType(type) || isFunctionPointer(type) || type.getLength() != 4 ||
 				!isLegalPairStart(start)) {
 				continue;
 			}
@@ -1129,7 +1336,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		for (Parameter parameter : target.getParameters()) {
 			DataType type = parameter.getFormalDataType();
 			Integer start = parameterStart(parameter.getVariableStorage());
-			if (!isPointerType(type) || type.getLength() != 4 || start == null ||
+			if (!isPointerType(type) || isFunctionPointer(type) || type.getLength() != 4 ||
+				start == null ||
 				start >= 4 || writesArgumentPair(program, function, tail, start)) {
 				continue;
 			}
@@ -1195,7 +1403,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 
 			DataType type = parameter.getFormalDataType();
-			if (!isPointerType(type) || type.getLength() != 4) {
+			if (!isPointerType(type) || isFunctionPointer(type) || type.getLength() != 4) {
 				continue;
 			}
 			if (pieces.size() == 1) {
@@ -1418,7 +1626,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			return null;
 		}
 		DataType type = operation.getOutput().getHigh().getDataType();
-		return isPointerType(type) && type.getLength() == 4 ? type : null;
+		return isPointerType(type) && !isFunctionPointer(type) && type.getLength() == 4
+			? type : null;
 	}
 
 	private boolean isPointerType(DataType type) {
@@ -1433,10 +1642,23 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return current instanceof Pointer pointer ? pointer : null;
 	}
 
+	private boolean isFunctionPointer(DataType type) {
+		Pointer pointer = pointerDataType(type);
+		if (pointer == null) {
+			return false;
+		}
+		DataType target = pointer.getDataType();
+		while (target instanceof TypeDef typeDef) {
+			target = typeDef.getBaseDataType();
+		}
+		return target instanceof FunctionDefinition;
+	}
+
 	private void mergePointerType(Program program, Map<Integer, DataType> pointerTypes,
 			int start, DataType candidate) {
 		Pointer candidatePointer = pointerDataType(candidate);
-		if (candidatePointer == null || candidate.getLength() != 4) {
+		if (candidatePointer == null || isFunctionPointer(candidate) ||
+			candidate.getLength() != 4) {
 			return;
 		}
 		DataType existing = pointerTypes.get(start);
@@ -1684,6 +1906,41 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return pairStarts;
 	}
 
+	/**
+	 * Code-pointer inference runs after data inference during normal analysis, but
+	 * users can rerun either one-shot analyzer independently.  Once a parameter is
+	 * a function pointer, a later far-data pass must not reinterpret or split any
+	 * part of its ABI storage, even if downstream forwarding produces an apparent
+	 * PAGE:OFFSET pair.  The code analyzer has stronger evidence: the constant
+	 * SEGMENT:OFFSET names an exact executable function entry.
+	 */
+	private Set<Integer> removeFunctionPointerConflicts(Function function,
+			Set<Integer> pairStarts) {
+		Set<Integer> retained = new HashSet<>();
+		for (int candidateStart : pairStarts) {
+			boolean overlaps = false;
+			for (Parameter parameter : function.getParameters()) {
+				if (!isFunctionPointer(parameter.getFormalDataType())) {
+					continue;
+				}
+				Integer existingStart = parameterStart(parameter.getVariableStorage());
+				if (existingStart == null) {
+					continue;
+				}
+				int span = Math.max(1, parameter.getVariableStorage().size() / 2);
+				if (candidateStart < existingStart + span &&
+					existingStart < candidateStart + 2) {
+					overlaps = true;
+					break;
+				}
+			}
+			if (!overlaps) {
+				retained.add(candidateStart);
+			}
+		}
+		return Set.copyOf(retained);
+	}
+
 	private void updateSignature(Program program, Function function, Set<Integer> pairStarts,
 			Set<Integer> liveSlots, Map<Integer, DataType> pointerTypes)
 			throws DuplicateNameException, InvalidInputException {
@@ -1778,8 +2035,11 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private boolean existingPointerSatisfies(DataType existing, DataType inferred) {
+		if (isFunctionPointer(existing)) {
+			return true;
+		}
 		Pointer existingPointer = pointerDataType(existing);
-		Pointer inferredPointer = pointerDataType(inferred);
+		Pointer inferredPointer = isFunctionPointer(inferred) ? null : pointerDataType(inferred);
 		if (existingPointer == null || inferredPointer == null) {
 			return inferredPointer == null;
 		}
@@ -1791,14 +2051,18 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	private DataType inferredPointerType(Program program, Parameter existing,
 			DataType inferred) {
-		if (existing != null && isPointerType(existing.getFormalDataType())) {
+		if (existing != null && isFunctionPointer(existing.getFormalDataType())) {
+			return existing.getFormalDataType();
+		}
+		if (existing != null && isPointerType(existing.getFormalDataType()) &&
+			!isFunctionPointer(existing.getFormalDataType())) {
 			Pointer existingPointer = pointerDataType(existing.getFormalDataType());
 			if (!isVoidType(existingPointer.getDataType()) || inferred == null ||
 				isVoidType(pointerDataType(inferred).getDataType())) {
 				return existing.getFormalDataType();
 			}
 		}
-		Pointer inferredPointer = pointerDataType(inferred);
+		Pointer inferredPointer = isFunctionPointer(inferred) ? null : pointerDataType(inferred);
 		DataType pointedTo = inferredPointer == null ? VoidDataType.dataType :
 			inferredPointer.getDataType();
 		return new PointerDataType(pointedTo, program.getDataTypeManager());

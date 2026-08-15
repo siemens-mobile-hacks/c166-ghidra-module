@@ -1,0 +1,648 @@
+// Headless regression test; run via tools/test-tasking-abi.sh.
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
+
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileProcessFactory;
+import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.script.GhidraScript;
+import ghidra.app.util.importer.MessageLog;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.data.CategoryPath;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.FunctionDefinition;
+import ghidra.program.model.data.FunctionDefinitionDataType;
+import ghidra.program.model.data.ParameterDefinitionImpl;
+import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.data.TypedefDataType;
+import ghidra.program.model.data.UnsignedShortDataType;
+import ghidra.program.model.data.VoidDataType;
+import ghidra.program.model.lang.Register;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Function.FunctionUpdateType;
+import ghidra.program.model.listing.Parameter;
+import ghidra.program.model.listing.ParameterImpl;
+import ghidra.program.model.listing.Variable;
+import ghidra.program.model.listing.VariableStorage;
+import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.RefType;
+import ghidra.program.model.symbol.SourceType;
+import ghidrainfineon.C166CodePointerAnalyzer;
+import ghidrainfineon.C166FarPointerAnalyzer;
+
+public class C166CodePointerInferenceTest extends GhidraScript {
+
+	private long nextFixture = 0x180000;
+
+	@Override
+	protected void run() throws Exception {
+		useDevelopmentDecompilerIfRequested();
+		check("tasking-classic-large".equals(
+			currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString()),
+			"wrong compiler spec");
+
+		Function mallocTarget = functionAt(0x253d0e, "code_pointer_malloc_target");
+		Function freeTarget = functionAt(0x253d7c, "code_pointer_free_target");
+		Function overlapFirstTarget = functionAt(0x263d0e, "overlap_first_target");
+		Function overlapSecondTarget = functionAt(0x270026, "overlap_second_target");
+		check(mallocTarget != null && freeTarget != null,
+			"failed to create code-pointer targets");
+
+		Function twoCallbacks = fixture("two_code_pointer_parameters", bytes(0xdb, 0x00));
+		Function twoCallbacksCaller = fixture("two_code_pointer_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			codePointerSetup(14, 15, freeTarget.getEntryPoint()),
+			calls(twoCallbacks), bytes(0xdb, 0x00)));
+		Function twoCallbacksCaller2 = fixture("two_code_pointer_caller_2", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			codePointerSetup(14, 15, freeTarget.getEntryPoint()),
+			calls(twoCallbacks), bytes(0xdb, 0x00)));
+
+		// A real function-pointer typedef must retain SEGMENT:OFFSET semantics.
+		// PAGE:OFFSET would turn 0x25:0x3d0e into the wrong address 0x097d0e.
+		Address wrongPagedAddress = toAddr(0x097d0e);
+		createMemoryBlock("wrong_paged_code_pointer_bytes", wrongPagedAddress,
+			bytes(0x00), false);
+		createLabel(wrongPagedAddress, "wrong_paged_code_pointer_target", true);
+		Function typedCallback = fixture("typed_code_pointer_parameter", bytes(0xdb, 0x00));
+		setUserFunctionPointer(typedCallback, "malloc_cb", "malloc_cb_t");
+		Function typedCallbackCaller = fixture("typed_code_pointer_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			calls(typedCallback), bytes(0xdb, 0x00)));
+
+		// A neighbouring PAGE:OFFSET pair must remain a data pointer even when
+		// another parameter at the same call site is a proven code pointer.
+		Function mixed = fixture("mixed_code_and_data_parameters", pagedRead(15, 14));
+		setAnalysisWords(mixed, "malloc_offset", "malloc_segment", "data_offset", "data_page");
+		Function mixedCaller = fixture("mixed_code_and_data_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			bytes(
+				0xe6, 0xfe, 0x00, 0x10, // R14 = data OFFSET
+				0xe6, 0xff, 0x02, 0x00), // R15 = data PAGE; 0x021000 is not a function
+			calls(mixed), bytes(0xdb, 0x00)));
+
+		// Once all register argument slots are occupied, a pushed low/high pair is
+		// the next four-byte stack parameter.
+		Function stackCallback = fixture("stack_code_pointer_parameter", bytes(0xdb, 0x00));
+		Function stackCaller = fixture("stack_code_pointer_caller", concat(
+			bytes(
+				0xf0, 0xc8, // R12 = unknown R8
+				0xf0, 0xd9, // R13 = unknown R9
+				0xf0, 0xea, // R14 = unknown R10
+				0xf0, 0xfb), // R15 = unknown R11
+			codePointerSetup(6, 7, freeTarget.getEntryPoint()),
+			bytes(0x88, 0x70, 0x88, 0x60), // push SEGMENT high, then OFFSET low
+			calls(stackCallback),
+			bytes(0x06, 0xf0, 0x04, 0x00, 0xdb, 0x00)));
+
+		Function copiedCallback = fixture("copied_code_pointer_parameter", bytes(0xdb, 0x00));
+		Function copiedCallbackCaller = fixture("copied_code_pointer_caller", concat(
+			codePointerSetup(6, 7, mallocTarget.getEntryPoint()),
+			bytes(0xf0, 0xc6, 0xf0, 0xd7), // R13:R12 = R7:R6
+			calls(copiedCallback), bytes(0xdb, 0x00)));
+
+		// Mirrors FUN_242066's two callback pairs on the stack: arguments are
+		// pushed right-to-left, with each pair itself pushed high then low.
+		Function twoStackCallbacks = fixture("two_stack_code_pointer_parameters",
+			bytes(0xdb, 0x00));
+		Function twoStackCallbacksCaller = fixture("two_stack_code_pointer_caller", concat(
+			codePointerSetup(8, 9, freeTarget.getEntryPoint()),
+			bytes(0x88, 0x90, 0x88, 0x80),
+			codePointerSetup(6, 7, mallocTarget.getEntryPoint()),
+			bytes(0x88, 0x70, 0x88, 0x60),
+			bytes(0xf0, 0xc1, 0xf0, 0xd2, 0xf0, 0xe3, 0xf0, 0xf4),
+			calls(twoStackCallbacks),
+			bytes(0x06, 0xf0, 0x08, 0x00, 0xdb, 0x00)));
+
+		// R13:R12 and R14:R13 can both name valid functions.  Equal overlapping
+		// evidence has no unique ABI layout and must therefore remain untouched.
+		Function ambiguousOverlap = fixture("ambiguous_code_pointer_overlap",
+			bytes(0xdb, 0x00));
+		Function ambiguousOverlapCaller = fixture("ambiguous_code_pointer_overlap_caller",
+			concat(
+				bytes(
+					0xe6, 0xfc, 0x0e, 0x3d,
+					0xe6, 0xfd, 0x26, 0x00,
+					0xe6, 0xfe, 0x27, 0x00),
+				calls(ambiguousOverlap), bytes(0xdb, 0x00)));
+
+		// Executable bytes which are not a function entry are not code-pointer
+		// evidence.
+		Function nonEntry = fixture("non_entry_code_constant", bytes(0xdb, 0x00));
+		Function nonEntryCaller = fixture("non_entry_code_constant_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint().add(1)),
+			calls(nonEntry), bytes(0xdb, 0x00)));
+
+		Function userDefined = fixture("user_defined_code_words", bytes(0xdb, 0x00));
+		setUserWords(userDefined, "offset", "segment");
+		Function userDefinedCaller = fixture("user_defined_code_words_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			calls(userDefined), bytes(0xdb, 0x00)));
+
+		// Proven or pre-existing data-pointer semantics take precedence even if a
+		// particular constant also names executable code under SEGMENT:OFFSET.
+		Function existingDataPointer = fixture("existing_data_pointer", bytes(0xdb, 0x00));
+		setAnalysisPointer(existingDataPointer, "data_pointer");
+		Function existingDataPointerCaller = fixture("existing_data_pointer_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			calls(existingDataPointer), bytes(0xdb, 0x00)));
+
+		// Once code inference establishes a function pointer, a later far-data pass
+		// must not reinterpret that type merely because the raw body also resembles
+		// a paged access.  True data semantics are analyzed first by analyzer
+		// priority, before code inference has a chance to type the pair.
+		Function dataWins = fixture("paged_use_overrides_code_constant", pagedRead(13, 12));
+		Function dataWinsCaller = fixture("paged_use_overrides_code_constant_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			calls(dataWins), bytes(0xdb, 0x00)));
+
+		// A far indirect dispatcher consumes only R5:R4 as the target.  Values in
+		// R12-R15 are ordinary arguments of the runtime target and cannot type the
+		// dispatcher's own prototype, even if they happen to name code.
+		Function dispatcher = fixture("far_indirect_dispatcher_shape",
+			bytes(0xec, 0xf5, 0xec, 0xf4, 0xdb, 0x00));
+		Function dispatcherCaller = fixture("far_indirect_dispatcher_caller", concat(
+			codePointerSetup(4, 5, freeTarget.getEntryPoint()),
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			calls(dispatcher), bytes(0xdb, 0x00)));
+		Function indirectTarget = fixture("parameter_used_as_far_indirect_target", concat(
+			bytes(0xf0, 0x4c, 0xf0, 0x5d), // R5:R4 = R13:R12
+			calls(dispatcher), bytes(0xdb, 0x00)));
+		Function middleIndirectTarget = fixture("middle_parameter_used_as_far_indirect_target",
+			concat(
+				bytes(0xf0, 0x4d, 0xf0, 0x5e), // R5:R4 = R14:R13
+				calls(dispatcher), bytes(0xdb, 0x00)));
+		Function lateIndirectTarget = fixture("late_parameter_used_as_far_indirect_target",
+			concat(
+				bytes(0xf0, 0x4e, 0xf0, 0x5f), // R5:R4 = R15:R14
+				calls(dispatcher), bytes(0xdb, 0x00)));
+		Function reversedIndirectTarget = fixture("reversed_words_are_not_indirect_target",
+			concat(
+				bytes(0xf0, 0x4d, 0xf0, 0x5c), // reversed R12:R13
+				calls(dispatcher), bytes(0xdb, 0x00)));
+		Function savedIndirectTarget = fixture("saved_parameter_used_as_far_indirect_target",
+			concat(
+				bytes(
+					0x88, 0xc0,                         // push R12
+					0x88, 0xd0,                         // push R13
+					0xd4, 0x50, 0x00, 0x00,             // R5 = [SP]
+					0xd4, 0x40, 0x02, 0x00),            // R4 = [SP+2]
+				calls(dispatcher),
+				bytes(0x06, 0xf0, 0x04, 0x00, 0xdb, 0x00)));
+
+		// An incoming branch makes the call a new basic block.  Constants from the
+		// fall-through predecessor are not valid on every path and must not count.
+		Function branchMerge = fixture("branch_merge_is_not_constant", bytes(0xdb, 0x00));
+		Function branchMergeCaller = fixture("branch_merge_is_not_constant_caller", concat(
+			bytes(0x2d, 0x05), // jmpr cc_EQ to the call, bypassing the setup
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			bytes(0xcc, 0x00),
+			calls(branchMerge), bytes(0xdb, 0x00)));
+
+		// Old pushes separated from the call by an explicit stack reset are not
+		// current stack arguments.
+		Function stalePush = fixture("stale_push_is_not_argument", bytes(0xdb, 0x00));
+		setAnalysisWords(stalePush, "word0", "word1", "word2", "word3");
+		Function stalePushCaller = fixture("stale_push_is_not_argument_caller", concat(
+			codePointerSetup(6, 7, mallocTarget.getEntryPoint()),
+			bytes(0x88, 0x70, 0x88, 0x60, 0x06, 0xf0, 0x04, 0x00),
+			bytes(0xf0, 0xc8, 0xf0, 0xd9, 0xf0, 0xea, 0xf0, 0xfb),
+			calls(stalePush), bytes(0xdb, 0x00)));
+
+		C166CodePointerAnalyzer analyzer = new C166CodePointerAnalyzer();
+		check(analyzer.added(currentProgram, twoCallbacksCaller.getBody(), monitor,
+			new MessageLog()), "incremental code-pointer analysis failed");
+		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
+		check(mixed.getParameterCount() == 4,
+			"incremental scan touched an unrelated target");
+		check(analyzer.added(currentProgram, dataWinsCaller.getBody(), monitor,
+			new MessageLog()), "code-first conflict setup failed");
+		checkCodeSignature(dataWins, "r13+r12");
+
+		AddressSet pagedBodies = new AddressSet(mixed.getBody());
+		pagedBodies.add(dataWins.getBody());
+		check(new C166FarPointerAnalyzer().added(currentProgram, pagedBodies, monitor,
+			new MessageLog()), "semantic far-data analysis failed");
+		checkCodeSignature(dataWins, "r13+r12");
+
+		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "full code-pointer One Shot failed");
+		// A later full far-data One Shot must not use the recovered callback type
+		// itself as data evidence.  This is the real GUI ordering which previously
+		// changed FUN_9b0678(fpointer, ...) back to void *.
+		check(new C166FarPointerAnalyzer().added(currentProgram,
+			currentProgram.getMemory(), monitor, new MessageLog()),
+			"far-data analysis after code-pointer inference failed");
+		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
+		checkMixedSignature(mixed);
+		checkCodeSignature(dataWins, "r13+r12");
+		checkCodeSignature(stackCallback, "r12", "r13", "r14", "r15", "Stack[0x0]:4");
+		checkCodeSignature(copiedCallback, "r13+r12");
+		checkCodeSignature(twoStackCallbacks, "r12", "r13", "r14", "r15",
+			"Stack[0x0]:4", "Stack[0x4]:4");
+		check(ambiguousOverlap.getParameterCount() == 0,
+			"equal overlapping code-pointer evidence was accepted");
+		check(nonEntry.getParameterCount() == 0,
+			"non-entry executable address was inferred as a code pointer");
+		checkWordSignature(userDefined, SourceType.USER_DEFINED, "r12", "r13");
+		check(existingDataPointer.getParameterCount() == 1 &&
+			existingDataPointer.getParameter(0).getFormalDataType() instanceof Pointer &&
+			!isFunctionPointer(existingDataPointer.getParameter(0).getFormalDataType()),
+			"existing data pointer was replaced by a function pointer");
+		check(dispatcher.getParameterCount() == 0,
+			"far indirect dispatcher's ordinary arguments were typed as callbacks");
+		checkCodeSignature(indirectTarget, "r13+r12");
+		checkCodeSignature(middleIndirectTarget, "r12", "r14+r13");
+		checkCodeSignature(lateIndirectTarget, "r12", "r13", "r15+r14");
+		checkCodeSignature(savedIndirectTarget, "r13+r12");
+		check(reversedIndirectTarget.getParameterCount() == 0,
+			"reversed far-indirect target words were accepted");
+		check(branchMerge.getParameterCount() == 0,
+			"path-dependent constants crossed a basic-block boundary");
+		checkWordSignature(stalePush, SourceType.ANALYSIS, "r12", "r13", "r14", "r15");
+		checkParamReference(twoCallbacksCaller.getEntryPoint().add(4),
+			mallocTarget.getEntryPoint(), true);
+		checkParamReference(twoCallbacksCaller.getEntryPoint().add(12),
+			freeTarget.getEntryPoint(), true);
+		checkParamReference(dataWinsCaller.getEntryPoint().add(4),
+			mallocTarget.getEntryPoint(), true);
+		checkParamReference(dispatcherCaller.getEntryPoint().add(12),
+			mallocTarget.getEntryPoint(), false);
+		checkParamReference(branchMergeCaller.getEntryPoint().add(6),
+			mallocTarget.getEntryPoint(), false);
+		checkTypedSignature(typedCallback, "malloc_cb_t");
+		checkTypedCodePointer(typedCallbackCaller, mallocTarget, wrongPagedAddress);
+		checkDecompilerConstants(twoCallbacksCaller, mallocTarget, freeTarget);
+
+		// Migrate the raw generic Function Definition pointer emitted by the first
+		// analyzer revision to the public pointer typedef without changing concrete
+		// user callback typedefs.
+		setLegacyGenericFunctionPointers(twoCallbacks, "callback0", "callback1");
+		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "legacy generic function-pointer migration failed");
+		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
+
+		// Migration from the old Far Pointer Inference bug.  Simulate the observed
+		// database where both the callback type and old PARAM references are gone.
+		// Repeated exact-function evidence may repair a generic ANALYSIS void *, but
+		// the single-call existingDataPointer control above must remain data.
+		setAnalysisPointer(twoCallbacks, "callback0", "callback1");
+		removeParamReference(twoCallbacksCaller.getEntryPoint().add(4),
+			mallocTarget.getEntryPoint());
+		removeParamReference(twoCallbacksCaller.getEntryPoint().add(12),
+			freeTarget.getEntryPoint());
+		removeParamReference(twoCallbacksCaller2.getEntryPoint().add(4),
+			mallocTarget.getEntryPoint());
+		removeParamReference(twoCallbacksCaller2.getEntryPoint().add(12),
+			freeTarget.getEntryPoint());
+		currentProgram.getReferenceManager().addMemoryReference(
+			twoCallbacksCaller.getEntryPoint().add(4), wrongPagedAddress, RefType.PARAM,
+			SourceType.ANALYSIS, Reference.MNEMONIC);
+		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "legacy data-pointer corruption repair failed");
+		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
+		checkParamReference(twoCallbacksCaller.getEntryPoint().add(4),
+			wrongPagedAddress, false);
+
+		String snapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
+			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
+			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
+			reversedIndirectTarget, savedIndirectTarget, branchMerge, stalePush);
+		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "second code-pointer analysis failed");
+		check(snapshot.equals(snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
+			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
+			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
+			reversedIndirectTarget, savedIndirectTarget, branchMerge, stalePush)),
+			"code-pointer inference is not idempotent");
+
+		// Keep references live so fixture creation cannot be optimized away by a
+		// future test refactor.
+		check(twoCallbacksCaller != null && twoCallbacksCaller2 != null &&
+			typedCallbackCaller != null && mixedCaller != null &&
+			copiedCallbackCaller != null && twoStackCallbacksCaller != null &&
+			ambiguousOverlapCaller != null && nonEntryCaller != null && userDefinedCaller != null &&
+			existingDataPointerCaller != null && dataWinsCaller != null &&
+			dispatcherCaller != null && branchMergeCaller != null && stalePushCaller != null,
+			"missing caller fixture");
+		println("TASKING code-pointer inference matrix passed.");
+	}
+
+	private void useDevelopmentDecompilerIfRequested() throws Exception {
+		String path = System.getenv("C166_TEST_DECOMPILER");
+		if (path == null || path.isBlank()) {
+			return;
+		}
+		Field executablePath = DecompileProcessFactory.class.getDeclaredField("exepath");
+		executablePath.setAccessible(true);
+		executablePath.set(null, path);
+		println("Using development decompiler: " + executablePath.get(null));
+	}
+
+	private Function functionAt(long address, String name) throws Exception {
+		Address entry = toAddr(address);
+		MemoryBlock block = createMemoryBlock(name + "_bytes", entry, bytes(0xdb, 0x00), false);
+		block.setExecute(true);
+		check(disassemble(entry), "failed to disassemble " + name);
+		return createFunction(entry, name);
+	}
+
+	private Function fixture(String name, byte[] code) throws Exception {
+		Address entry = toAddr(nextFixture);
+		nextFixture += 0x100;
+		MemoryBlock block = createMemoryBlock(name + "_bytes", entry, code, false);
+		block.setExecute(true);
+		check(disassemble(entry), "failed to disassemble " + name);
+		Function function = createFunction(entry, name);
+		check(function != null, "failed to create " + name);
+		return function;
+	}
+
+	private byte[] codePointerSetup(int lowRegister, int highRegister, Address target) {
+		long address = target.getUnsignedOffset();
+		return bytes(
+			0xe6, 0xf0 | lowRegister, (int) address, (int) (address >> 8),
+			0xe6, 0xf0 | highRegister, (int) (address >> 16), 0x00);
+	}
+
+	private byte[] calls(Function target) {
+		long address = target.getEntryPoint().getUnsignedOffset();
+		return bytes(0xda, (int) (address >> 16), (int) address, (int) (address >> 8));
+	}
+
+	private byte[] pagedRead(int highRegister, int lowRegister) {
+		return bytes(0xdc, 0x40 | highRegister, 0xa8, 0x40 | lowRegister, 0xdb, 0x00);
+	}
+
+	private byte[] concat(byte[]... parts) {
+		int length = 0;
+		for (byte[] part : parts) {
+			length += part.length;
+		}
+		byte[] result = new byte[length];
+		int offset = 0;
+		for (byte[] part : parts) {
+			System.arraycopy(part, 0, result, offset, part.length);
+			offset += part.length;
+		}
+		return result;
+	}
+
+	private byte[] bytes(int... values) {
+		byte[] result = new byte[values.length];
+		for (int i = 0; i < values.length; i++) {
+			result[i] = (byte) values[i];
+		}
+		return result;
+	}
+
+	private void setAnalysisWords(Function function, String... names) throws Exception {
+		setWords(function, SourceType.ANALYSIS, names);
+	}
+
+	private void setUserWords(Function function, String... names) throws Exception {
+		setWords(function, SourceType.USER_DEFINED, names);
+	}
+
+	private void setAnalysisPointer(Function function, String... names) throws Exception {
+		List<Variable> pointers = new ArrayList<>();
+		for (String name : names) {
+			pointers.add(new ParameterImpl(name,
+				new PointerDataType(VoidDataType.dataType,
+					currentProgram.getDataTypeManager()), currentProgram));
+		}
+		function.updateFunction("__tasking_c166_classic", null, pointers,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setUserFunctionPointer(Function function, String parameterName,
+			String typedefName) throws Exception {
+		FunctionDefinitionDataType prototype = new FunctionDefinitionDataType(
+			typedefName + "_function", currentProgram.getDataTypeManager());
+		prototype.setReturnType(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()));
+		prototype.setArguments(new ParameterDefinitionImpl("size",
+			new UnsignedShortDataType(currentProgram.getDataTypeManager()), null));
+		PointerDataType pointer = new PointerDataType(prototype,
+			currentProgram.getDataTypeManager());
+		TypedefDataType typedef = new TypedefDataType(CategoryPath.ROOT, typedefName, pointer,
+			currentProgram.getDataTypeManager());
+		Variable parameter = new ParameterImpl(parameterName, typedef, currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(parameter),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+	}
+
+	private void setLegacyGenericFunctionPointers(Function function, String... names)
+			throws Exception {
+		FunctionDefinitionDataType prototype = new FunctionDefinitionDataType(
+			"__c166_far_function", currentProgram.getDataTypeManager());
+		prototype.setVarArgs(true);
+		DataType pointer = new PointerDataType(prototype,
+			currentProgram.getDataTypeManager());
+		List<Variable> parameters = new ArrayList<>();
+		for (String name : names) {
+			parameters.add(new ParameterImpl(name, pointer, currentProgram));
+		}
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setWords(Function function, SourceType source, String... names) throws Exception {
+		List<Variable> parameters = new ArrayList<>();
+		for (String name : names) {
+			parameters.add(new ParameterImpl(name,
+				new UnsignedShortDataType(currentProgram.getDataTypeManager()), currentProgram));
+		}
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, source);
+	}
+
+	private void checkCodeSignature(Function function, String... expectedStorage) {
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == expectedStorage.length,
+			function.getName() + ": expected " + expectedStorage.length +
+				" parameters, got " + parameters.length);
+		for (int i = 0; i < parameters.length; i++) {
+			check(expectedStorage[i].equals(describe(parameters[i].getVariableStorage())),
+				function.getName() + "[" + i + "]: unexpected storage " +
+					describe(parameters[i].getVariableStorage()));
+			if (parameters[i].getVariableStorage().size() == 4) {
+				check(parameters[i].getFormalDataType().getLength() == 4 &&
+					isFunctionPointer(parameters[i].getFormalDataType()),
+					function.getName() + "[" + i + "]: expected function pointer, got " +
+						parameters[i].getFormalDataType().getDisplayName());
+				check(parameters[i].getFormalDataType() instanceof TypeDef typeDef &&
+					"fpointer".equals(typeDef.getName()),
+					function.getName() + "[" + i + "]: expected fpointer, got " +
+						parameters[i].getFormalDataType().getDisplayName());
+			}
+		}
+	}
+
+	private void checkMixedSignature(Function function) {
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == 2, "mixed signature parameter count is " + parameters.length);
+		check("r13+r12".equals(describe(parameters[0].getVariableStorage())),
+			"mixed code pointer was not joined");
+		check(parameters[0].getFormalDataType().getLength() == 4 &&
+			isFunctionPointer(parameters[0].getFormalDataType()),
+			"mixed code argument is not a function pointer");
+		check("r15+r14".equals(describe(parameters[1].getVariableStorage())) &&
+			parameters[1].getFormalDataType() instanceof Pointer &&
+			!isFunctionPointer(parameters[1].getFormalDataType()),
+			"mixed PAGE:OFFSET data pointer was not preserved");
+		check("data_offset".equals(parameters[1].getName()),
+			"mixed data-pointer parameter name was lost");
+	}
+
+	private void checkDataPointer(Function function, String expectedStorage) {
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == 1 &&
+			expectedStorage.equals(describe(parameters[0].getVariableStorage())) &&
+			parameters[0].getFormalDataType() instanceof Pointer &&
+			!isFunctionPointer(parameters[0].getFormalDataType()),
+			function.getName() + ": semantic PAGE:OFFSET evidence did not win");
+	}
+
+	private boolean isFunctionPointer(DataType type) {
+		DataType current = type;
+		while (current instanceof TypeDef typeDef) {
+			current = typeDef.getBaseDataType();
+		}
+		if (!(current instanceof Pointer pointer)) {
+			return false;
+		}
+		current = pointer.getDataType();
+		while (current instanceof TypeDef typeDef) {
+			current = typeDef.getBaseDataType();
+		}
+		return current instanceof FunctionDefinition;
+	}
+
+	private void checkTypedSignature(Function function, String typedefName) {
+		check(function.getSignatureSource() == SourceType.USER_DEFINED,
+			function.getName() + ": user-defined signature source changed");
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == 1 &&
+			parameters[0].getFormalDataType() instanceof TypeDef typeDef &&
+			typedefName.equals(typeDef.getName()) &&
+			isFunctionPointer(typeDef),
+			function.getName() + ": callback typedef was not preserved");
+	}
+
+	private void checkDecompilerConstants(Function caller, Function first, Function second) {
+		DecompInterface decompiler = new DecompInterface();
+		decompiler.toggleCCode(true);
+		decompiler.toggleSyntaxTree(true);
+		check(decompiler.openProgram(currentProgram), "failed to initialize decompiler");
+		try {
+			DecompileResults result = decompiler.decompileFunction(caller, 30, monitor);
+			check(result.decompileCompleted(), "code-pointer caller did not decompile");
+			String code = result.getDecompiledFunction().getC();
+			String firstAddress = "0x" + Long.toHexString(first.getEntryPoint().getUnsignedOffset());
+			String secondAddress = "0x" + Long.toHexString(second.getEntryPoint().getUnsignedOffset());
+			check((code.contains(first.getName()) || code.contains(firstAddress)) &&
+				(code.contains(second.getName()) || code.contains(secondAddress)),
+				"decompiler did not preserve SEGMENT:OFFSET code constants:\n" + code);
+		}
+		finally {
+			decompiler.dispose();
+		}
+	}
+
+	private void checkTypedCodePointer(Function caller, Function target, Address wrongPagedAddress) {
+		DecompInterface decompiler = new DecompInterface();
+		decompiler.toggleCCode(true);
+		decompiler.toggleSyntaxTree(true);
+		check(decompiler.openProgram(currentProgram), "failed to initialize decompiler");
+		try {
+			DecompileResults result = decompiler.decompileFunction(caller, 30, monitor);
+			check(result.decompileCompleted(), "typed code-pointer caller did not decompile: " +
+				result.getErrorMessage());
+			String code = result.getDecompiledFunction().getC();
+			check(code.contains(target.getName()),
+				"function-pointer typedef did not resolve the SEGMENT:OFFSET target:\n" + code);
+			check(!code.contains(wrongPagedAddress.toString()) &&
+				!code.contains("wrong_paged_code_pointer_target"),
+				"function pointer was resolved with PAGE:OFFSET semantics:\n" + code);
+		}
+		finally {
+			decompiler.dispose();
+		}
+	}
+
+	private void checkParamReference(Address source, Address target, boolean expected) {
+		Reference reference = currentProgram.getReferenceManager().getReference(source, target,
+			Reference.MNEMONIC);
+		boolean present = reference != null && reference.getReferenceType() == RefType.PARAM;
+		check(present == expected, "unexpected code-pointer PARAM reference " + source + " -> " +
+			target + ": " + reference);
+	}
+
+	private void removeParamReference(Address source, Address target) {
+		Reference reference = currentProgram.getReferenceManager().getReference(source, target,
+			Reference.MNEMONIC);
+		if (reference != null && reference.getSource() == SourceType.ANALYSIS &&
+			reference.getReferenceType() == RefType.PARAM) {
+			currentProgram.getReferenceManager().delete(reference);
+		}
+	}
+
+	private void checkWordSignature(Function function, SourceType source,
+			String... expectedStorage) {
+		check(function.getSignatureSource() == source,
+			function.getName() + ": signature source changed");
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == expectedStorage.length,
+			function.getName() + ": parameter count changed");
+		for (int i = 0; i < parameters.length; i++) {
+			check(expectedStorage[i].equals(describe(parameters[i].getVariableStorage())),
+				function.getName() + "[" + i + "]: storage changed");
+			check(parameters[i].getVariableStorage().size() == 2,
+				function.getName() + "[" + i + "]: preserved words were joined");
+		}
+	}
+
+	private String snapshot(Function... functions) {
+		StringBuilder result = new StringBuilder();
+		for (Function function : functions) {
+			result.append(function.getEntryPoint()).append(':')
+				.append(function.getPrototypeString(true, true)).append(';');
+			for (Parameter parameter : function.getParameters()) {
+				result.append(parameter.getFormalDataType().getPathName()).append('@')
+					.append(describe(parameter.getVariableStorage())).append('|');
+			}
+		}
+		return result.toString();
+	}
+
+	private String describe(VariableStorage storage) {
+		List<Register> registers = storage.getRegisters();
+		if (registers != null && !registers.isEmpty()) {
+			StringBuilder result = new StringBuilder();
+			for (Register register : registers) {
+				if (result.length() != 0) {
+					result.append('+');
+				}
+				result.append(register.getName().toLowerCase());
+			}
+			return result.toString();
+		}
+		if (storage.isStackStorage()) {
+			return "Stack[0x" + Long.toHexString(storage.getStackOffset()) + "]:" +
+				storage.size();
+		}
+		return storage.toString();
+	}
+
+	private void check(boolean condition, String message) {
+		if (!condition) {
+			throw new AssertionError(message);
+		}
+	}
+}

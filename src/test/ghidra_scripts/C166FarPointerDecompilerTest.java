@@ -1,4 +1,5 @@
 // Run against the patched Ghidra via tools/test-patched-decompiler.sh.
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -6,6 +7,7 @@ import ghidra.app.decompiler.ClangNode;
 import ghidra.app.decompiler.ClangVariableToken;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.decompiler.DecompileProcessFactory;
 import ghidra.app.plugin.core.analysis.OperandReferenceAnalyzer;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.util.importer.MessageLog;
@@ -58,6 +60,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 
 	@Override
 	protected void run() throws Exception {
+		useDevelopmentDecompilerIfRequested();
 		check("tasking-classic-large".equals(
 			currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString()),
 			"wrong compiler spec");
@@ -678,6 +681,17 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			"snprintf fixed-stack spill, unsafe-override recovery, and split pointer " +
 			"parameter recovery, clickable undefined target, return value, and a " +
 			"non-pointer control.");
+	}
+
+	private void useDevelopmentDecompilerIfRequested() throws Exception {
+		String path = System.getenv("C166_TEST_DECOMPILER");
+		if (path == null || path.isBlank()) {
+			return;
+		}
+		Field executablePath = DecompileProcessFactory.class.getDeclaredField("exepath");
+		executablePath.setAccessible(true);
+		executablePath.set(null, path);
+		println("Using development decompiler: " + executablePath.get(null));
 	}
 
 	private FunctionDefinition prototypeOverride(Function caller, Address callSite) {

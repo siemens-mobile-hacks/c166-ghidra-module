@@ -74,6 +74,7 @@ GhidraInfineon/
 ├── src/main/java/ghidrainfineon/
 │   ├── C166AddressAnalyzer.java   # DPP-aware address resolution analyzer
 │   ├── C166CallTargetAnalyzer.java # Incrementally extends the static call graph
+│   ├── C166CodePointerAnalyzer.java # Infers SEGMENT:OFFSET code-pointer arguments
 │   ├── C166FarPointerAnalyzer.java # Infers PAGE:OFFSET parameters from data flow
 │   ├── C166VariadicCallAnalyzer.java # Repairs typed variadic call sites
 │   ├── PcodeInject.java           # PCode injection library registration
@@ -415,6 +416,16 @@ Output: `dist/ghidra_<version>_PUBLIC_<date>_GhidraInfineon.zip`
 3. Run `gradlew buildExtension`
 4. Reinstall extension in Ghidra
 5. Reopen target binary (or clear analysis and re-analyze)
+
+### Headless Verification for Complex Problems
+
+Complex analysis and decompiler problems **must be reproduced and verified with
+a Ghidra headless run** against a representative real program.  Synthetic unit
+tests are still required for regressions, but they are not sufficient on their
+own: analyzer ordering, persisted program state, signature sources, references,
+and decompiler behavior can differ in a real Ghidra database.  Capture the
+headless command and inspect the resulting signatures/decompilation before
+considering the fix complete.
 
 ### Testing PCode Injection
 

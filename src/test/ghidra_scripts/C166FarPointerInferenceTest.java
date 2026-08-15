@@ -17,6 +17,8 @@ import ghidra.program.model.data.CharDataType;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeConflictHandler;
+import ghidra.program.model.data.FunctionDefinition;
+import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.UnsignedShortDataType;
@@ -215,6 +217,47 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			0xdc, 0x4e, 0xa8, 0x5d, // *(R14:R13)
 			0x00, 0x45, 0xdb, 0x00));
 
+		// Some library wrappers only copy or store the two argument words, so
+		// their body contains no SEGMENTOP.  Two independent callers nevertheless
+		// provide decisive data evidence when PAGE is wider than a code SEGMENT
+		// and both canonical PAGE:OFFSET values resolve to mapped memory.  This is
+		// the FUN_242066 -> FUN_29ffde/FUN_9bc5a8 shape.
+		createMemoryBlock("constant_callsite_data", toAddr(0x563100),
+			new byte[0x100], false);
+		Function constantSeedStore = fixture("constant_callsite_pair_store",
+			bytes(0xdb, 0x00));
+		fixture("constant_callsite_caller_a",
+			constantPairCall(constantSeedStore, 0x31be, 0x158));
+		fixture("constant_callsite_caller_b",
+			constantPairCall(constantSeedStore, 0x316a, 0x158));
+		Function objectAndConstantSeed = fixture("object_and_constant_callsite_pair",
+			bytes(0xdb, 0x00));
+		setAnalysisObjectAndWords(objectAndConstantSeed);
+		fixture("object_and_constant_caller_a",
+			constantPairCallAtSlot2(objectAndConstantSeed, 0x31be, 0x158));
+		fixture("object_and_constant_caller_b",
+			constantPairCallAtSlot2(objectAndConstantSeed, 0x313e, 0x158));
+
+		// One occurrence is insufficient even if it maps, a PAGE that also fits
+		// the 8-bit code SEGMENT remains ambiguous, and an unmapped PAGE:OFFSET is
+		// not evidence at all.
+		Function singleConstantStore = fixture("single_constant_pair_store",
+			bytes(0xdb, 0x00));
+		fixture("single_constant_pair_caller",
+			constantPairCall(singleConstantStore, 0x313e, 0x158));
+		Function codeSizedPageStore = fixture("code_sized_page_pair_store",
+			bytes(0xdb, 0x00));
+		fixture("code_sized_page_caller_a",
+			constantPairCall(codeSizedPageStore, 0x3d0e, 0x25));
+		fixture("code_sized_page_caller_b",
+			constantPairCall(codeSizedPageStore, 0x3d0e, 0x25));
+		Function unmappedConstantStore = fixture("unmapped_constant_pair_store",
+			bytes(0xdb, 0x00));
+		fixture("unmapped_constant_pair_caller_a",
+			constantPairCall(unmappedConstantStore, 0x31be, 0x159));
+		fixture("unmapped_constant_pair_caller_b",
+			constantPairCall(unmappedConstantStore, 0x316a, 0x159));
+
 		// Negative controls: none proves adjacent PAGE:OFFSET provenance.
 		Function wrongOffset = fixture("wrong_offset_register", pagedRead(14, 12));
 		Function sameWord = fixture("same_page_and_offset", pagedRead(13, 13));
@@ -242,6 +285,15 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		setAnalysisPointer(alreadyTyped, "buffer");
 		Function analysisDword = fixture("analysis_dword_preserved", pagedRead(13, 12));
 		setAnalysisDword(analysisDword, "candidate");
+		// A manually rerun far-data pass must never demote a code pointer inferred
+		// by the later-priority code analyzer.  Real M55 wrappers can produce
+		// apparent paged evidence while forwarding allocator callbacks.
+		Function codePointerWithPagedEvidence = fixture(
+			"code_pointer_survives_paged_evidence", pagedRead(13, 12));
+		setAnalysisFunctionPointer(codePointerWithPagedEvidence, "callback");
+		Function overlappingCodePointer = fixture(
+			"code_pointer_survives_overlapping_paged_evidence", pagedRead(14, 13));
+		setAnalysisFunctionPointerAndWord(overlappingCodePointer, "callback", "word2");
 
 		// USER_DEFINED signatures are authoritative and must never be rewritten.
 		Function userDefined = fixture("user_defined_signature", pagedRead(13, 12));
@@ -312,6 +364,12 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkSignature(strongerPair, Set.of(0), "r13+r12", "r14");
 
 		checkNoParameters(ambiguous);
+		checkSignature(constantSeedStore, Set.of(0), "r13+r12");
+		checkSignature(objectAndConstantSeed, Set.of(0, 1),
+			"r13+r12", "r15+r14");
+		checkNoParameters(singleConstantStore);
+		checkNoParameters(codeSizedPageStore);
+		checkNoParameters(unmappedConstantStore);
 		checkNoParameters(wrongOffset);
 		checkNoParameters(sameWord);
 		checkNoParameters(constantPage);
@@ -332,6 +390,11 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkSignature(analysisDword, Set.of(), "r13+r12");
 		check("candidate".equals(analysisDword.getParameter(0).getName()),
 			"preserved ANALYSIS dword name was lost");
+		checkFunctionPointer(codePointerWithPagedEvidence, 0,
+			"direct paged evidence demoted an existing function pointer");
+		checkFunctionPointer(overlappingCodePointer, 0,
+			"overlapping paged evidence split an existing function pointer");
+		checkSignature(overlappingCodePointer, Set.of(0), "r13+r12", "r14");
 		checkWordSignature(userDefined, SourceType.USER_DEFINED, "r12", "r13");
 		checkNoParameters(otherConvention);
 
@@ -386,6 +449,22 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		return bytes(0xda, (int) (address >> 16), (int) address, (int) (address >> 8));
 	}
 
+	private byte[] constantPairCall(Function target, int offset, int page) {
+		return concat(bytes(
+			0xe6, 0xfc, offset, offset >> 8, // mov R12,#OFFSET
+			0xe6, 0xfd, page, page >> 8),    // mov R13,#PAGE
+			calls(target));
+	}
+
+	private byte[] constantPairCallAtSlot2(Function target, int offset, int page) {
+		return concat(bytes(
+			0xe6, 0xfc, 0x00, 0x00,       // object OFFSET in R12
+			0xe6, 0xfd, 0x00, 0x00,       // object PAGE in R13
+			0xe6, 0xfe, offset, offset >> 8,
+			0xe6, 0xff, page, page >> 8),
+			calls(target));
+	}
+
 	private Address nextFixtureAddress(int delta) {
 		return toAddr(FIXTURE_BASE + (long) (nextFixture + delta) * FIXTURE_STRIDE);
 	}
@@ -435,11 +514,54 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 
+	private void setAnalysisObjectAndWords(Function function) throws Exception {
+		List<Variable> parameters = List.of(
+			new ParameterImpl("object",
+				new PointerDataType(VoidDataType.dataType,
+					currentProgram.getDataTypeManager()), currentProgram),
+			new ParameterImpl("offset", wordType(), currentProgram),
+			new ParameterImpl("page", wordType(), currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
 	private void setAnalysisDword(Function function, String name) throws Exception {
 		Variable value = new ParameterImpl(name,
 			new UnsignedLongDataType(currentProgram.getDataTypeManager()), currentProgram);
 		function.updateFunction("__tasking_c166_classic", null, List.of(value),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private DataType functionPointerType() {
+		FunctionDefinitionDataType definition = new FunctionDefinitionDataType(
+			new CategoryPath("/test"), "generic_far_callback",
+			currentProgram.getDataTypeManager());
+		DataType resolved = currentProgram.getDataTypeManager().addDataType(definition,
+			DataTypeConflictHandler.KEEP_HANDLER);
+		return new PointerDataType(resolved, currentProgram.getDataTypeManager());
+	}
+
+	private void setAnalysisFunctionPointer(Function function, String name) throws Exception {
+		Variable pointer = new ParameterImpl(name, functionPointerType(), currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisFunctionPointerAndWord(Function function, String pointerName,
+			String wordName) throws Exception {
+		List<Variable> parameters = List.of(
+			new ParameterImpl(pointerName, functionPointerType(), currentProgram),
+			new ParameterImpl(wordName, wordType(), currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void checkFunctionPointer(Function function, int parameterIndex,
+			String message) {
+		DataType type = function.getParameter(parameterIndex).getFormalDataType();
+		check(type instanceof Pointer &&
+			((Pointer) type).getDataType() instanceof FunctionDefinition,
+			message + ": got " + type.getDisplayName());
 	}
 
 	private void setUserWords(Function function, String... names) throws Exception {
