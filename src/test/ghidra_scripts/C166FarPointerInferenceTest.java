@@ -238,6 +238,31 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("object_and_constant_caller_b",
 			constantPairCallAtSlot2(objectAndConstantSeed, 0x313e, 0x158));
 
+		// M55 FUN_99b53a shape: R12 is tested as a boolean while R13 is an
+		// independent LGP id.  The adjacent constants (1, 0x2c3) happen to decode
+		// to mapped address 0xb0c001, but scalar use in the callee must defeat the
+		// constant-only seed.  Cover both a fresh signature and repair of a stale
+		// generic ANALYSIS void * left by an earlier analyzer version.
+		createMemoryBlock("scalar_pair_collision_data", toAddr(0xb0c000),
+			new byte[0x100], false);
+		byte[] scalarBitTest = bytes(
+			0x9a, 0xfc, 0x01, 0x00, // jnb R12.0, second RETS
+			0xdb, 0x00,
+			0xdb, 0x00);
+		Function freshScalarPair = fixture("constant_pair_is_two_scalars",
+			scalarBitTest);
+		fixture("scalar_pair_fresh_caller_a",
+			constantPairCall(freshScalarPair, 0x0001, 0x02c3));
+		fixture("scalar_pair_fresh_caller_b",
+			constantPairCall(freshScalarPair, 0x0001, 0x02c3));
+		Function staleScalarPair = fixture("repair_stale_scalar_pair_pointer",
+			scalarBitTest);
+		setAnalysisPointer(staleScalarPair, "misclassified");
+		fixture("scalar_pair_stale_caller_a",
+			constantPairCall(staleScalarPair, 0x0001, 0x02c3));
+		fixture("scalar_pair_stale_caller_b",
+			constantPairCall(staleScalarPair, 0x0001, 0x02c3));
+
 		// One occurrence is insufficient even if it maps, a PAGE that also fits
 		// the 8-bit code SEGMENT remains ambiguous, and an unmapped PAGE:OFFSET is
 		// not evidence at all.
@@ -367,6 +392,8 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkSignature(constantSeedStore, Set.of(0), "r13+r12");
 		checkSignature(objectAndConstantSeed, Set.of(0, 1),
 			"r13+r12", "r15+r14");
+		checkNoParameters(freshScalarPair);
+		checkWordSignature(staleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkNoParameters(singleConstantStore);
 		checkNoParameters(codeSizedPageStore);
 		checkNoParameters(unmappedConstantStore);

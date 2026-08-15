@@ -8,6 +8,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Parameter;
 import ghidrainfineon.C166CodePointerAnalyzer;
@@ -16,7 +17,7 @@ import ghidrainfineon.C166FarPointerAnalyzer;
 public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 	private static final long[] TARGETS = {
-		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce
+		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce, 0x99b53a
 	};
 
 	@Override
@@ -46,6 +47,8 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		checkFunctionPointers(0x29ffde, 2);
 		checkFunctionPointers(0x25901a, 1, 2);
 		checkFunctionPointers(0x2590ce, 0, 1);
+		checkScalarWord(0x99b53a, 0, "r12");
+		checkScalarWord(0x99b53a, 1, "r13");
 
 		Function caller = getFunctionAt(toAddr(0x242066));
 		check(caller != null, "missing FUN_242066");
@@ -67,6 +70,43 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		check(!singleCallerCode.contains("0x97d0e") &&
 			!singleCallerCode.contains("0x97d7c"),
 			"FUN_259214 still contains PAGE:OFFSET callback addresses");
+
+		Function scalarCaller = getFunctionAt(toAddr(0x6f2ea6));
+		check(scalarCaller != null, "missing caller containing 6f30aa");
+		String scalarCallerCode = decompile(scalarCaller, "VERIFY");
+		String compactScalarCode = scalarCallerCode.replaceAll("\\s+", "");
+		check(compactScalarCode.contains("FUN_99b53a(1,0x2c3,"),
+			"6f30aa did not retain separate flag and LGP-id arguments");
+		check(!compactScalarCode.contains("0xb0c001") &&
+			!compactScalarCode.contains("DAT_b0c001"),
+			"6f30aa still contains the false PAGE:OFFSET pointer");
+	}
+
+	private void checkScalarWord(long address, int index, String registerName) {
+		Function function = getFunctionAt(toAddr(address));
+		check(function != null, "missing function at " + Long.toHexString(address));
+		check(index < function.getParameterCount(),
+			function.getName() + ": missing parameter " + index);
+		Parameter parameter = function.getParameter(index);
+		check(!isPointer(parameter.getFormalDataType()), function.getName() + "[" + index +
+			"] is still a pointer: " + parameter.getFormalDataType().getDisplayName());
+		check(parameter.getVariableStorage().size() == 2, function.getName() + "[" + index +
+			"] is not one word: " + parameter.getVariableStorage());
+		var registers = parameter.getVariableStorage().getRegisters();
+		check(registers != null && registers.size() == 1,
+			function.getName() + "[" + index + "] has unexpected storage: " +
+				parameter.getVariableStorage());
+		Register register = registers.get(0);
+		check(registerName.equalsIgnoreCase(register.getName()), function.getName() + "[" +
+			index + "] expected " + registerName + ", got " + register.getName());
+	}
+
+	private boolean isPointer(DataType type) {
+		DataType current = type;
+		while (current instanceof TypeDef typeDef) {
+			current = typeDef.getBaseDataType();
+		}
+		return current instanceof Pointer;
 	}
 
 	private void checkFunctionPointers(long address, int... indexes) {
@@ -130,6 +170,13 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		println("M55 HEADLESS " + phase + " FUN_242066_BEGIN");
 		println(c);
 		println("M55 HEADLESS " + phase + " FUN_242066_END");
+
+		Function scalarCaller = getFunctionAt(toAddr(0x6f2ea6));
+		if (scalarCaller != null) {
+			println("M55 HEADLESS " + phase + " FUN_6f2ea6_BEGIN");
+			println(decompile(scalarCaller, phase));
+			println("M55 HEADLESS " + phase + " FUN_6f2ea6_END");
+		}
 	}
 
 	private String decompile(Function function, String phase) throws Exception {

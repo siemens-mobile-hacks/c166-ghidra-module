@@ -173,7 +173,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			" global far-pointer object(s), " +
 			"seeded " + seedStats.parameters() + " parameter(s) in " +
 			seedStats.functions() + " function(s) from " + seedStats.occurrences() +
-			" unambiguous constant call-site occurrence(s), " +
+			" unambiguous constant call-site occurrence(s), rejected " +
+			seedStats.scalarConflicts() + " scalar-use candidate pair(s), repaired " +
+			seedStats.repairedPointers() + " stale analysis pointer(s), " +
 			"removed " + legacyReferencesRemoved + " legacy call-site reference(s), " +
 			stats.ambiguousFunctions.size() + " ambiguous, " + stats.failedFunctions.size() +
 			" decompilation failure(s), " + stats.recursivePasses +
@@ -351,13 +353,31 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		int seededFunctions = 0;
 		int seededParameters = 0;
 		int acceptedOccurrences = 0;
+		int scalarConflicts = 0;
+		int repairedPointers = 0;
 		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
 				occurrences.entrySet()) {
 			monitor.checkCancelled();
 			Function target = targetEntry.getKey();
+			Set<Integer> contradicted = new HashSet<>();
+			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
+				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
+					hasIndependentInputBitTest(program, target, pair.getKey())) {
+					contradicted.add(pair.getKey());
+				}
+			}
+			scalarConflicts += contradicted.size();
+			try {
+				repairedPointers += splitContradictedAnalysisPointers(program, target,
+					contradicted);
+			}
+			catch (DuplicateNameException | InvalidInputException e) {
+				log.appendException(e);
+			}
 			Map<Integer, Integer> scores = new HashMap<>();
 			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
 				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
+					!contradicted.contains(pair.getKey()) &&
 					!overlapsExistingPointer(target, pair.getKey())) {
 					scores.put(pair.getKey(), pair.getValue().size());
 				}
@@ -394,7 +414,95 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 		}
 		return new CallSiteSeedStats(seededFunctions, seededParameters,
-			acceptedOccurrences);
+			acceptedOccurrences, scalarConflicts, repairedPointers);
+	}
+
+	/**
+	 * A constant PAGE:OFFSET-shaped pair is not sufficient when the callee itself
+	 * proves scalar semantics.  In particular, TASKING commonly passes a boolean
+	 * in R12 followed by a 16-bit LGP/message id in R13.  If that id happens to be
+	 * above 0xff, the two constants can decode to mapped data by coincidence.
+	 *
+	 * Only a direct bit branch on an unmodified incoming register is treated as a
+	 * contradiction.  This deliberately narrow negative rule does not reject
+	 * ordinary pointer copies, stores, comparisons, arithmetic, or forwarding.
+	 * A function which also has real paged-memory data flow remains eligible for
+	 * the semantic inference pass and can therefore regain a proven pointer.
+	 */
+	private boolean hasIndependentInputBitTest(Program program, Function function,
+			int pairStart) {
+		if (pairStart < 0 || pairStart >= 4) {
+			return false;
+		}
+		Register low = program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + pairStart));
+		Register high =
+			program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + pairStart + 1));
+		boolean lowIsInput = low != null;
+		boolean highIsInput = high != null;
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext() && (lowIsInput || highIsInput)) {
+			Instruction instruction = instructions.next();
+			String mnemonic = instruction.getMnemonicString().toLowerCase();
+			if (isBitBranch(mnemonic)) {
+				Register tested = operandRegister(instruction, 0);
+				if ((lowIsInput && overlaps(low, tested)) ||
+					(highIsInput && overlaps(high, tested))) {
+					return true;
+				}
+			}
+			if (instruction.getFlowType().isCall()) {
+				lowIsInput = false;
+				highIsInput = false;
+				continue;
+			}
+			if (lowIsInput && writesRegister(instruction, low)) {
+				lowIsInput = false;
+			}
+			if (highIsInput && writesRegister(instruction, high)) {
+				highIsInput = false;
+			}
+		}
+		return false;
+	}
+
+	private boolean isBitBranch(String mnemonic) {
+		return mnemonic.equals("jb") || mnemonic.equals("jnb") ||
+			mnemonic.equals("jbc") || mnemonic.equals("jbs");
+	}
+
+	private int splitContradictedAnalysisPointers(Program program, Function function,
+			Set<Integer> contradicted)
+			throws DuplicateNameException, InvalidInputException {
+		if (contradicted.isEmpty() || function.getSignatureSource() != SourceType.ANALYSIS) {
+			return 0;
+		}
+		List<Variable> parameters = new ArrayList<>();
+		int split = 0;
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (start != null && contradicted.contains(start) &&
+				isGenericVoidPointer(parameter.getFormalDataType()) &&
+				parameter.getVariableStorage().size() == 4) {
+				parameters.add(new ParameterImpl(null, Undefined.getUndefinedDataType(2), program));
+				parameters.add(new ParameterImpl(null, Undefined.getUndefinedDataType(2), program));
+				split++;
+				continue;
+			}
+			parameters.add(new ParameterImpl(existingName(parameter),
+				parameter.getFormalDataType(), program));
+		}
+		if (split != 0) {
+			function.updateFunction(CALLING_CONVENTION, null, parameters,
+				FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+		}
+		return split;
+	}
+
+	private boolean isGenericVoidPointer(DataType type) {
+		Pointer pointer = pointerDataType(type);
+		return pointer != null && type.getLength() == 4 &&
+			!isFunctionPointer(type) && isVoidType(pointer.getDataType());
 	}
 
 	private void scanConstantCallers(Program program, Set<Function> callers,
@@ -503,7 +611,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return null;
 	}
 
-	private record CallSiteSeedStats(int functions, int parameters, int occurrences) {
+	private record CallSiteSeedStats(int functions, int parameters, int occurrences,
+			int scalarConflicts, int repairedPointers) {
 	}
 
 	private record CandidateGraph(Set<Function> functions,
