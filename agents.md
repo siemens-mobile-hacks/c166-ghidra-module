@@ -414,8 +414,13 @@ Output: `dist/ghidra_<version>_PUBLIC_<date>_GhidraInfineon.zip`
 1. Make changes to Java/SLEIGH files
 2. Delete `.sla` if SLEIGH changed
 3. Run `gradlew buildExtension`
-4. Reinstall extension in Ghidra
+4. Always install the freshly built extension locally with `./install-local.sh`
 5. Reopen target binary (or clear analysis and re-analyze)
+
+Do not consider an extension change locally verified while Ghidra is still
+using an older installed JAR.  After every implementation change, run
+`./install-local.sh` and restart any running Ghidra GUI before checking the
+real database.
 
 ### Headless Verification for Complex Problems
 

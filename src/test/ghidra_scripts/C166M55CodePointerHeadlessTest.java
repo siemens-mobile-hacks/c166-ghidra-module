@@ -16,7 +16,7 @@ import ghidrainfineon.C166FarPointerAnalyzer;
 public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 	private static final long[] TARGETS = {
-		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde
+		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce
 	};
 
 	@Override
@@ -44,6 +44,8 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		checkFunctionPointers(0x9bb936, 0, 1);
 		checkFunctionPointers(0x9bc42a, 2, 3);
 		checkFunctionPointers(0x29ffde, 2);
+		checkFunctionPointers(0x25901a, 1, 2);
+		checkFunctionPointers(0x2590ce, 0, 1);
 
 		Function caller = getFunctionAt(toAddr(0x242066));
 		check(caller != null, "missing FUN_242066");
@@ -54,6 +56,17 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			"FUN_242066 lost the free code-pointer target");
 		check(!code.contains("0x97d0e") && !code.contains("0x97d7c"),
 			"FUN_242066 still contains PAGE:OFFSET callback addresses");
+
+		Function singleCaller = getFunctionAt(toAddr(0x259214));
+		check(singleCaller != null, "missing FUN_259214");
+		String singleCallerCode = decompile(singleCaller, "VERIFY");
+		check(singleCallerCode.contains("FUN_253d0e"),
+			"FUN_259214 lost the malloc code-pointer target");
+		check(singleCallerCode.contains("FUN_253d7c"),
+			"FUN_259214 lost the free code-pointer target");
+		check(!singleCallerCode.contains("0x97d0e") &&
+			!singleCallerCode.contains("0x97d7c"),
+			"FUN_259214 still contains PAGE:OFFSET callback addresses");
 	}
 
 	private void checkFunctionPointers(long address, int... indexes) {

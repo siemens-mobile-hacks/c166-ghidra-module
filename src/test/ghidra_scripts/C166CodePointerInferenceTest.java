@@ -194,6 +194,45 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 					0xd4, 0x40, 0x02, 0x00),            // R4 = [SP+2]
 				calls(dispatcher),
 				bytes(0x06, 0xf0, 0x04, 0x00, 0xdb, 0x00)));
+		// Semantic use as R5:R4 is stronger than a generic ANALYSIS void *.  This
+		// reproduces FUN_2590ce after the earlier far-data pass typed its callback
+		// parameter as data.
+		Function analysisPointerIndirectTarget = fixture(
+			"analysis_pointer_used_as_far_indirect_target", concat(
+				bytes(0xf0, 0x4c, 0xf0, 0x5d),
+				calls(dispatcher), bytes(0xdb, 0x00)));
+		setAnalysisPointer(analysisPointerIndirectTarget, "callback");
+
+		// Function-pointer types must propagate backwards through wrappers to a
+		// fixed point.  The second wrapper needs a later pass after the first one is
+		// repaired, matching FUN_9bb936 -> FUN_25901a -> FUN_2590ce.
+		Function forwardingTarget = fixture("typed_function_pointer_target",
+			bytes(0xdb, 0x00));
+		setUserFunctionPointer(forwardingTarget, "callback", "forwarded_cb_t");
+		Function forwardingWrapper = fixture("analysis_pointer_forwarding_wrapper",
+			concat(calls(forwardingTarget), bytes(0xdb, 0x00)));
+		setAnalysisPointer(forwardingWrapper, "callback");
+		Function secondLevelForwardingWrapper = fixture(
+			"second_level_analysis_pointer_forwarding_wrapper",
+			concat(calls(forwardingWrapper), bytes(0xdb, 0x00)));
+		setAnalysisPointer(secondLevelForwardingWrapper, "callback");
+		Function stackForwardingTarget = fixture("typed_stack_forwarding_target",
+			bytes(0xdb, 0x00));
+		setUserWordsAndFunctionPointer(stackForwardingTarget);
+		Function stackForwardingInterveningCall = fixture(
+			"stack_forwarding_intervening_call", bytes(0xdb, 0x00));
+		Function stackForwardingWrapper = fixture("stack_parameter_forwarding_wrapper",
+			concat(
+				bytes(
+					0x88, 0x90, 0x88, 0x80, 0x88, 0x70, 0x88, 0x60,
+					0x88, 0xe0, 0x88, 0xf0),
+				calls(stackForwardingInterveningCall),
+				bytes(
+					0xd4, 0xe0, 0x0c, 0x00,
+					0xd4, 0xf0, 0x0e, 0x00),
+				calls(stackForwardingTarget),
+				bytes(0x06, 0xf0, 0x0c, 0x00, 0xdb, 0x00)));
+		setAnalysisWordsAndPointer(stackForwardingWrapper);
 
 		// An incoming branch makes the call a new basic block.  Constants from the
 		// fall-through predecessor are not valid on every path and must not count.
@@ -260,6 +299,11 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkCodeSignature(middleIndirectTarget, "r12", "r14+r13");
 		checkCodeSignature(lateIndirectTarget, "r12", "r13", "r15+r14");
 		checkCodeSignature(savedIndirectTarget, "r13+r12");
+		checkCodeSignature(analysisPointerIndirectTarget, "r13+r12");
+		checkCodeSignature(forwardingWrapper, "r13+r12");
+		checkCodeSignature(secondLevelForwardingWrapper, "r13+r12");
+		checkCodeSignature(stackForwardingWrapper, "r12", "r13", "r14", "r15",
+			"Stack[0x0]:4");
 		check(reversedIndirectTarget.getParameterCount() == 0,
 			"reversed far-indirect target words were accepted");
 		check(branchMerge.getParameterCount() == 0,
@@ -312,13 +356,17 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		String snapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
 			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
-			reversedIndirectTarget, savedIndirectTarget, branchMerge, stalePush);
+			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
+			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
+			branchMerge, stalePush);
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "second code-pointer analysis failed");
 		check(snapshot.equals(snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
 			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
-			reversedIndirectTarget, savedIndirectTarget, branchMerge, stalePush)),
+			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
+			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
+			branchMerge, stalePush)),
 			"code-pointer inference is not idempotent");
 
 		// Keep references live so fixture creation cannot be optimized away by a
@@ -328,7 +376,9 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			copiedCallbackCaller != null && twoStackCallbacksCaller != null &&
 			ambiguousOverlapCaller != null && nonEntryCaller != null && userDefinedCaller != null &&
 			existingDataPointerCaller != null && dataWinsCaller != null &&
-			dispatcherCaller != null && branchMergeCaller != null && stalePushCaller != null,
+			dispatcherCaller != null && forwardingTarget != null &&
+			stackForwardingInterveningCall != null &&
+			branchMergeCaller != null && stalePushCaller != null,
 			"missing caller fixture");
 		println("TASKING code-pointer inference matrix passed.");
 	}
@@ -435,6 +485,34 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Variable parameter = new ParameterImpl(parameterName, typedef, currentProgram);
 		function.updateFunction("__tasking_c166_classic", null, List.of(parameter),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+	}
+
+	private void setUserWordsAndFunctionPointer(Function function) throws Exception {
+		FunctionDefinitionDataType prototype = new FunctionDefinitionDataType(
+			"stack_forwarded_cb_function", currentProgram.getDataTypeManager());
+		PointerDataType callback = new PointerDataType(prototype,
+			currentProgram.getDataTypeManager());
+		List<Variable> parameters = List.of(
+			new ParameterImpl("word0",
+				new UnsignedShortDataType(currentProgram.getDataTypeManager()), currentProgram),
+			new ParameterImpl("word1",
+				new UnsignedShortDataType(currentProgram.getDataTypeManager()), currentProgram),
+			new ParameterImpl("callback", callback, currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+	}
+
+	private void setAnalysisWordsAndPointer(Function function) throws Exception {
+		List<Variable> parameters = new ArrayList<>();
+		for (int i = 0; i < 4; i++) {
+			parameters.add(new ParameterImpl("word" + i,
+				new UnsignedShortDataType(currentProgram.getDataTypeManager()), currentProgram));
+		}
+		parameters.add(new ParameterImpl("callback",
+			new PointerDataType(VoidDataType.dataType,
+				currentProgram.getDataTypeManager()), currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 
 	private void setLegacyGenericFunctionPointers(Function function, String... names)

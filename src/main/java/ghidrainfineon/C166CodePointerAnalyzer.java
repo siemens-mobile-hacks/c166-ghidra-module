@@ -113,6 +113,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 		Map<Function, Map<Integer, Integer>> scoresByTarget = new HashMap<>();
 		Map<Function, Map<Integer, List<CodePointerEvidence>>> evidenceByTarget =
 			new HashMap<>();
+		Map<Function, Set<Integer>> semanticEvidenceByTarget = new HashMap<>();
+		List<DirectCallSite> directCalls = new ArrayList<>();
 		Map<Function, Boolean> dispatcherCache = new HashMap<>();
 		BasicBlockModel blocks = new BasicBlockModel(program);
 		int callsSeen = 0;
@@ -140,13 +142,14 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 						Integer start = dispatcherTargetPair(program, caller, instruction, blocks,
 							monitor);
 						if (start != null) {
-							scoresByTarget.computeIfAbsent(caller, ignored -> new HashMap<>())
-								.merge(start, 1, Integer::sum);
+							addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
+								caller, start);
 							indirectUseCount++;
 						}
 					}
 					continue;
 				}
+				directCalls.add(new DirectCallSite(caller, target, instruction));
 				if (!mayUpdate(target) || !usesTaskingConvention(target)) {
 					continue;
 				}
@@ -168,25 +171,75 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			monitor.incrementProgress(1);
 		}
 
-		int updatedFunctions = 0;
+		Set<Function> updatedFunctions = new HashSet<>();
 		int inferredParameters = 0;
 		int referenceCount = 0;
 		int referencesRemoved = 0;
-		int ambiguousFunctions = 0;
+		Set<Function> ambiguousFunctions = new HashSet<>();
+		UpdateStats update = applyEvidence(program, scoresByTarget, evidenceByTarget,
+			semanticEvidenceByTarget, updatedFunctions, ambiguousFunctions, monitor, log);
+		inferredParameters += update.inferredParameters();
+		referenceCount += update.referenceCount();
+		referencesRemoved += update.referencesRemoved();
+
+		int forwardingEvidenceCount = 0;
+		int forwardingPasses = 0;
+		while (true) {
+			monitor.checkCancelled();
+			int added = collectForwardingEvidence(program, directCalls, blocks,
+				scoresByTarget, semanticEvidenceByTarget, monitor);
+			if (added == 0) {
+				break;
+			}
+			forwardingEvidenceCount += added;
+			forwardingPasses++;
+			update = applyEvidence(program, scoresByTarget, evidenceByTarget,
+				semanticEvidenceByTarget, updatedFunctions, ambiguousFunctions, monitor, log);
+			inferredParameters += update.inferredParameters();
+			referenceCount += update.referenceCount();
+			referencesRemoved += update.referencesRemoved();
+		}
+
+		report(program, (fullScan ? "Full" : "Incremental") + " scan: inspected " +
+			callers.size() + " caller function(s) and " + callsSeen +
+			" direct call(s); found " + evidenceCount +
+			" executable SEGMENT:OFFSET argument occurrence(s) and " + indirectUseCount +
+			" parameter-fed far-indirect target use(s), propagated " +
+			forwardingEvidenceCount + " function-pointer parameter use(s) in " +
+			forwardingPasses + " fixed-point pass(es), inferred " +
+			inferredParameters + " code-pointer-sized parameter(s) in " +
+			updatedFunctions.size() + " function(s), added or updated " + referenceCount +
+			" code-target reference(s), removed " + referencesRemoved +
+			" data-conflicting reference(s), " + ambiguousFunctions.size() + " ambiguous.");
+		return true;
+	}
+
+	private UpdateStats applyEvidence(Program program,
+			Map<Function, Map<Integer, Integer>> scoresByTarget,
+			Map<Function, Map<Integer, List<CodePointerEvidence>>> evidenceByTarget,
+			Map<Function, Set<Integer>> semanticEvidenceByTarget,
+			Set<Function> updatedFunctions, Set<Function> ambiguousFunctions,
+			TaskMonitor monitor, MessageLog log) throws CancelledException {
+		int inferredParameters = 0;
+		int referenceCount = 0;
+		int referencesRemoved = 0;
 		for (Map.Entry<Function, Map<Integer, Integer>> entry : scoresByTarget.entrySet()) {
 			monitor.checkCancelled();
+			Function function = entry.getKey();
 			Map<Integer, Integer> scores = entry.getValue();
 			List<Integer> candidates = new ArrayList<>(scores.keySet());
 			Collections.sort(candidates);
 			Selection selection = selectPairs(candidates, scores, 0, new HashMap<>());
 			if (selection.ambiguous()) {
-				ambiguousFunctions++;
+				ambiguousFunctions.add(function);
 				continue;
 			}
+			ambiguousFunctions.remove(function);
 			Map<Integer, List<CodePointerEvidence>> occurrences =
-				evidenceByTarget.getOrDefault(entry.getKey(), Map.of());
-			Set<Integer> starts = removePointerConflicts(program, entry.getKey(),
-				selection.starts(), occurrences);
+				evidenceByTarget.getOrDefault(function, Map.of());
+			Set<Integer> starts = removePointerConflicts(program, function,
+				selection.starts(), occurrences,
+				semanticEvidenceByTarget.getOrDefault(function, Set.of()));
 			for (int conflict : difference(selection.starts(), starts)) {
 				for (CodePointerEvidence evidence : occurrences.getOrDefault(conflict, List.of())) {
 					referencesRemoved += removeCodePointerReference(program, evidence);
@@ -198,29 +251,25 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 					referenceCount += addCodePointerReference(program, evidence);
 				}
 			}
-			if (starts.isEmpty() || signatureMatches(entry.getKey(), starts)) {
+			if (starts.isEmpty() || signatureMatches(function, starts)) {
 				continue;
 			}
+			int newlyTyped = 0;
+			for (int start : starts) {
+				if (!hasFunctionPointerAt(function, start)) {
+					newlyTyped++;
+				}
+			}
 			try {
-				updateSignature(program, entry.getKey(), starts);
-				updatedFunctions++;
-				inferredParameters += starts.size();
+				updateSignature(program, function, starts);
+				updatedFunctions.add(function);
+				inferredParameters += newlyTyped;
 			}
 			catch (DuplicateNameException | InvalidInputException e) {
 				log.appendException(e);
 			}
 		}
-
-		report(program, (fullScan ? "Full" : "Incremental") + " scan: inspected " +
-			callers.size() + " caller function(s) and " + callsSeen +
-			" direct call(s); found " + evidenceCount +
-			" executable SEGMENT:OFFSET argument occurrence(s) and " + indirectUseCount +
-			" parameter-fed far-indirect target use(s), inferred " +
-			inferredParameters + " code-pointer-sized parameter(s) in " +
-			updatedFunctions + " function(s), added or updated " + referenceCount +
-			" code-target reference(s), removed " + referencesRemoved +
-			" data-conflicting reference(s), " + ambiguousFunctions + " ambiguous.");
-		return true;
+		return new UpdateStats(inferredParameters, referenceCount, referencesRemoved);
 	}
 
 	private Function directTarget(Program program, Instruction instruction) {
@@ -355,8 +404,13 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 				scanned++, instruction =
 					program.getListing().getInstructionBefore(instruction.getAddress())) {
 			if (!function.getBody().contains(instruction.getAddress()) ||
-				!setupRegion.contains(instruction.getAddress()) ||
-				instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				!setupRegion.contains(instruction.getAddress())) {
+				break;
+			}
+			// A TASKING call preserves the caller's software-stack frame.  Registers
+			// are clobbered across calls, but an incoming word already saved at a
+			// non-negative R0 offset remains traceable until R0 itself changes.
+			if (instruction.getFlowType().isJump()) {
 				return null;
 			}
 			Integer storeOffset = stackOffset(instruction, 0);
@@ -384,7 +438,81 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 				return null;
 			}
 		}
+		if (setupRegion.contains(function.getEntryPoint()) && offset >= 0 && (offset & 1) == 0) {
+			return 4 + offset / 2;
+		}
 		return null;
+	}
+
+	private int collectForwardingEvidence(Program program, List<DirectCallSite> directCalls,
+			BasicBlockModel blocks, Map<Function, Map<Integer, Integer>> scoresByTarget,
+			Map<Function, Set<Integer>> semanticEvidenceByTarget, TaskMonitor monitor)
+			throws CancelledException {
+		int added = 0;
+		for (DirectCallSite site : directCalls) {
+			monitor.checkCancelled();
+			if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
+				continue;
+			}
+			for (int start : forwardedCodePointerPairs(program, site, blocks, monitor)) {
+				if (addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
+					site.caller(), start)) {
+					added++;
+				}
+			}
+		}
+		return added;
+	}
+
+	private Set<Integer> forwardedCodePointerPairs(Program program, DirectCallSite site,
+			BasicBlockModel blocks, TaskMonitor monitor) throws CancelledException {
+		Set<Integer> result = new HashSet<>();
+		CodeBlock setupBlock = blocks.getFirstCodeBlockContaining(site.call().getAddress(), monitor);
+		AddressSetView setupRegion =
+			setupBlock == null ? site.caller().getBody() : setupBlock;
+		for (Parameter parameter : site.target().getParameters()) {
+			if (!isFunctionPointer(parameter.getFormalDataType())) {
+				continue;
+			}
+			Integer targetStart = parameterStart(parameter.getVariableStorage());
+			if (targetStart == null) {
+				continue;
+			}
+			Integer low = traceCallArgumentWord(program, site.caller(), setupRegion,
+				site.call(), targetStart);
+			Integer high = traceCallArgumentWord(program, site.caller(), setupRegion,
+				site.call(), targetStart + 1);
+			if (low != null && high != null && high == low + 1 && isLegalPairStart(low)) {
+				result.add(low);
+			}
+		}
+		return Set.copyOf(result);
+	}
+
+	private Integer traceCallArgumentWord(Program program, Function caller,
+			AddressSetView setupRegion, Instruction call, int targetSlot) {
+		if (targetSlot < 4) {
+			Register register = program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + targetSlot));
+			return traceParameterRegister(program, caller, setupRegion, call, register, 0,
+				new HashSet<>());
+		}
+		int stackOffset = (targetSlot - 4) * 2;
+		return traceStackParameter(program, caller, setupRegion, call, stackOffset, 0,
+			new HashSet<>());
+	}
+
+	private boolean addSemanticEvidence(
+			Map<Function, Map<Integer, Integer>> scoresByTarget,
+			Map<Function, Set<Integer>> semanticEvidenceByTarget, Function function,
+			int start) {
+		Set<Integer> starts =
+			semanticEvidenceByTarget.computeIfAbsent(function, ignored -> new HashSet<>());
+		if (!starts.add(start)) {
+			return false;
+		}
+		scoresByTarget.computeIfAbsent(function, ignored -> new HashMap<>())
+			.merge(start, 1, Integer::sum);
+		return true;
 	}
 
 	private Integer stackOffset(Instruction instruction, int operand) {
@@ -531,7 +659,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 
 	private Set<Integer> removePointerConflicts(Program program, Function function,
 			Set<Integer> starts,
-			Map<Integer, List<CodePointerEvidence>> occurrences) {
+			Map<Integer, List<CodePointerEvidence>> occurrences,
+			Set<Integer> semanticEvidence) {
 		Set<Integer> result = new HashSet<>(starts);
 		for (Parameter parameter : function.getParameters()) {
 			Integer start = parameterStart(parameter.getVariableStorage());
@@ -543,6 +672,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			result.removeIf(candidate -> candidate < start + span && start < candidate + 2 &&
 				!hasPriorCodePointerReference(program,
 					occurrences.getOrDefault(candidate, List.of())) &&
+				!(semanticEvidence.contains(candidate) &&
+					isGenericAnalysisPointer(function, type)) &&
 				!isRepeatedGenericAnalysisPointer(function, type,
 					occurrences.getOrDefault(candidate, List.of())));
 		}
@@ -551,8 +682,14 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 
 	private boolean isRepeatedGenericAnalysisPointer(Function function, DataType type,
 			List<CodePointerEvidence> occurrences) {
-		if (function.getSignatureSource() != SourceType.ANALYSIS ||
-			occurrences.size() < 2) {
+		if (occurrences.size() < 2 || !isGenericAnalysisPointer(function, type)) {
+			return false;
+		}
+		return true;
+	}
+
+	private boolean isGenericAnalysisPointer(Function function, DataType type) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
 			return false;
 		}
 		Pointer pointer = pointerDataType(type);
@@ -564,6 +701,17 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			target = typeDef.getBaseDataType();
 		}
 		return target instanceof VoidDataType || "void".equals(target.getName());
+	}
+
+	private boolean hasFunctionPointerAt(Function function, int start) {
+		for (Parameter parameter : function.getParameters()) {
+			Integer actualStart = parameterStart(parameter.getVariableStorage());
+			if (actualStart != null && actualStart == start &&
+				isFunctionPointer(parameter.getFormalDataType())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -940,6 +1088,13 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private record Selection(int score, Set<Integer> starts, boolean ambiguous) {
+	}
+
+	private record DirectCallSite(Function caller, Function target, Instruction call) {
+	}
+
+	private record UpdateStats(int inferredParameters, int referenceCount,
+			int referencesRemoved) {
 	}
 
 	private record CodePointerEvidence(Address target, Address source) {
