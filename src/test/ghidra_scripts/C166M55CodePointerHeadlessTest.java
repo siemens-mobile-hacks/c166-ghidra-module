@@ -17,7 +17,8 @@ import ghidrainfineon.C166FarPointerAnalyzer;
 public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 	private static final long[] TARGETS = {
-		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce, 0x99b53a
+		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce, 0x99b53a,
+		0xc3ca42, 0xc3ca4a
 	};
 
 	@Override
@@ -49,6 +50,10 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		checkFunctionPointers(0x2590ce, 0, 1);
 		checkScalarWord(0x99b53a, 0, "r12");
 		checkScalarWord(0x99b53a, 1, "r13");
+		checkScalarWord(0xc3ca42, 0, "r12");
+		checkScalarWord(0xc3ca42, 1, "r13");
+		checkScalarWord(0xc3ca4a, 0, "r12");
+		checkScalarWord(0xc3ca4a, 1, "r13");
 
 		Function caller = getFunctionAt(toAddr(0x242066));
 		check(caller != null, "missing FUN_242066");
@@ -80,6 +85,15 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		check(!compactScalarCode.contains("0xb0c001") &&
 			!compactScalarCode.contains("DAT_b0c001"),
 			"6f30aa still contains the false PAGE:OFFSET pointer");
+
+		Function resultCaller = getFunctionAt(toAddr(0xc394d8));
+		check(resultCaller != null, "missing AT_SayResult at c394d8");
+		String compactResultCode = decompile(resultCaller, "VERIFY").replaceAll("\\s+", "");
+		check(compactResultCode.contains("FUN_c3ca42(1,0xff)"),
+			"c394dc did not retain separate result and message-id arguments");
+		check(!compactResultCode.contains("0x3fc001") &&
+			!compactResultCode.contains("DAT_3fc001"),
+			"c394dc still contains the false PAGE:OFFSET pointer");
 	}
 
 	private void checkScalarWord(long address, int index, String registerName) {
@@ -176,6 +190,13 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			println("M55 HEADLESS " + phase + " FUN_6f2ea6_BEGIN");
 			println(decompile(scalarCaller, phase));
 			println("M55 HEADLESS " + phase + " FUN_6f2ea6_END");
+		}
+
+		Function resultCaller = getFunctionAt(toAddr(0xc394d8));
+		if (resultCaller != null) {
+			println("M55 HEADLESS " + phase + " AT_SayResult_BEGIN");
+			println(decompile(resultCaller, phase));
+			println("M55 HEADLESS " + phase + " AT_SayResult_END");
 		}
 	}
 

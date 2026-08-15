@@ -148,7 +148,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				for (int componentIndex : schedule.layers().get(layerIndex)) {
 					layerChanged |= analyzeComponent(program, decompiler,
 						schedule.components().get(componentIndex), graph.callees(), stats,
-						monitor, log);
+						seedStats.scalarPairs(), seedStats.strictScalarPairs(), monitor, log);
 				}
 				if (layerChanged && layerIndex + 1 < schedule.layers().size()) {
 					decompiler.flushCache();
@@ -186,7 +186,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	private boolean analyzeComponent(Program program, DecompInterface decompiler,
 			List<Function> component, Map<Function, Set<Function>> callees,
-			AnalysisStats stats, TaskMonitor monitor, MessageLog log)
+			AnalysisStats stats, Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> strictScalarPairs,
+			TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
 		boolean recursive = component.size() > 1 ||
 			callees.getOrDefault(component.get(0), Set.of()).contains(component.get(0));
@@ -219,7 +221,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			boolean passChanged = false;
 			for (Function function : passFunctions) {
 				passChanged |= analyzeFunction(program, decompiler, function, stats,
-					monitor, log);
+					scalarPairs, strictScalarPairs, monitor, log);
 			}
 			anyChange |= passChanged;
 			if (!recursive || !passChanged) {
@@ -231,7 +233,10 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private boolean analyzeFunction(Program program, DecompInterface decompiler,
-			Function function, AnalysisStats stats, TaskMonitor monitor, MessageLog log)
+			Function function, AnalysisStats stats,
+			Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> strictScalarPairs,
+			TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
 		monitor.checkCancelled();
 		stats.inspected.add(function);
@@ -262,6 +267,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			Set<Integer> pairStarts = retainSupportedPairs(function, inference.pairStarts(),
 				inference.liveSlots());
 			pairStarts = removeFunctionPointerConflicts(function, pairStarts);
+			pairStarts = removeCallSiteScalarConflicts(function, pairStarts,
+				inference.directPagedPairs(), scalarPairs, strictScalarPairs);
 			if (pairStarts.isEmpty() || signatureMatches(function, pairStarts,
 				inference.liveSlots(), inference.pointerTypes())) {
 				return false;
@@ -337,43 +344,72 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 		BasicBlockModel blocks = new BasicBlockModel(program);
 		Map<Function, Map<Integer, Set<Address>>> occurrences = new HashMap<>();
+		Map<Function, Map<Integer, Set<ConstantWordPair>>> constantPairs = new HashMap<>();
 		Set<Address> scannedCalls = new HashSet<>();
 		Set<Function> discoveredTargets = new HashSet<>();
-		scanConstantCallers(program, callers, blocks, occurrences, scannedCalls,
+		scanConstantCallers(program, callers, blocks, occurrences, constantPairs, scannedCalls,
 			discoveredTargets, monitor);
 		if (!fullScan) {
 			Set<Function> corroboratingCallers = new HashSet<>();
 			for (Function target : discoveredTargets) {
 				corroboratingCallers.addAll(directCallers(program, target));
 			}
-			scanConstantCallers(program, corroboratingCallers, blocks, occurrences,
+			scanConstantCallers(program, corroboratingCallers, blocks, occurrences, constantPairs,
 				scannedCalls, discoveredTargets, monitor);
 		}
 
 		int seededFunctions = 0;
 		int seededParameters = 0;
 		int acceptedOccurrences = 0;
-		int scalarConflicts = 0;
 		int repairedPointers = 0;
+		Map<Function, Set<Integer>> scalarPairs = new HashMap<>();
+		Map<Function, Set<Integer>> strictScalarPairs = new HashMap<>();
 		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
 				occurrences.entrySet()) {
 			monitor.checkCancelled();
 			Function target = targetEntry.getKey();
-			Set<Integer> contradicted = new HashSet<>();
 			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
 				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
 					hasIndependentInputBitTest(program, target, pair.getKey())) {
-					contradicted.add(pair.getKey());
+					scalarPairs.computeIfAbsent(target, ignored -> new HashSet<>())
+						.add(pair.getKey());
 				}
 			}
-			scalarConflicts += contradicted.size();
+		}
+		for (Map.Entry<Function, Map<Integer, Set<ConstantWordPair>>> targetEntry :
+				constantPairs.entrySet()) {
+			monitor.checkCancelled();
+			Function target = targetEntry.getKey();
+			for (Map.Entry<Integer, Set<ConstantWordPair>> pair :
+					targetEntry.getValue().entrySet()) {
+				if (hasScalarAnalysisCandidate(target, pair.getKey()) &&
+					!containsDynamicPagedAccessSetup(program, target) &&
+					hasIndependentConstantWords(pair.getValue())) {
+					scalarPairs.computeIfAbsent(target, ignored -> new HashSet<>())
+						.add(pair.getKey());
+					strictScalarPairs.computeIfAbsent(target, ignored -> new HashSet<>())
+						.add(pair.getKey());
+				}
+			}
+		}
+		propagateEntryForwardingScalarPairs(program, scalarPairs, monitor);
+		propagateEntryForwardingScalarPairs(program, strictScalarPairs, monitor);
+		for (Map.Entry<Function, Set<Integer>> conflict : scalarPairs.entrySet()) {
+			monitor.checkCancelled();
 			try {
-				repairedPointers += splitContradictedAnalysisPointers(program, target,
-					contradicted);
+				repairedPointers += splitContradictedAnalysisPointers(program,
+					conflict.getKey(), conflict.getValue());
 			}
 			catch (DuplicateNameException | InvalidInputException e) {
 				log.appendException(e);
 			}
+		}
+
+		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
+				occurrences.entrySet()) {
+			monitor.checkCancelled();
+			Function target = targetEntry.getKey();
+			Set<Integer> contradicted = scalarPairs.getOrDefault(target, Set.of());
 			Map<Integer, Integer> scores = new HashMap<>();
 			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
 				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
@@ -413,8 +449,126 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				log.appendException(e);
 			}
 		}
+		int scalarConflicts = scalarPairs.values().stream().mapToInt(Set::size).sum();
 		return new CallSiteSeedStats(seededFunctions, seededParameters,
-			acceptedOccurrences, scalarConflicts, repairedPointers);
+			acceptedOccurrences, scalarConflicts, repairedPointers,
+			immutableSetMap(scalarPairs), immutableSetMap(strictScalarPairs));
+	}
+
+	/**
+	 * Repeated constants which contain a complete two-by-two combination cannot
+	 * describe one indivisible PAGE:OFFSET value: both words vary independently.
+	 * This is common for pairs such as (result, message-id), while a real pointer
+	 * remains one correlated value.  The rule repairs a generic ANALYSIS pointer
+	 * or protects an already split ANALYSIS word pair; concrete and user-defined
+	 * pointer types remain authoritative.
+	 */
+	private boolean hasIndependentConstantWords(Set<ConstantWordPair> pairs) {
+		if (pairs.size() < 4) {
+			return false;
+		}
+		Map<Long, Set<Long>> highByLow = new HashMap<>();
+		for (ConstantWordPair pair : pairs) {
+			highByLow.computeIfAbsent(pair.low(), ignored -> new HashSet<>()).add(pair.high());
+		}
+		List<Set<Long>> highSets = new ArrayList<>(highByLow.values());
+		for (int left = 0; left < highSets.size(); left++) {
+			for (int right = left + 1; right < highSets.size(); right++) {
+				Set<Long> intersection = new HashSet<>(highSets.get(left));
+				intersection.retainAll(highSets.get(right));
+				if (intersection.size() >= 2) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private boolean hasRepairableAnalysisPointer(Function function, int start) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return false;
+		}
+		for (Parameter parameter : function.getParameters()) {
+			if (Integer.valueOf(start).equals(parameterStart(parameter.getVariableStorage())) &&
+				parameter.getVariableStorage().size() == 4 &&
+				isGenericVoidPointer(parameter.getFormalDataType())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean hasScalarAnalysisCandidate(Function function, int start) {
+		return hasRepairableAnalysisPointer(function, start) ||
+			hasAnalysisWordPair(function, start);
+	}
+
+	/**
+	 * Preserve an already repaired scalar pair across later analyzer passes.
+	 * Code-pointer inference may split a stale four-byte pointer before this
+	 * analyzer runs; forgetting the rectangle at that point would let circular
+	 * decompiler type evidence join the two words again.
+	 */
+	private boolean hasAnalysisWordPair(Function function, int start) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return false;
+		}
+		boolean low = false;
+		boolean high = false;
+		for (Parameter parameter : function.getParameters()) {
+			Integer parameterSlot = parameterStart(parameter.getVariableStorage());
+			if (parameterSlot == null || parameter.getVariableStorage().size() != 2 ||
+				isPointerType(parameter.getFormalDataType())) {
+				continue;
+			}
+			low |= parameterSlot == start;
+			high |= parameterSlot == start + 1;
+		}
+		return low && high;
+	}
+
+	/**
+	 * Carry a proven scalar pair through a literal entry-point forwarding call.
+	 * Requiring the call/jump to be the first instruction avoids guessing across
+	 * wrappers which transform, materialize, or repurpose argument registers.
+	 */
+	private void propagateEntryForwardingScalarPairs(Program program,
+			Map<Function, Set<Integer>> scalarPairs, TaskMonitor monitor)
+			throws CancelledException {
+		ArrayDeque<FunctionSlot> pending = new ArrayDeque<>();
+		for (Map.Entry<Function, Set<Integer>> entry : scalarPairs.entrySet()) {
+			for (int start : entry.getValue()) {
+				pending.addLast(new FunctionSlot(entry.getKey(), start));
+			}
+		}
+		while (!pending.isEmpty()) {
+			monitor.checkCancelled();
+			FunctionSlot source = pending.removeFirst();
+			Instruction first =
+				program.getListing().getInstructionAt(source.function().getEntryPoint());
+			if (first == null || (!first.getFlowType().isCall() &&
+				!first.getFlowType().isJump())) {
+				continue;
+			}
+			Function target = directTarget(program, first);
+			if (target == null || !hasScalarAnalysisCandidate(target, source.start())) {
+				continue;
+			}
+			Set<Integer> targetPairs =
+				scalarPairs.computeIfAbsent(target, ignored -> new HashSet<>());
+			if (targetPairs.add(source.start())) {
+				pending.addLast(new FunctionSlot(target, source.start()));
+			}
+		}
+	}
+
+	private Map<Function, Set<Integer>> immutableSetMap(
+			Map<Function, Set<Integer>> values) {
+		Map<Function, Set<Integer>> copy = new HashMap<>();
+		for (Map.Entry<Function, Set<Integer>> entry : values.entrySet()) {
+			copy.put(entry.getKey(), Set.copyOf(entry.getValue()));
+		}
+		return Map.copyOf(copy);
 	}
 
 	/**
@@ -507,6 +661,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	private void scanConstantCallers(Program program, Set<Function> callers,
 			BasicBlockModel blocks, Map<Function, Map<Integer, Set<Address>>> occurrences,
+			Map<Function, Map<Integer, Set<ConstantWordPair>>> constantPairs,
 			Set<Address> scannedCalls, Set<Function> discoveredTargets, TaskMonitor monitor)
 			throws CancelledException {
 		monitor.initialize(Math.max(1, callers.size()),
@@ -536,6 +691,12 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 					}
 					C166TaskingCallArguments.WordValue low = entry.getValue();
 					C166TaskingCallArguments.WordValue high = words.words().get(start + 1);
+					if (low != null && high != null && low.constant() != null &&
+						high.constant() != null) {
+						constantPairs.computeIfAbsent(target, ignored -> new HashMap<>())
+							.computeIfAbsent(start, ignored -> new HashSet<>())
+							.add(new ConstantWordPair(low.constant(), high.constant()));
+					}
 					if (!isUnambiguousConstantDataPointer(program, low, high)) {
 						continue;
 					}
@@ -612,7 +773,15 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private record CallSiteSeedStats(int functions, int parameters, int occurrences,
-			int scalarConflicts, int repairedPointers) {
+			int scalarConflicts, int repairedPointers,
+			Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> strictScalarPairs) {
+	}
+
+	private record ConstantWordPair(long low, long high) {
+	}
+
+	private record FunctionSlot(Function function, int start) {
 	}
 
 	private record CandidateGraph(Set<Function> functions,
@@ -1325,6 +1494,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			HighFunction highFunction) {
 		Map<Integer, Integer> scores = new HashMap<>();
 		Set<Integer> liveSlots = new HashSet<>();
+		Set<Integer> directPagedPairs = new HashSet<>();
 		Map<Integer, DataType> pointerTypes = new HashMap<>();
 		Set<Address> globalPointerStarts = new HashSet<>();
 		Iterator<PcodeOpAST> operations = highFunction.getPcodeOps();
@@ -1340,7 +1510,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 			Varnode page;
 			Varnode offset;
-			if (operation.getOpcode() == PcodeOp.SEGMENTOP && operation.getNumInputs() == 3) {
+			boolean directPagedAccess =
+				operation.getOpcode() == PcodeOp.SEGMENTOP && operation.getNumInputs() == 3;
+			if (directPagedAccess) {
 				page = operation.getInput(1);
 				offset = operation.getInput(2);
 			}
@@ -1352,6 +1524,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				continue;
 			}
 			Integer start = scorePairSources(program, page, offset, scores);
+			if (start != null && directPagedAccess) {
+				directPagedPairs.add(start);
+			}
 			Address globalStart = globalPairStart(program, page, offset);
 			if (globalStart != null) {
 				globalPointerStarts.add(globalStart);
@@ -1370,7 +1545,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		Selection selection = selectPairs(candidates, scores, 0, new HashMap<>());
 		pointerTypes.keySet().retainAll(selection.starts());
 		return new Inference(selection.starts(), liveSlots, pointerTypes,
-			globalPointerStarts,
+			globalPointerStarts, directPagedPairs,
 			selection.ambiguous() && selection.score() != 0);
 	}
 
@@ -2050,6 +2225,33 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return Set.copyOf(retained);
 	}
 
+	/**
+	 * A stale generic pointer can manufacture PIECE and forwarding evidence from
+	 * its own DB type.  Do not let that circular evidence undo a scalar repair.
+	 * An actual SEGMENTOP sourced from both input words can override the weaker
+	 * input-bit-test contradiction.  It cannot override a complete two-by-two
+	 * constant rectangle: the decompiler may itself manufacture SEGMENTOP from a
+	 * stale pointer type, which is the circular inference this filter prevents.
+	 */
+	private Set<Integer> removeCallSiteScalarConflicts(Function function,
+			Set<Integer> pairStarts, Set<Integer> directPagedPairs,
+			Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> strictScalarPairs) {
+		Set<Integer> conflicts = scalarPairs.get(function);
+		if (conflicts == null || conflicts.isEmpty()) {
+			return pairStarts;
+		}
+		Set<Integer> strict = strictScalarPairs.getOrDefault(function, Set.of());
+		Set<Integer> retained = new HashSet<>();
+		for (int start : pairStarts) {
+			if (!conflicts.contains(start) ||
+				(directPagedPairs.contains(start) && !strict.contains(start))) {
+				retained.add(start);
+			}
+		}
+		return Set.copyOf(retained);
+	}
+
 	private void updateSignature(Program program, Function function, Set<Integer> pairStarts,
 			Set<Integer> liveSlots, Map<Integer, DataType> pointerTypes)
 			throws DuplicateNameException, InvalidInputException {
@@ -2239,7 +2441,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	private record Inference(Set<Integer> pairStarts, Set<Integer> liveSlots,
 			Map<Integer, DataType> pointerTypes, Set<Address> globalPointerStarts,
-			boolean ambiguous) {
+			Set<Integer> directPagedPairs, boolean ambiguous) {
 	}
 
 	private record Selection(int score, Set<Integer> starts, boolean ambiguous) {

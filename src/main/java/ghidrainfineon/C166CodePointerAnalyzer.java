@@ -1,5 +1,6 @@
 package ghidrainfineon;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -113,6 +114,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 		Map<Function, Map<Integer, Integer>> scoresByTarget = new HashMap<>();
 		Map<Function, Map<Integer, List<CodePointerEvidence>>> evidenceByTarget =
 			new HashMap<>();
+		Map<Function, Map<Integer, Set<ConstantWordPair>>> constantPairsByTarget =
+			new HashMap<>();
 		Map<Function, Set<Integer>> semanticEvidenceByTarget = new HashMap<>();
 		List<DirectCallSite> directCalls = new ArrayList<>();
 		Map<Function, Boolean> dispatcherCache = new HashMap<>();
@@ -155,6 +158,7 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 				}
 				C166TaskingCallArguments.CallWords words =
 					C166TaskingCallArguments.recover(program, caller, instruction, blocks, monitor);
+				recordConstantWordPairs(target, words, constantPairsByTarget);
 				Map<Integer, CodePointerEvidence> evidence = codePointerEvidence(program, words);
 				Map<Integer, Integer> scores =
 					scoresByTarget.computeIfAbsent(target, ignored -> new HashMap<>());
@@ -176,8 +180,13 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 		int referenceCount = 0;
 		int referencesRemoved = 0;
 		Set<Function> ambiguousFunctions = new HashSet<>();
+		Map<Function, Set<Integer>> scalarPairs = independentConstantWordPairs(
+			constantPairsByTarget, semanticEvidenceByTarget);
+		scalarPairs = propagateEntryForwardingScalarPairs(program, scalarPairs, monitor);
+		int repairedPointers = repairScalarPointers(program, scalarPairs, log);
 		UpdateStats update = applyEvidence(program, scoresByTarget, evidenceByTarget,
-			semanticEvidenceByTarget, updatedFunctions, ambiguousFunctions, monitor, log);
+			semanticEvidenceByTarget, scalarPairs, updatedFunctions, ambiguousFunctions,
+			monitor, log);
 		inferredParameters += update.inferredParameters();
 		referenceCount += update.referenceCount();
 		referencesRemoved += update.referencesRemoved();
@@ -194,7 +203,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			forwardingEvidenceCount += added;
 			forwardingPasses++;
 			update = applyEvidence(program, scoresByTarget, evidenceByTarget,
-				semanticEvidenceByTarget, updatedFunctions, ambiguousFunctions, monitor, log);
+				semanticEvidenceByTarget, scalarPairs, updatedFunctions, ambiguousFunctions,
+				monitor, log);
 			inferredParameters += update.inferredParameters();
 			referenceCount += update.referenceCount();
 			referencesRemoved += update.referencesRemoved();
@@ -210,7 +220,11 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			inferredParameters + " code-pointer-sized parameter(s) in " +
 			updatedFunctions.size() + " function(s), added or updated " + referenceCount +
 			" code-target reference(s), removed " + referencesRemoved +
-			" data-conflicting reference(s), " + ambiguousFunctions.size() + " ambiguous.");
+			" data-conflicting reference(s), rejected " +
+			scalarPairs.values().stream().mapToInt(Set::size).sum() +
+			" independently-varying scalar pair(s), repaired " + repairedPointers +
+			" stale generic pointer(s), " + ambiguousFunctions.size() +
+			" ambiguous.");
 		return true;
 	}
 
@@ -218,6 +232,7 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			Map<Function, Map<Integer, Integer>> scoresByTarget,
 			Map<Function, Map<Integer, List<CodePointerEvidence>>> evidenceByTarget,
 			Map<Function, Set<Integer>> semanticEvidenceByTarget,
+			Map<Function, Set<Integer>> scalarPairs,
 			Set<Function> updatedFunctions, Set<Function> ambiguousFunctions,
 			TaskMonitor monitor, MessageLog log) throws CancelledException {
 		int inferredParameters = 0;
@@ -240,6 +255,7 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			Set<Integer> starts = removePointerConflicts(program, function,
 				selection.starts(), occurrences,
 				semanticEvidenceByTarget.getOrDefault(function, Set.of()));
+			starts = removeScalarConflicts(function, starts, scalarPairs);
 			for (int conflict : difference(selection.starts(), starts)) {
 				for (CodePointerEvidence evidence : occurrences.getOrDefault(conflict, List.of())) {
 					referencesRemoved += removeCodePointerReference(program, evidence);
@@ -571,6 +587,171 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 		return representation.equals("[-r0]");
 	}
 
+	private void recordConstantWordPairs(Function target,
+			C166TaskingCallArguments.CallWords callWords,
+			Map<Function, Map<Integer, Set<ConstantWordPair>>> pairsByTarget) {
+		for (Map.Entry<Integer, C166TaskingCallArguments.WordValue> entry :
+				callWords.words().entrySet()) {
+			int start = entry.getKey();
+			if (!isLegalPairStart(start) ||
+				(start >= 4 && !callWords.registerBankOccupied())) {
+				continue;
+			}
+			C166TaskingCallArguments.WordValue low = entry.getValue();
+			C166TaskingCallArguments.WordValue high = callWords.words().get(start + 1);
+			if (low == null || high == null || low.constant() == null ||
+				high.constant() == null) {
+				continue;
+			}
+			pairsByTarget.computeIfAbsent(target, ignored -> new HashMap<>())
+				.computeIfAbsent(start, ignored -> new HashSet<>())
+				.add(new ConstantWordPair(low.constant(), high.constant()));
+		}
+	}
+
+	private Map<Function, Set<Integer>> independentConstantWordPairs(
+			Map<Function, Map<Integer, Set<ConstantWordPair>>> pairsByTarget,
+			Map<Function, Set<Integer>> semanticEvidenceByTarget) {
+		Map<Function, Set<Integer>> result = new HashMap<>();
+		for (Map.Entry<Function, Map<Integer, Set<ConstantWordPair>>> target :
+				pairsByTarget.entrySet()) {
+			Set<Integer> semantic =
+				semanticEvidenceByTarget.getOrDefault(target.getKey(), Set.of());
+			for (Map.Entry<Integer, Set<ConstantWordPair>> pair :
+					target.getValue().entrySet()) {
+				if (!semantic.contains(pair.getKey()) &&
+					hasIndependentConstantWords(pair.getValue())) {
+					result.computeIfAbsent(target.getKey(), ignored -> new HashSet<>())
+						.add(pair.getKey());
+				}
+			}
+		}
+		Map<Function, Set<Integer>> immutable = new HashMap<>();
+		for (Map.Entry<Function, Set<Integer>> entry : result.entrySet()) {
+			immutable.put(entry.getKey(), Set.copyOf(entry.getValue()));
+		}
+		return Map.copyOf(immutable);
+	}
+
+	/**
+	 * Carry a proven scalar pair through a literal entry-point forwarding call.
+	 * This prevents a stale pointer type on the forwarding target from feeding
+	 * circular type evidence back into the wrapper on a later fixed-point pass.
+	 */
+	private Map<Function, Set<Integer>> propagateEntryForwardingScalarPairs(
+			Program program, Map<Function, Set<Integer>> initial, TaskMonitor monitor)
+			throws CancelledException {
+		Map<Function, Set<Integer>> result = new HashMap<>();
+		ArrayDeque<FunctionSlot> pending = new ArrayDeque<>();
+		for (Map.Entry<Function, Set<Integer>> entry : initial.entrySet()) {
+			Set<Integer> starts = new HashSet<>(entry.getValue());
+			result.put(entry.getKey(), starts);
+			for (int start : starts) {
+				pending.addLast(new FunctionSlot(entry.getKey(), start));
+			}
+		}
+		while (!pending.isEmpty()) {
+			monitor.checkCancelled();
+			FunctionSlot source = pending.removeFirst();
+			Instruction first =
+				program.getListing().getInstructionAt(source.function().getEntryPoint());
+			if (first == null || (!first.getFlowType().isCall() &&
+				!first.getFlowType().isJump())) {
+				continue;
+			}
+			Function target = directTarget(program, first);
+			if (target == null || !mayUpdate(target) || !usesTaskingConvention(target)) {
+				continue;
+			}
+			Set<Integer> targetStarts =
+				result.computeIfAbsent(target, ignored -> new HashSet<>());
+			if (targetStarts.add(source.start())) {
+				pending.addLast(new FunctionSlot(target, source.start()));
+			}
+		}
+		Map<Function, Set<Integer>> immutable = new HashMap<>();
+		for (Map.Entry<Function, Set<Integer>> entry : result.entrySet()) {
+			immutable.put(entry.getKey(), Set.copyOf(entry.getValue()));
+		}
+		return Map.copyOf(immutable);
+	}
+
+	private boolean hasIndependentConstantWords(Set<ConstantWordPair> pairs) {
+		if (pairs.size() < 4) {
+			return false;
+		}
+		Map<Long, Set<Long>> highByLow = new HashMap<>();
+		for (ConstantWordPair pair : pairs) {
+			highByLow.computeIfAbsent(pair.low(), ignored -> new HashSet<>()).add(pair.high());
+		}
+		List<Set<Long>> highSets = new ArrayList<>(highByLow.values());
+		for (int left = 0; left < highSets.size(); left++) {
+			for (int right = left + 1; right < highSets.size(); right++) {
+				Set<Long> intersection = new HashSet<>(highSets.get(left));
+				intersection.retainAll(highSets.get(right));
+				if (intersection.size() >= 2) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private int repairScalarPointers(Program program,
+			Map<Function, Set<Integer>> scalarPairs, MessageLog log) {
+		int repaired = 0;
+		for (Map.Entry<Function, Set<Integer>> conflict : scalarPairs.entrySet()) {
+			Function function = conflict.getKey();
+			if (function.getSignatureSource() != SourceType.ANALYSIS) {
+				continue;
+			}
+			try {
+				List<Variable> parameters = new ArrayList<>();
+				int split = 0;
+				for (Parameter parameter : function.getParameters()) {
+					Integer start = parameterStart(parameter.getVariableStorage());
+					if (start != null && conflict.getValue().contains(start) &&
+						parameter.getVariableStorage().size() == 4 &&
+						isGenericAnalysisPointerForScalarRepair(function,
+							parameter.getFormalDataType())) {
+						parameters.add(new ParameterImpl(null,
+							Undefined.getUndefinedDataType(2), program));
+						parameters.add(new ParameterImpl(null,
+							Undefined.getUndefinedDataType(2), program));
+						split++;
+					}
+					else {
+						parameters.add(new ParameterImpl(existingName(parameter),
+							parameter.getFormalDataType(), program));
+					}
+				}
+				if (split == 0) {
+					continue;
+				}
+				function.updateFunction(CALLING_CONVENTION, null, parameters,
+					FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+				repaired += split;
+			}
+			catch (DuplicateNameException | InvalidInputException e) {
+				log.appendException(e);
+			}
+		}
+		return repaired;
+	}
+
+	private boolean isGenericAnalysisPointerForScalarRepair(Function function,
+			DataType type) {
+		return isGenericAnalysisPointer(function, type) ||
+			isGenericAnalysisFunctionPointer(function, type);
+	}
+
+	private boolean isGenericAnalysisFunctionPointer(Function function, DataType type) {
+		return function.getSignatureSource() == SourceType.ANALYSIS &&
+			isFunctionPointer(type) &&
+			(isCanonicalGenericFunctionPointer(type) ||
+				isLegacyGenericFunctionPointer(type));
+	}
+
 	private Map<Integer, CodePointerEvidence> codePointerEvidence(Program program,
 			C166TaskingCallArguments.CallWords callWords) {
 		Map<Integer, CodePointerEvidence> evidence = new HashMap<>();
@@ -676,6 +857,23 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 					isGenericAnalysisPointer(function, type)) &&
 				!isRepeatedGenericAnalysisPointer(function, type,
 					occurrences.getOrDefault(candidate, List.of())));
+		}
+		return Set.copyOf(result);
+	}
+
+	private Set<Integer> removeScalarConflicts(Function function, Set<Integer> starts,
+			Map<Function, Set<Integer>> scalarPairs) {
+		Set<Integer> conflicts = scalarPairs.get(function);
+		if (conflicts == null || conflicts.isEmpty()) {
+			return starts;
+		}
+		Set<Integer> result = new HashSet<>();
+		for (int start : starts) {
+			// A pair enters scalarPairs only when no direct far-indirect use exists.
+			// Do not let later propagation from a stale callee type undo that proof.
+			if (!conflicts.contains(start)) {
+				result.add(start);
+			}
 		}
 		return Set.copyOf(result);
 	}
@@ -1090,7 +1288,13 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 	private record Selection(int score, Set<Integer> starts, boolean ambiguous) {
 	}
 
+	private record ConstantWordPair(long low, long high) {
+	}
+
 	private record DirectCallSite(Function caller, Function target, Instruction call) {
+	}
+
+	private record FunctionSlot(Function function, int start) {
 	}
 
 	private record UpdateStats(int inferredParameters, int referenceCount,

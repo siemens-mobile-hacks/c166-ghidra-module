@@ -138,6 +138,35 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint().add(1)),
 			calls(nonEntry), bytes(0xdb, 0x00)));
 
+		// Four SEGMENT:OFFSET constants may each name an exact function entry and
+		// still be two scalar parameters.  A complete 2x2 combination proves that
+		// OFFSET and SEGMENT vary independently.  Reject fresh inference and repair
+		// stale generic ANALYSIS pointers from an older pass.  Carry that scalar
+		// proof through a first-instruction forwarding call so a stale target type
+		// cannot feed circular fpointer evidence back into the wrapper.
+		Function grid00 = functionAt(0x281000, "scalar_grid_00");
+		Function grid01 = functionAt(0x291000, "scalar_grid_01");
+		Function grid10 = functionAt(0x281100, "scalar_grid_10");
+		Function grid11 = functionAt(0x291100, "scalar_grid_11");
+		Function rectangleForwardingTarget = fixture(
+			"exact_entry_rectangle_forwarding_target", bytes(0xdb, 0x00));
+		setLegacyGenericFunctionPointers(rectangleForwardingTarget, "misclassified");
+		Function rectangleScalar = fixture("exact_entry_rectangle_is_two_scalars",
+			concat(calls(rectangleForwardingTarget), bytes(0xdb, 0x00)));
+		setAnalysisPointer(rectangleScalar, "misclassified");
+		Function staleRectangleFunctionPointer = fixture(
+			"repair_stale_rectangle_function_pointer", bytes(0xdb, 0x00));
+		setLegacyGenericFunctionPointers(staleRectangleFunctionPointer, "misclassified");
+		List<Function> rectangleCallers = new ArrayList<>();
+		for (Function gridTarget : List.of(grid00, grid01, grid10, grid11)) {
+			rectangleCallers.add(fixture("exact_entry_rectangle_caller_" +
+				gridTarget.getName(), concat(
+				codePointerSetup(12, 13, gridTarget.getEntryPoint()),
+				calls(rectangleScalar),
+				codePointerSetup(12, 13, gridTarget.getEntryPoint()),
+				calls(staleRectangleFunctionPointer), bytes(0xdb, 0x00))));
+		}
+
 		Function userDefined = fixture("user_defined_code_words", bytes(0xdb, 0x00));
 		setUserWords(userDefined, "offset", "segment");
 		Function userDefinedCaller = fixture("user_defined_code_words_caller", concat(
@@ -271,12 +300,20 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "full code-pointer One Shot failed");
+		checkWordSignature(rectangleScalar, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(rectangleForwardingTarget, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(staleRectangleFunctionPointer, SourceType.ANALYSIS,
+			"r12", "r13");
 		// A later full far-data One Shot must not use the recovered callback type
 		// itself as data evidence.  This is the real GUI ordering which previously
 		// changed FUN_9b0678(fpointer, ...) back to void *.
 		check(new C166FarPointerAnalyzer().added(currentProgram,
 			currentProgram.getMemory(), monitor, new MessageLog()),
 			"far-data analysis after code-pointer inference failed");
+		checkWordSignature(rectangleScalar, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(rectangleForwardingTarget, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(staleRectangleFunctionPointer, SourceType.ANALYSIS,
+			"r12", "r13");
 		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
 		checkMixedSignature(mixed);
 		checkCodeSignature(dataWins, "r13+r12");
@@ -358,7 +395,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
 			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
-			branchMerge, stalePush);
+			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
+			staleRectangleFunctionPointer);
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "second code-pointer analysis failed");
 		check(snapshot.equals(snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
@@ -366,7 +404,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
 			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
-			branchMerge, stalePush)),
+			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
+			staleRectangleFunctionPointer)),
 			"code-pointer inference is not idempotent");
 
 		// Keep references live so fixture creation cannot be optimized away by a
@@ -378,7 +417,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			existingDataPointerCaller != null && dataWinsCaller != null &&
 			dispatcherCaller != null && forwardingTarget != null &&
 			stackForwardingInterveningCall != null &&
-			branchMergeCaller != null && stalePushCaller != null,
+			branchMergeCaller != null && stalePushCaller != null &&
+			rectangleCallers.size() == 4,
 			"missing caller fixture");
 		println("TASKING code-pointer inference matrix passed.");
 	}

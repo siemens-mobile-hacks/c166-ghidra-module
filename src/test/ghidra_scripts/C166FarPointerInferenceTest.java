@@ -263,6 +263,55 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("scalar_pair_stale_caller_b",
 			constantPairCall(staleScalarPair, 0x0001, 0x02c3));
 
+		// M55 FUN_c3ca42 shape: an old generic pointer survives because the wrapper
+		// forwards it before either word is tested.  A complete call-site rectangle
+		// proves that both words vary independently: (0x39,0xae/0xaf) and
+		// (0x3b,0xae/0xaf).  The scalar fact also follows a literal entry call into
+		// the first forwarding target, but must not override real paged access or a
+		// concrete pointed-to type.
+		Function rectangleForwardTarget = fixture("rectangle_scalar_forward_target",
+			bytes(0xdb, 0x00));
+		setAnalysisPointer(rectangleForwardTarget, "misclassified");
+		Function rectangleTypedSink = fixture("rectangle_typed_sink",
+			bytes(0xdb, 0x00));
+		setAnalysisCharPointer(rectangleTypedSink, "text");
+		Function rectangleScalarPair = fixture("rectangle_pair_is_two_scalars",
+			concat(callInstruction(rectangleForwardTarget.getEntryPoint()),
+				callInstruction(rectangleTypedSink.getEntryPoint()), bytes(0xdb, 0x00)));
+		setAnalysisPointer(rectangleScalarPair, "misclassified");
+		fixture("rectangle_scalar_caller_39_ae",
+			constantPairCall(rectangleScalarPair, 0x0039, 0x00ae));
+		fixture("rectangle_scalar_caller_39_af",
+			constantPairCall(rectangleScalarPair, 0x0039, 0x00af));
+		fixture("rectangle_scalar_caller_3b_ae",
+			constantPairCall(rectangleScalarPair, 0x003b, 0x00ae));
+		fixture("rectangle_scalar_caller_3b_af",
+			constantPairCall(rectangleScalarPair, 0x003b, 0x00af));
+
+		Function rectangleRealPointer = fixture("rectangle_with_real_paged_access",
+			pagedRead(13, 12));
+		setAnalysisPointer(rectangleRealPointer, "buffer");
+		fixture("rectangle_pointer_caller_39_ae",
+			constantPairCall(rectangleRealPointer, 0x0039, 0x00ae));
+		fixture("rectangle_pointer_caller_39_af",
+			constantPairCall(rectangleRealPointer, 0x0039, 0x00af));
+		fixture("rectangle_pointer_caller_3b_ae",
+			constantPairCall(rectangleRealPointer, 0x003b, 0x00ae));
+		fixture("rectangle_pointer_caller_3b_af",
+			constantPairCall(rectangleRealPointer, 0x003b, 0x00af));
+
+		Function rectangleConcretePointer = fixture("rectangle_concrete_pointer",
+			bytes(0xdb, 0x00));
+		setAnalysisCharPointer(rectangleConcretePointer, "text");
+		fixture("rectangle_concrete_caller_39_ae",
+			constantPairCall(rectangleConcretePointer, 0x0039, 0x00ae));
+		fixture("rectangle_concrete_caller_39_af",
+			constantPairCall(rectangleConcretePointer, 0x0039, 0x00af));
+		fixture("rectangle_concrete_caller_3b_ae",
+			constantPairCall(rectangleConcretePointer, 0x003b, 0x00ae));
+		fixture("rectangle_concrete_caller_3b_af",
+			constantPairCall(rectangleConcretePointer, 0x003b, 0x00af));
+
 		// One occurrence is insufficient even if it maps, a PAGE that also fits
 		// the 8-bit code SEGMENT remains ambiguous, and an unmapped PAGE:OFFSET is
 		// not evidence at all.
@@ -394,6 +443,11 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			"r13+r12", "r15+r14");
 		checkNoParameters(freshScalarPair);
 		checkWordSignature(staleScalarPair, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(rectangleScalarPair, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(rectangleForwardTarget, SourceType.ANALYSIS, "r12", "r13");
+		checkCharPointer(rectangleTypedSink, "r13+r12");
+		checkSignature(rectangleRealPointer, Set.of(0), "r13+r12");
+		checkCharPointer(rectangleConcretePointer, "r13+r12");
 		checkNoParameters(singleConstantStore);
 		checkNoParameters(codeSizedPageStore);
 		checkNoParameters(unmappedConstantStore);
@@ -537,6 +591,14 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		Variable pointer = new ParameterImpl(name,
 			new PointerDataType(VoidDataType.dataType, currentProgram.getDataTypeManager()),
 			currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisCharPointer(Function function, String name) throws Exception {
+		Variable pointer = new ParameterImpl(name,
+			new PointerDataType(CharDataType.dataType,
+				currentProgram.getDataTypeManager()), currentProgram);
 		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
