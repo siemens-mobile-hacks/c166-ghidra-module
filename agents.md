@@ -43,6 +43,23 @@ strictly gated to the C166 language and `tasking-classic-large` compiler spec.
 Before accepting a core patch, verify that non-C166 compiler specs retain their
 existing parameter, return-storage, and decompiler behavior.
 
+## Commit and release workflow
+
+Never create a commit unless the user explicitly requests one.  Once a commit
+is explicitly requested, apply this sequence to both `c166-ghidra-module` and
+`ghidra-patched`:
+
+1. Review the entire worktree diff for scope, correctness, architecture gating,
+   generated artifacts, and adequate synthetic plus real headless coverage.
+2. Update only the `Differences from Upstream` section of `README.md` with any
+   newly introduced behavior that differs from upstream; do not add release
+   notes elsewhere in the README.  Leave it unchanged when there is no new
+   upstream difference to document.
+3. Run the repository's required build and test suite, including real headless
+   verification for complex decompiler or analysis fixes.
+4. Commit the reviewed changes, push the branch, create the next version tag,
+   and push that tag.
+
 ---
 
 ## Table of Contents
@@ -99,6 +116,7 @@ GhidraInfineon/
 │   ├── C166CallTargetAnalyzer.java # Incrementally extends the static call graph
 │   ├── C166CodePointerAnalyzer.java # Infers SEGMENT:OFFSET code-pointer arguments
 │   ├── C166FarPointerAnalyzer.java # Infers PAGE:OFFSET parameters from data flow
+│   ├── C166TaskingRuntimeAnalyzer.java # Models known TASKING double helpers
 │   ├── C166VariadicCallAnalyzer.java # Repairs typed variadic call sites
 │   ├── PcodeInject.java           # PCode injection library registration
 │   ├── GetPagedOffset.java        # Injector for static address paging

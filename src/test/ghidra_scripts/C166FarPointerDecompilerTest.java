@@ -19,6 +19,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.FunctionDefinition;
+import ghidra.program.model.data.ParameterDefinition;
 import ghidra.program.model.data.ParameterDefinitionImpl;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
@@ -88,8 +89,14 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		string(0x57851d, "A:\\Internet\\pm_%d_%d.dat");
 		string(0x5785b4, "A:\\Internet\\~pm_%d_%d.dat");
 		string(0x5d4bfe, "class");
+		string(0x5c5972,
+			"%s\\%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x" +
+			"%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x");
 		data(0x12000, 0x100, true);      // writable sprintf destination
 		createLabel(toAddr(0x12000), "sprintf_buffer", true);
+		data(0x196e, 4, true);
+		createData(toAddr(0x196e), charPointer);
+		createLabel(toAddr(0x196e), "PTR_00196e", true);
 		data(0x37da6, 0x100, true);
 		createLabel(toAddr(0x37da6), "snprintf_buffer", true);
 		string(0x56735e, "fixed-stack-fixture");
@@ -120,6 +127,27 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0xe6, 0xf4, 0x00, 0x10, // R4 = offset
 			0xe6, 0xf5, 0x01, 0x00, // R5 = page
 			0xdb, 0x00));
+		DataType dwordPointer = new PointerDataType(
+			new UnsignedLongDataType(currentProgram.getDataTypeManager()),
+			currentProgram.getDataTypeManager());
+		Function stackLength = callee(0xbfa81a, "stack_length", word, charPointer);
+		Function consumeStackLength = callee(0x743766, "consume_stack_length",
+			new ShortDataType(currentProgram.getDataTypeManager()),
+			charPointer, dwordPointer, new PointerDataType(VoidDataType.dataType,
+				currentProgram.getDataTypeManager()));
+		Function stackAliasCaller = caller(0x2b80, "call_stack_length_by_address", hexBytes(
+			"8890888026f04400f08ff09e88c088d0" +
+			"dabf1aa8e00cc4401400c4c0160098d098c0" +
+			"f0e066feff3ff2ff02fe88f088e0e6fe140000e0" +
+			"66feff3ff2ff02feda74663706f00400" +
+			"06f0440098809890db00"));
+		List<Variable> stackAliasParameters = new ArrayList<>();
+		stackAliasParameters.add(new ParameterImpl("input", charPointer, currentProgram));
+		stackAliasCaller.setReturnType(
+			new ShortDataType(currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
+		stackAliasCaller.updateFunction("__tasking_c166_classic", null,
+			stackAliasParameters, FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
+			SourceType.USER_DEFINED);
 
 		Function strcmp = callee(STRCMP_ADDRESS, "strcmp",
 			new ShortDataType(currentProgram.getDataTypeManager()),
@@ -396,6 +424,22 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				0xdb, 0x00));
 		callers.add(snprintfFreshPointerCaller);
 
+		// Exact M55_v91 instruction sequence from FUN_747f44 at 0x747f94 through
+		// the cleanup after snprintf@0x748042. It pushes sixteen promoted bytes,
+		// one typed global far-pointer vararg, and the fixed format far pointer.
+		// This caller is deliberately omitted from callerBodies below: changing
+		// only snprintf must still invalidate and rebuild every direct call site.
+		Function snprintf747f44Caller = caller(0x2aa0,
+			"m55_FUN_747f44_snprintf", hexBytes(
+				"f4200f00c02c88c0f4401000c04d88d0f4601100c06e88e0" +
+				"f4801200c08f88f0f4a01300c0aa88a0f4201400c02b88b0" +
+				"f4201500c02c88c0f4201600c02c88c0f4201700c02c88c0" +
+				"f4201800c02c88c0f4201900c02c88c0f4201a00c02c88c0" +
+				"f4201b00c02c88c0f4201c00c02c88c0f4201d00c02c88c0" +
+				"f4201e00c02ce600710188c0f2fc6e19f2fd701988d088c0" +
+				"e6fc7219e6fd710188d088c0e6fc3c0000c066fcff3f" +
+				"f2fd02fee6fe2d00dabf4ab306f02800db00"));
+
 		AddressSet callerBodies = new AddressSet();
 		for (Function caller : callers) {
 			callerBodies.add(caller.getBody());
@@ -445,8 +489,73 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		HighFunctionDBUtil.writeOverride(snprintfInferredParameterCaller, toAddr(0x2a44),
 			splitPointerOverride);
 		C166VariadicCallAnalyzer variadicAnalyzer = new C166VariadicCallAnalyzer();
-		check(variadicAnalyzer.added(currentProgram, callerBodies, monitor, new MessageLog()),
-			"variadic call analyzer failed");
+		AddressSet snprintfOnly = new AddressSet(snprintf.getBody());
+		check(variadicAnalyzer.added(currentProgram, snprintfOnly, monitor, new MessageLog()),
+			"incremental variadic target analysis failed");
+		FunctionDefinition snprintf747f44Override = prototypeOverride(
+			snprintf747f44Caller, toAddr(0x2b4e));
+		check(snprintf747f44Override != null,
+			"changed snprintf target did not invalidate FUN_747f44 call site");
+		ParameterDefinition[] snprintf747f44Arguments =
+			snprintf747f44Override.getArguments();
+		StringBuilder snprintf747f44Types = new StringBuilder();
+		for (ParameterDefinition argument : snprintf747f44Arguments) {
+			if (!snprintf747f44Types.isEmpty()) {
+				snprintf747f44Types.append(", ");
+			}
+			snprintf747f44Types.append(argument.getDataType().getDisplayName());
+		}
+		check(snprintf747f44Arguments.length == 20,
+			"FUN_747f44 override expected 3 fixed and 17 optional arguments, got " +
+				snprintf747f44Arguments.length);
+		check(snprintf747f44Arguments[0].getDataType() instanceof Pointer &&
+			snprintf747f44Arguments[0].getDataType().getLength() == 4 &&
+			snprintf747f44Arguments[1].getDataType().getLength() == 2 &&
+			snprintf747f44Arguments[2].getDataType() instanceof Pointer &&
+			snprintf747f44Arguments[2].getDataType().getLength() == 4 &&
+			snprintf747f44Arguments[3].getDataType() instanceof Pointer &&
+			snprintf747f44Arguments[3].getDataType().getLength() == 4,
+			"FUN_747f44 fixed or pointer-vararg storage was split: " +
+				snprintf747f44Types);
+		for (int i = 4; i < snprintf747f44Arguments.length; i++) {
+			check(snprintf747f44Arguments[i].getDataType().getLength() == 2,
+				"FUN_747f44 promoted byte argument " + (i - 4) + " is not one word");
+		}
+		FunctionDefinitionDataType overjoinedScalarOverride = new FunctionDefinitionDataType(
+			"old_overjoined_scalar_override", currentProgram.getDataTypeManager());
+		overjoinedScalarOverride.setCallingConvention("__tasking_c166_classic_vararg_3");
+		overjoinedScalarOverride.setReturnType(
+			new ShortDataType(currentProgram.getDataTypeManager()));
+		List<ParameterDefinition> overjoinedArguments = new ArrayList<>();
+		overjoinedArguments.add(new ParameterDefinitionImpl("s", charPointer, null));
+		overjoinedArguments.add(new ParameterDefinitionImpl("maxlen",
+			snprintf.getParameter(1).getFormalDataType(), null));
+		overjoinedArguments.add(new ParameterDefinitionImpl("format", charPointer, null));
+		overjoinedArguments.add(new ParameterDefinitionImpl("real_pointer", charPointer, null));
+		overjoinedArguments.add(new ParameterDefinitionImpl("false_pointer_1", charPointer, null));
+		overjoinedArguments.add(new ParameterDefinitionImpl("false_pointer_2", charPointer, null));
+		for (int i = 0; i < 12; i++) {
+			overjoinedArguments.add(new ParameterDefinitionImpl("word_" + i,
+				Undefined.getUndefinedDataType(2), null));
+		}
+		overjoinedScalarOverride.setArguments(
+			overjoinedArguments.toArray(ParameterDefinition[]::new));
+		check(deletePrototypeOverride(snprintf747f44Caller, toAddr(0x2b4e)),
+			"failed to replace FUN_747f44 override with stale scalar fixture");
+		HighFunctionDBUtil.writeOverride(snprintf747f44Caller, toAddr(0x2b4e),
+			overjoinedScalarOverride);
+		check(variadicAnalyzer.added(currentProgram, snprintf747f44Caller.getBody(), monitor,
+			new MessageLog()), "overjoined scalar override repair failed");
+		ParameterDefinition[] normalized747f44Arguments = prototypeOverride(
+			snprintf747f44Caller, toAddr(0x2b4e)).getArguments();
+		check(normalized747f44Arguments.length == 20,
+			"overjoined scalar override was not expanded back to 20 arguments");
+		check(normalized747f44Arguments[3].getDataType() instanceof Pointer,
+			"real pointer was split while normalizing scalar varargs");
+		for (int i = 4; i < normalized747f44Arguments.length; i++) {
+			check(normalized747f44Arguments[i].getDataType().getLength() == 2,
+				"normalized promoted byte argument " + (i - 4) + " is not one word");
+		}
 		FunctionDefinition freshOverride = prototypeOverride(
 			snprintfFreshPointerCaller, toAddr(0x2a84));
 		check(freshOverride != null && freshOverride.getArguments().length == 4 &&
@@ -490,6 +599,13 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		try {
 			String pair0 = decompile(decompiler, callers.get(0));
 			checkCleanPointerCall(pair0, "\"blabla\"");
+
+			String stackAliasCode = decompile(decompiler, stackAliasCaller);
+			check(stackAliasCode.contains(" = stack_length(") &&
+				!stackAliasCode.matches("(?s).*\\n\\s*stack_length\\([^;]+;.*") &&
+				stackAliasCode.contains("consume_stack_length"),
+				"stack local passed by address lost its initializing call result:\n" +
+					stackAliasCode);
 
 			String pair1 = decompile(decompiler, callers.get(1));
 			checkCleanPointerCall(pair1, "\"alpha\"");
@@ -671,6 +787,20 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				!compactSnprintfInferred.contains("(size_t)param_1,param_2"),
 				"inferred far-pointer parameter retained separate OFFSET/PAGE words:\n" +
 					snprintfInferredParameterCode);
+
+			String snprintf747f44Code = decompile(decompiler, snprintf747f44Caller);
+			String compactSnprintf747f44 = snprintf747f44Code.replaceAll("\\s+", "");
+			check(compactSnprintf747f44.contains("snprintf(") &&
+				compactSnprintf747f44.contains(",0x2d,") &&
+				(compactSnprintf747f44.contains("\"%s\\\\%0.2x") ||
+					compactSnprintf747f44.contains("(char*)0x5c5972")),
+				"FUN_747f44 fixed snprintf arguments were not reconstructed:\n" +
+					snprintf747f44Code);
+			check(snprintf747f44Code.indexOf("PTR_00196e") >= 0 &&
+				!snprintf747f44Code.contains("PTR_00196e._2_2_") &&
+				!snprintf747f44Code.contains("0x1711972"),
+				"FUN_747f44 retained split far-pointer representation:\n" +
+					snprintf747f44Code);
 		}
 		finally {
 			decompiler.dispose();
@@ -709,6 +839,20 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			}
 		}
 		return null;
+	}
+
+	private boolean deletePrototypeOverride(Function caller, Address callSite) {
+		if (HighFunction.findOverrideSpace(caller) == null) {
+			return false;
+		}
+		for (Symbol symbol : currentProgram.getSymbolTable().getSymbols(callSite)) {
+			if (symbol.getSymbolType() == SymbolType.LABEL &&
+				HighFunction.isOverrideNamespace(symbol.getParentNamespace()) &&
+				HighFunctionDBUtil.readOverride(symbol) != null) {
+				return symbol.delete();
+			}
+		}
+		return false;
 	}
 
 	private Function callee(long address, String name, DataType returnType,

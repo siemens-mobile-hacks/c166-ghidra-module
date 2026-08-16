@@ -31,6 +31,7 @@ import ghidra.program.model.listing.VariableStorage;
 import ghidrainfineon.C166CodePointerAnalyzer;
 import ghidrainfineon.C166FarPointerAnalyzer;
 import ghidrainfineon.C166TaskingDataTypeAnalyzer;
+import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 import ghidrainfineon.C166VariadicCallAnalyzer;
 
 public class C166TaskingClassicAbiTest extends GhidraScript {
@@ -49,6 +50,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 				"variadic analyzer leaked into legacy compiler spec");
 			check(!new C166TaskingDataTypeAnalyzer().canAnalyze(currentProgram),
 				"TASKING data-type analyzer leaked into legacy compiler spec");
+			check(!new C166TaskingRuntimeAnalyzer().canAnalyze(currentProgram),
+				"TASKING runtime analyzer leaked into legacy compiler spec");
 			check(currentProgram.getDefaultPointerSize() == 3,
 				"legacy pointer size changed to " + currentProgram.getDefaultPointerSize());
 			check(currentProgram.getRegister("ARGFP12") == null,
@@ -73,6 +76,11 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 			"variadic analyzer does not accept TASKING Classic large");
 		check(new C166TaskingDataTypeAnalyzer().canAnalyze(currentProgram),
 			"data-type analyzer does not accept TASKING Classic large");
+		check(new C166TaskingRuntimeAnalyzer().canAnalyze(currentProgram),
+			"runtime analyzer does not accept TASKING Classic large");
+		check(currentProgram.getCompilerSpec().getCallingConvention(
+			"__tasking_c166_double_runtime") != null,
+			"TASKING double-runtime calling convention is missing");
 		String languageId = currentProgram.getLanguageID().getIdAsString();
 		check("C166:LE:16:tasking-classic-large".equals(languageId) ||
 			"C166:CS:LE:16:tasking-classic-large".equals(languageId),

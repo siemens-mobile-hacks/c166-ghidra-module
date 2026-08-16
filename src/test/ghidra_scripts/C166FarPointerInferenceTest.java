@@ -165,6 +165,15 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		setUserParameters(typedWordPointerTarget, wordPointer);
 		Function wordPointerWrapper = fixture("word_pointer_wrapper",
 			calls(typedWordPointerTarget));
+		// M55 FUN_747f44 shape: a stale generic R15:R14 pointer is only an
+		// artifact of an earlier analysis pass.  The wrapper forwards R14 and
+		// R15 to two independently typed uint16_t parameters of sys_open.
+		Function typedScalarForwardTarget = fixture("typed_scalar_forward_target",
+			bytes(0xdb, 0x00));
+		setUserParameters(typedScalarForwardTarget, charPointerType(), wordType(), wordType());
+		Function staleMixedForwarder = fixture("repair_forwarded_scalar_pair_pointer",
+			calls(typedScalarForwardTarget));
+		setAnalysisPointerAndPointer(staleMixedForwarder, "path", "flags_and_mode");
 		// M55 FUN_37d574 shape: an existing word-wise ANALYSIS signature forwards
 		// two late stack words into a typed four-byte callee parameter.  The callee
 		// storage, not a speculative HighFunction pointer type, proves the join.
@@ -237,6 +246,14 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			constantPairCallAtSlot2(objectAndConstantSeed, 0x31be, 0x158));
 		fixture("object_and_constant_caller_b",
 			constantPairCallAtSlot2(objectAndConstantSeed, 0x313e, 0x158));
+		Function typedVariadicTarget = fixture("typed_variadic_signature_preserved",
+			bytes(0xdb, 0x00));
+		setAnalysisWords(typedVariadicTarget, "fixed0", "fixed1");
+		typedVariadicTarget.setVarArgs(true);
+		fixture("typed_variadic_caller_a",
+			constantPairCallAtSlot2(typedVariadicTarget, 0x31be, 0x158));
+		fixture("typed_variadic_caller_b",
+			constantPairCallAtSlot2(typedVariadicTarget, 0x316a, 0x158));
 
 		// M55 FUN_99b53a shape: R12 is tested as a boolean while R13 is an
 		// independent LGP id.  The adjacent constants (1, 0x2c3) happen to decode
@@ -419,6 +436,11 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkPointerTarget(messageWrapper, 0, messageType, "struct pointer type was lost");
 		checkPointerTarget(wordPointerWrapper, 0, wordType(),
 			"uint16_t pointer type was lost");
+		checkSignature(staleMixedForwarder, Set.of(0),
+			"r13+r12", "r14", "r15");
+		check(!(staleMixedForwarder.getParameter(1).getFormalDataType() instanceof Pointer) &&
+			!(staleMixedForwarder.getParameter(2).getFormalDataType() instanceof Pointer),
+			"forwarded scalar words were rejoined as a stale generic pointer");
 		checkPointerTypeConflict(messagePointer, wordPointer);
 		checkSignature(recoveredStackForwarder, Set.of(6), "r12", "r13", "r14", "r15",
 			"Stack[0x0]:2", "Stack[0x2]:2", "Stack[0x4]:4");
@@ -441,6 +463,9 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkSignature(constantSeedStore, Set.of(0), "r13+r12");
 		checkSignature(objectAndConstantSeed, Set.of(0, 1),
 			"r13+r12", "r15+r14");
+		check(typedVariadicTarget.hasVarArgs(),
+			"far-pointer inference removed a variadic declaration");
+		checkWordSignature(typedVariadicTarget, SourceType.ANALYSIS, "r12", "r13");
 		checkNoParameters(freshScalarPair);
 		checkWordSignature(staleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleScalarPair, SourceType.ANALYSIS, "r12", "r13");
@@ -592,6 +617,17 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			new PointerDataType(VoidDataType.dataType, currentProgram.getDataTypeManager()),
 			currentProgram);
 		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisPointerAndPointer(Function function, String firstName,
+			String secondName) throws Exception {
+		DataType genericPointer = new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager());
+		List<Variable> parameters = List.of(
+			new ParameterImpl(firstName, charPointerType(), currentProgram),
+			new ParameterImpl(secondName, genericPointer, currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 

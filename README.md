@@ -21,6 +21,15 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
   when their `SEGMENT:OFFSET` encoding names an executable function entry.
 - Models TASKING Classic Large `double` and aggregate results as caller-stack
   blocks whose near pointer is returned in R4, without a hidden input parameter.
+- Models recognized TASKING Classic double-runtime helpers so user-stack
+  operands, arithmetic results, and preserved registers remain connected in
+  decompiler data flow.
+- Models R0 as the TASKING user stack without a fictitious return-address
+  record, preserving initialized locals whose far address is passed to a call.
+- Repairs typed TASKING variadic call sites incrementally, including fixed far
+  pointers spilled to the user stack, far-pointer arguments in the `...`
+  portion, and stale pointer-shaped pairs of promoted scalar varargs, while
+  preserving the declared fixed variadic prefix.
 - Provides `install-local.sh` for atomic local extension updates with backups.
 
 ## Features

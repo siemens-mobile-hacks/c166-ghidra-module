@@ -175,7 +175,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			seedStats.functions() + " function(s) from " + seedStats.occurrences() +
 			" unambiguous constant call-site occurrence(s), rejected " +
 			seedStats.scalarConflicts() + " scalar-use candidate pair(s), repaired " +
-			seedStats.repairedPointers() + " stale analysis pointer(s), " +
+			(seedStats.repairedPointers() + stats.repairedPointers) +
+			" stale analysis pointer(s), " +
 			"removed " + legacyReferencesRemoved + " legacy call-site reference(s), " +
 			stats.ambiguousFunctions.size() + " ambiguous, " + stats.failedFunctions.size() +
 			" decompilation failure(s), " + stats.recursivePasses +
@@ -257,6 +258,14 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			// determines whether a recursive component needs another pass.
 			stats.referenceCount += addFarPointerReferences(program,
 				result.getHighFunction().getPcodeOps(), stats.referenceSources);
+			Set<Integer> forwardedScalarPairs =
+				findForwardedScalarPairs(program, function, result.getHighFunction());
+			boolean repairedForwardedScalars = !forwardedScalarPairs.isEmpty() &&
+				splitContradictedAnalysisPointers(program, function,
+					forwardedScalarPairs) != 0;
+			if (repairedForwardedScalars) {
+				stats.repairedPointers++;
+			}
 			Inference inference = inferPairs(program, function, result.getHighFunction());
 			stats.globalPointersCreated += defineGlobalFarPointers(program,
 				inference.globalPointerStarts());
@@ -269,9 +278,14 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			pairStarts = removeFunctionPointerConflicts(function, pairStarts);
 			pairStarts = removeCallSiteScalarConflicts(function, pairStarts,
 				inference.directPagedPairs(), scalarPairs, strictScalarPairs);
+			if (!forwardedScalarPairs.isEmpty()) {
+				Set<Integer> retained = new HashSet<>(pairStarts);
+				retained.removeAll(forwardedScalarPairs);
+				pairStarts = Set.copyOf(retained);
+			}
 			if (pairStarts.isEmpty() || signatureMatches(function, pairStarts,
 				inference.liveSlots(), inference.pointerTypes())) {
-				return false;
+				return repairedForwardedScalars;
 			}
 
 			updateSignature(program, function, pairStarts, inference.liveSlots(),
@@ -318,6 +332,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		private int globalPointersCreated;
 		private int recursivePasses;
 		private int nonConvergentComponents;
+		private int repairedPointers;
 	}
 
 	/**
@@ -1352,8 +1367,11 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private boolean mayAnalyze(Function function) {
-		return !function.isExternal() && !function.isThunk() && mayUpdate(function) &&
-			usesTaskingConvention(function);
+		// Recovered arguments after the fixed prefix of a variadic function are
+		// call-site values, not additional formal parameters.  Extending such a
+		// signature corrupts both the declared ABI and later prototype overrides.
+		return !function.isExternal() && !function.isThunk() && !function.hasVarArgs() &&
+			mayUpdate(function) && usesTaskingConvention(function);
 	}
 
 	private boolean hasFarPointerParameter(Function function) {
@@ -1708,6 +1726,98 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		}
 	}
 
+	/**
+	 * Reject a stale generic pointer when its two input words are forwarded to
+	 * two independently typed scalar parameters.  This is stronger than the
+	 * circular pointer type recovered from the caller's existing DB signature.
+	 */
+	private Set<Integer> findForwardedScalarPairs(Program program, Function function,
+			HighFunction highFunction) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return Set.of();
+		}
+		Set<Integer> repairable = new HashSet<>();
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (start != null && isLegalPairStart(start) &&
+				parameter.getVariableStorage().size() == 4 &&
+				isGenericVoidPointer(parameter.getFormalDataType())) {
+				repairable.add(start);
+			}
+		}
+		if (repairable.isEmpty()) {
+			return Set.of();
+		}
+
+		Set<Integer> conflicts = new HashSet<>();
+		Iterator<PcodeOpAST> operations = highFunction.getPcodeOps();
+		while (operations.hasNext()) {
+			PcodeOpAST operation = operations.next();
+			if (operation.getOpcode() != PcodeOp.CALL || operation.getNumInputs() == 0) {
+				continue;
+			}
+			Function target = program.getFunctionManager()
+				.getFunctionAt(operation.getInput(0).getAddress());
+			if (target == null || !usesTaskingConvention(target)) {
+				continue;
+			}
+
+			int inputIndex = 1;
+			Integer previousTargetSlot = null;
+			Integer previousCallerSlot = null;
+			for (Parameter parameter : target.getParameters()) {
+				int storageSize = parameter.getVariableStorage().size();
+				if (storageSize <= 0 || inputIndex >= operation.getNumInputs()) {
+					break;
+				}
+				List<Varnode> pieces = new ArrayList<>();
+				int consumed = 0;
+				while (inputIndex < operation.getNumInputs() && consumed < storageSize) {
+					Varnode input = operation.getInput(inputIndex++);
+					if (input.getSize() > storageSize - consumed) {
+						pieces.clear();
+						break;
+					}
+					pieces.add(input);
+					consumed += input.getSize();
+				}
+
+				Integer targetSlot = parameterStart(parameter.getVariableStorage());
+				Integer callerSlot = null;
+				if (consumed == 2 && pieces.size() == 1 && targetSlot != null &&
+					parameter.getFormalDataType() instanceof AbstractIntegerDataType &&
+					!isPointerType(parameter.getFormalDataType())) {
+					Set<Integer> sources = traceParameterWords(program, pieces.get(0), 0,
+						new HashSet<>());
+					if (sources.size() == 1) {
+						callerSlot = sources.iterator().next();
+					}
+					else if (sources.isEmpty() &&
+						pieces.get(0).getAddress().isRegisterAddress() &&
+						pieces.get(0).getSize() == 2) {
+						Integer directSlot = argumentSlot(program.getRegister(
+							pieces.get(0).getAddress(), pieces.get(0).getSize()));
+						if (directSlot != null && repairable.stream().anyMatch(start ->
+							directSlot == start || directSlot == start + 1)) {
+							callerSlot = directSlot;
+						}
+					}
+				}
+
+				if (previousTargetSlot != null && previousCallerSlot != null &&
+					targetSlot != null && callerSlot != null &&
+					targetSlot == previousTargetSlot + 1 &&
+					callerSlot == previousCallerSlot + 1 &&
+					repairable.contains(previousCallerSlot)) {
+					conflicts.add(previousCallerSlot);
+				}
+				previousTargetSlot = callerSlot == null ? null : targetSlot;
+				previousCallerSlot = callerSlot;
+			}
+		}
+		return Set.copyOf(conflicts);
+	}
+
 	private void scorePointerValue(Program program, Varnode value,
 			Map<Integer, Integer> scores, Map<Integer, DataType> pointerTypes,
 			DataType pointerType,
@@ -2023,18 +2133,47 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			result.add(parameterWord);
 			return result;
 		}
+		HighVariable directHigh = varnode.getHigh();
+		HighSymbol directSymbol = directHigh == null ? null : directHigh.getSymbol();
+		if ((varnode.isInput() ||
+			(directSymbol != null && directSymbol.isParameter())) &&
+			varnode.getAddress().isRegisterAddress() &&
+			varnode.getSize() == 2) {
+			Integer slot = argumentSlot(
+				program.getRegister(varnode.getAddress(), varnode.getSize()));
+			if (slot != null) {
+				result.add(slot);
+				return result;
+			}
+		}
 
 		PcodeOp definition = varnode.getDef();
 		if (definition == null) {
-			Register register = program.getRegister(varnode);
+			Register register = program.getRegister(varnode.getAddress(), varnode.getSize());
 			Integer slot = argumentSlot(register);
 			if (slot != null) {
 				result.add(slot);
 			}
 			return result;
 		}
+		if (definition.getOpcode() == PcodeOp.SUBPIECE &&
+			definition.getNumInputs() == 2 && varnode.getSize() == 2 &&
+			definition.getInput(1).isConstant()) {
+			Varnode whole = definition.getInput(0);
+			HighVariable high = whole.getHigh();
+			HighSymbol symbol = high == null ? null : high.getSymbol();
+			if (symbol != null && symbol.isParameter() &&
+				symbol.getStorage().size() == 4) {
+				Integer start = parameterStart(symbol.getStorage());
+				long byteOffset = definition.getInput(1).getOffset();
+				if (start != null && (byteOffset == 0 || byteOffset == 2)) {
+					result.add(start + (int) (byteOffset / 2));
+					return result;
+				}
+			}
+		}
 
-			switch (definition.getOpcode()) {
+		switch (definition.getOpcode()) {
 			case PcodeOp.COPY:
 			case PcodeOp.CAST:
 			case PcodeOp.INT_ZEXT:
@@ -2092,7 +2231,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private Integer argumentSlot(Register register) {
-		if (register == null || register.getMinimumByteSize() != 2) {
+		if (register == null) {
 			return null;
 		}
 		String name = register.getName().toLowerCase();

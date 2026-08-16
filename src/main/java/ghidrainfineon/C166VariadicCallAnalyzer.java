@@ -183,8 +183,10 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 						Integer optionalWords = optionalWordsAfterFixedStack(program.getListing(),
 							callInstruction, target);
 						if (optionalWords != null) {
-							override = buildFallbackOverride(program, target,
-								recoveredOptionalTypes(program, operation, optionalWords));
+							// Raw variadic recovery may shuffle fixed compound trials ahead of
+							// real optional inputs. First align the CALL with a word override;
+							// typed optional recovery is safe on the refinement pass below.
+							override = buildFallbackOverride(program, target, optionalWords);
 							fallbackOverrides++;
 							refinementCallers.add(caller);
 						}
@@ -303,6 +305,9 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		Set<Function> callers = new LinkedHashSet<>();
 		FunctionManager functions = program.getFunctionManager();
 		for (Address target : targets) {
+			Function targetFunction = functions.getFunctionAt(target);
+			boolean targetAffected = !fullScan && targetFunction != null &&
+				targetFunction.getBody().intersects(set);
 			ReferenceIterator references = program.getReferenceManager().getReferencesTo(target);
 			while (references.hasNext()) {
 				Reference reference = references.next();
@@ -311,7 +316,7 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 				}
 				Function caller = functions.getFunctionContaining(reference.getFromAddress());
 				if (caller != null && !caller.isExternal() &&
-					(fullScan || caller.getBody().intersects(set))) {
+					(fullScan || targetAffected || caller.getBody().intersects(set))) {
 					callers.add(caller);
 				}
 			}
@@ -354,7 +359,8 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 			parameters.add(new ParameterDefinitionImpl(parameter.getName(),
 				currentFormalType(program, parameter.getFormalDataType()), null));
 		}
-		List<DataType> optionalTypes = recoveredOptionalTypes(program, call, optionalWords);
+		List<DataType> optionalTypes = recoveredOptionalTypes(program, call, optionalWords,
+			rawFixedSizes.size() + 1);
 		for (int i = 0; i < optionalTypes.size(); i++) {
 			parameters.add(new ParameterDefinitionImpl("vararg_" + (i + 1),
 				optionalTypes.get(i), null));
@@ -404,19 +410,20 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 	}
 
 	private List<DataType> recoveredOptionalTypes(Program program, PcodeOp call,
-			int optionalWordCount) {
+			int optionalWordCount, int firstOptionalInput) {
 		int remainingBytes = optionalWordCount * 2;
-		List<DataType> reversed = new ArrayList<>();
+		Map<Integer, DataType> recovered = new HashMap<>();
 		Set<Integer> consumedInputs = new HashSet<>();
 		// A previously generated word-wise override can force a pointer into two
 		// 16-bit CALL inputs. Rejoin only when p-code proves that adjacent words
 		// are byte offsets 0 and 2 of the same typed four-byte value.
-		for (int i = call.getNumInputs() - 2; i >= 1 && remainingBytes >= 4; i--) {
+		for (int i = call.getNumInputs() - 2;
+				i >= firstOptionalInput && remainingBytes >= 4; i--) {
 			DataType pointer = splitPointerType(program, call.getInput(i), call.getInput(i + 1));
 			if (pointer == null) {
 				continue;
 			}
-			reversed.add(pointer);
+			recovered.put(i, pointer);
 			consumedInputs.add(i);
 			consumedInputs.add(i + 1);
 			remainingBytes -= 4;
@@ -424,17 +431,22 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		}
 		// Prefer complete typed pointer values over their representation-only
 		// word trials.  Old unsafe overrides can leave both forms on the CALL.
-		for (int i = call.getNumInputs() - 1; i >= 1 && remainingBytes != 0; i--) {
+		for (int i = call.getNumInputs() - 1;
+				i >= firstOptionalInput && remainingBytes != 0; i--) {
+			if (consumedInputs.contains(i)) {
+				continue;
+			}
 			Varnode input = call.getInput(i);
 			DataType type = recoveredOptionalType(program, input);
 			if (!isPointer(type) || input.getSize() > remainingBytes) {
 				continue;
 			}
-			reversed.add(type);
+			recovered.put(i, type);
 			consumedInputs.add(i);
 			remainingBytes -= input.getSize();
 		}
-		for (int i = call.getNumInputs() - 1; i >= 1 && remainingBytes != 0; i--) {
+		for (int i = call.getNumInputs() - 1;
+				i >= firstOptionalInput && remainingBytes != 0; i--) {
 			if (consumedInputs.contains(i)) {
 				continue;
 			}
@@ -443,22 +455,33 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 				continue;
 			}
 			DataType type = recoveredOptionalType(program, input);
-			reversed.add(type);
+			recovered.put(i, type);
 			remainingBytes -= input.getSize();
 		}
 		if (remainingBytes != 0) {
 			return java.util.Collections.nCopies(optionalWordCount,
 				Undefined.getUndefinedDataType(2));
 		}
-		java.util.Collections.reverse(reversed);
-		return reversed;
+		// Detection runs from the end to prefer the actual stack tail when old
+		// overrides expose duplicate trials, but the signature must retain the
+		// original left-to-right CALL input order.
+		List<Integer> inputOrder = new ArrayList<>(recovered.keySet());
+		inputOrder.sort(Integer::compareTo);
+		List<DataType> result = new ArrayList<>();
+		for (int inputIndex : inputOrder) {
+			result.add(recovered.get(inputIndex));
+		}
+		return result;
 	}
 
 	private DataType recoveredOptionalType(Program program, Varnode input) {
 		if (input.getHigh() != null) {
 			DataType type = input.getHigh().getDataType();
 			if (type != null && type.getLength() == input.getSize()) {
-				return currentFormalType(program, type);
+				DataType current = currentFormalType(program, type);
+				if (current.getLength() == input.getSize()) {
+					return current;
+				}
 			}
 		}
 		return Undefined.getUndefinedDataType(input.getSize());
@@ -668,17 +691,25 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 				validPrototypeOverride(program, target, call, existing);
 			boolean refinePointer = valid &&
 				needsPointerRefinement(program, target, operation, existing);
-			if (existing == null || valid && !refinePointer) {
+			boolean normalizeScalars = valid &&
+				needsScalarNormalization(target, operation, existing);
+			if (existing == null || valid && !refinePointer && !normalizeScalars) {
 				continue;
 			}
 
 			FunctionDefinitionDataType replacement = null;
-			if (refinePointer) {
+			if (normalizeScalars &&
+				existing.getDataType() instanceof FunctionDefinition definition) {
+				replacement = buildFallbackOverride(program, target,
+					normalizedOptionalTypes(program, target, operation, definition));
+			}
+			else if (refinePointer) {
 				Integer optionalWords = optionalWordsAfterFixedStack(
 					program.getListing(), call, target);
 				if (optionalWords != null) {
 					replacement = buildFallbackOverride(program, target,
-						recoveredOptionalTypes(program, operation, optionalWords));
+						recoveredOptionalTypes(program, operation, optionalWords,
+							target.getParameterCount() + 1));
 					if (replacement != null && !validPrototypeDefinition(program, target,
 						call, replacement)) {
 						replacement = null;
@@ -701,6 +732,131 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		return removed;
 	}
 
+	private boolean needsScalarNormalization(Function target, PcodeOp call,
+			DataTypeSymbol symbol) {
+		if (!(symbol.getDataType() instanceof FunctionDefinition definition)) {
+			return false;
+		}
+		ParameterDefinition[] arguments = definition.getArguments();
+		int fixedCount = target.getParameterCount();
+		// A stale override can leave extra representation-only trials at the end
+		// of the CALL.  Its declared arguments still map one-for-one to the
+		// leading inputs, which are the only inputs inspected here.
+		if (call.getNumInputs() < arguments.length + 1) {
+			return false;
+		}
+		for (int i = fixedCount; i < arguments.length; i++) {
+			DataType type = arguments[i].getDataType();
+			if (isPointer(type) && type.getLength() == 4 &&
+				isPromotedScalarPair(call.getInput(i + 1), 0, new HashSet<>())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private List<DataType> normalizedOptionalTypes(Program program, Function target,
+			PcodeOp call, FunctionDefinition definition) {
+		List<DataType> result = new ArrayList<>();
+		ParameterDefinition[] arguments = definition.getArguments();
+		for (int i = target.getParameterCount(); i < arguments.length; i++) {
+			DataType type = currentFormalType(program, arguments[i].getDataType());
+			if (isPointer(type) && type.getLength() == 4 &&
+				isPromotedScalarPair(call.getInput(i + 1), 0, new HashSet<>())) {
+				result.add(Undefined.getUndefinedDataType(2));
+				result.add(Undefined.getUndefinedDataType(2));
+			}
+			else {
+				result.add(type);
+			}
+		}
+		return result;
+	}
+
+	private boolean isPromotedScalarPair(Varnode node, int depth, Set<Varnode> visited) {
+		if (node == null || depth > 16 || !visited.add(node)) {
+			return false;
+		}
+		PcodeOp definition = node.getDef();
+		if (definition == null) {
+			return false;
+		}
+		switch (definition.getOpcode()) {
+			case PcodeOp.COPY:
+			case PcodeOp.CAST:
+			case PcodeOp.INT_ZEXT:
+			case PcodeOp.INT_SEXT:
+			case PcodeOp.INDIRECT:
+				return isPromotedScalarPair(definition.getInput(0), depth + 1, visited);
+			case PcodeOp.INT_AND:
+				return definition.getInput(1).isConstant() &&
+					definition.getInput(1).getOffset() == 0xff00ff &&
+					isPackedPromotedBytePair(definition.getInput(0));
+			case PcodeOp.PIECE:
+				return (isScalarByte(definition.getInput(0)) &&
+					isPromotedScalarWord(definition.getInput(1), 0, new HashSet<>())) ||
+					(isPromotedScalarWord(definition.getInput(0), 0, new HashSet<>()) &&
+					isPromotedScalarWord(definition.getInput(1), 0, new HashSet<>()));
+			case PcodeOp.SEGMENTOP:
+				return definition.getNumInputs() >= 3 &&
+					isPromotedScalarWord(definition.getInput(1), 0, new HashSet<>()) &&
+					isPromotedScalarWord(definition.getInput(2), 0, new HashSet<>());
+			default:
+				return false;
+		}
+	}
+
+	private boolean isPackedPromotedBytePair(Varnode node) {
+		PcodeOp piece = node == null ? null : node.getDef();
+		if (piece == null || piece.getOpcode() != PcodeOp.PIECE ||
+			piece.getNumInputs() != 2) {
+			return false;
+		}
+		Varnode highByte = piece.getInput(0);
+		Varnode word = piece.getInput(1);
+		PcodeOp subpiece = highByte.getDef();
+		return highByte.getSize() == 1 && word.getSize() == 2 &&
+			subpiece != null && subpiece.getOpcode() == PcodeOp.SUBPIECE &&
+			subpiece.getNumInputs() == 2 && subpiece.getInput(0).equals(word) &&
+			subpiece.getInput(1).isConstant() &&
+			subpiece.getInput(1).getOffset() == 1;
+	}
+
+	private boolean isScalarByte(Varnode node) {
+		return node != null && node.getSize() == 1 &&
+			(node.getHigh() == null || !isPointer(node.getHigh().getDataType()));
+	}
+
+	private boolean isPromotedScalarWord(Varnode node, int depth, Set<Varnode> visited) {
+		if (node == null || depth > 16 || !visited.add(node)) {
+			return false;
+		}
+		PcodeOp definition = node.getDef();
+		if (definition == null) {
+			return false;
+		}
+		switch (definition.getOpcode()) {
+			case PcodeOp.INT_ZEXT:
+			case PcodeOp.INT_SEXT:
+				return definition.getInput(0).getSize() < node.getSize();
+			case PcodeOp.COPY:
+			case PcodeOp.CAST:
+			case PcodeOp.SUBPIECE:
+			case PcodeOp.INDIRECT:
+				return isPromotedScalarWord(definition.getInput(0), depth + 1, visited);
+			case PcodeOp.INT_AND:
+				Varnode mask = definition.getInput(1);
+				return mask.isConstant() && mask.getOffset() <= 0xff;
+			case PcodeOp.INT_RIGHT:
+			case PcodeOp.INT_SRIGHT:
+				Varnode shift = definition.getInput(1);
+				return shift.isConstant() && shift.getOffset() > 0 &&
+					(shift.getOffset() & 7) == 0;
+			default:
+				return false;
+		}
+	}
+
 	private boolean needsPointerRefinement(Program program, Function target, PcodeOp call,
 			DataTypeSymbol symbol) {
 		if (!(symbol.getDataType() instanceof FunctionDefinition definition)) {
@@ -708,7 +864,8 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		}
 		int fixedCount = target.getParameterCount();
 		ParameterDefinition[] arguments = definition.getArguments();
-		if (arguments.length - fixedCount < 2 || call.getNumInputs() != arguments.length + 1) {
+		if (arguments.length - fixedCount < 2 ||
+			call.getNumInputs() < arguments.length + 1) {
 			return false;
 		}
 		// With a saved override, CALL input zero is the target and every later
