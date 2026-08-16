@@ -100,6 +100,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 		DataType doubleType = new DoubleDataType(currentProgram.getDataTypeManager());
 		DataType structure = new StructureDataType("AbiStruct", 2,
 			currentProgram.getDataTypeManager());
+		DataType largeStructure = new StructureDataType("AbiLargeStruct", 8,
+			currentProgram.getDataTypeManager());
 		DataType pointer = new PointerDataType(CharDataType.dataType,
 			currentProgram.getDataTypeManager());
 
@@ -144,6 +146,26 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 			"r5+r4", "r12", "stack[0x0]:4", "stack[0x4]:2");
 		checkStorage("aggregate", locations(voidType, word, structure, word),
 			"void", "r12", "stack[0x0]:2", "stack[0x2]:2");
+		VariableStorage[] aggregateIndirectReturn =
+			locationsWithAuto(largeStructure, word, word);
+		checkStorage("aggregate-indirect-return", aggregateIndirectReturn,
+			"r4", "r12", "r13");
+		check(aggregateIndirectReturn[0].isForcedIndirect(),
+			"aggregate result is not returned indirectly through R4");
+		checkNoAutoStorage("aggregate-indirect-return", aggregateIndirectReturn);
+		VariableStorage[] doubleIndirectReturn = locationsWithAuto(doubleType, word, word);
+		checkStorage("double-indirect-return", doubleIndirectReturn,
+			"r4", "r12", "r13");
+		check(doubleIndirectReturn[0].isForcedIndirect(),
+			"double result is not returned indirectly through R4");
+		checkNoAutoStorage("double-indirect-return", doubleIndirectReturn);
+		VariableStorage[] variadicIndirectReturn =
+			variadicLocationsWithAuto(largeStructure, 0, word, word);
+		checkStorage("variadic-indirect-return", variadicIndirectReturn,
+			"r4", "stack[0x0]:2", "stack[0x2]:2");
+		check(variadicIndirectReturn[0].isForcedIndirect(),
+			"variadic aggregate result is not returned indirectly through R4");
+		checkNoAutoStorage("variadic-indirect-return", variadicIndirectReturn);
 		checkCallSiteConvention("vararg1", "__tasking_c166_classic_vararg_1",
 			new DataType[] { voidType, pointer, word },
 			"void", "r13+r12", "stack[0x0]:2");
@@ -229,8 +251,25 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 		return model.getStorageLocations(currentProgram, signature, false);
 	}
 
+	private VariableStorage[] locationsWithAuto(DataType returnType, DataType... parameters) {
+		DataType[] signature = new DataType[parameters.length + 1];
+		signature[0] = returnType;
+		System.arraycopy(parameters, 0, signature, 1, parameters.length);
+		return model.getStorageLocations(currentProgram, signature, true);
+	}
+
 	private VariableStorage[] variadicLocations(DataType returnType, int firstVarArgSlot,
 			DataType... parameters) {
+		return variadicLocations(returnType, firstVarArgSlot, false, parameters);
+	}
+
+	private VariableStorage[] variadicLocationsWithAuto(DataType returnType,
+			int firstVarArgSlot, DataType... parameters) {
+		return variadicLocations(returnType, firstVarArgSlot, true, parameters);
+	}
+
+	private VariableStorage[] variadicLocations(DataType returnType, int firstVarArgSlot,
+			boolean addAutoParams, DataType... parameters) {
 		PrototypePieces pieces = new PrototypePieces(model, returnType);
 		for (DataType parameter : parameters) {
 			pieces.intypes.add(parameter);
@@ -238,7 +277,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 		pieces.firstVarArgSlot = firstVarArgSlot;
 
 		ArrayList<ParameterPieces> assigned = new ArrayList<>();
-		model.assignParameterStorage(pieces, currentProgram.getDataTypeManager(), assigned, false);
+		model.assignParameterStorage(pieces, currentProgram.getDataTypeManager(), assigned,
+			addAutoParams);
 		VariableStorage[] result = new VariableStorage[assigned.size()];
 		for (int i = 0; i < assigned.size(); i++) {
 			result[i] = assigned.get(i).getVariableStorage(currentProgram);
@@ -263,6 +303,13 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 			check(expected[i].equals(described), fixture + "[" + i + "]: expected " +
 				expected[i] + ", got " + described + " (" +
 				actual[i].getSerializationString() + ")");
+		}
+	}
+
+	private void checkNoAutoStorage(String fixture, VariableStorage[] storage) {
+		for (int i = 0; i < storage.length; i++) {
+			check(!storage[i].isAutoStorage(), fixture + "[" + i +
+				"] unexpectedly contains an automatic hidden parameter");
 		}
 	}
 

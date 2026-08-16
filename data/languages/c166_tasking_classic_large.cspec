@@ -144,6 +144,18 @@
                 <pentry minsize="3" maxsize="4">
                     <addr space="join" piece1="r5" piece2="r4"/>
                 </pentry>
+                <!--
+                    Double and structure results live in a caller-visible user-stack
+                    block.  The callee returns a near pointer to that block in R4.
+                    Keeping a stack entry in this list gives convert_to_ptr the
+                    16-bit user-stack address size; the entry is not selected directly.
+                -->
+                <pentry minsize="5" maxsize="500" align="2">
+                    <addr offset="0" space="stack"/>
+                </pentry>
+                <rule><datatype name="struct"/><convert_to_ptr/></rule>
+                <rule><datatype name="union"/><convert_to_ptr/></rule>
+                <rule><datatype name="float" minsize="8" maxsize="8"/><convert_to_ptr/></rule>
             </output>
             <unaffected>
                 <register name="r0"/>
@@ -207,6 +219,10 @@
             <pentry minsize="1" maxsize="1"><register name="RL4"/></pentry>
             <pentry minsize="1" maxsize="2"><register name="r4"/></pentry>
             <pentry minsize="3" maxsize="4"><addr space="join" piece1="r5" piece2="r4"/></pentry>
+            <pentry minsize="5" maxsize="500" align="2"><addr offset="0" space="stack"/></pentry>
+            <rule><datatype name="struct"/><convert_to_ptr/></rule>
+            <rule><datatype name="union"/><convert_to_ptr/></rule>
+            <rule><datatype name="float" minsize="8" maxsize="8"/><convert_to_ptr/></rule>
         </output>
         <unaffected>
             <register name="r0"/><register name="r6"/><register name="r7"/>
@@ -248,6 +264,10 @@
             <pentry minsize="1" maxsize="1"><register name="RL4"/></pentry>
             <pentry minsize="1" maxsize="2"><register name="r4"/></pentry>
             <pentry minsize="3" maxsize="4"><addr space="join" piece1="r5" piece2="r4"/></pentry>
+            <pentry minsize="5" maxsize="500" align="2"><addr offset="0" space="stack"/></pentry>
+            <rule><datatype name="struct"/><convert_to_ptr/></rule>
+            <rule><datatype name="union"/><convert_to_ptr/></rule>
+            <rule><datatype name="float" minsize="8" maxsize="8"/><convert_to_ptr/></rule>
         </output>
         <unaffected>
             <register name="r0"/><register name="r6"/><register name="r7"/>
@@ -289,6 +309,10 @@
             <pentry minsize="1" maxsize="1"><register name="RL4"/></pentry>
             <pentry minsize="1" maxsize="2"><register name="r4"/></pentry>
             <pentry minsize="3" maxsize="4"><addr space="join" piece1="r5" piece2="r4"/></pentry>
+            <pentry minsize="5" maxsize="500" align="2"><addr offset="0" space="stack"/></pentry>
+            <rule><datatype name="struct"/><convert_to_ptr/></rule>
+            <rule><datatype name="union"/><convert_to_ptr/></rule>
+            <rule><datatype name="float" minsize="8" maxsize="8"/><convert_to_ptr/></rule>
         </output>
         <unaffected>
             <register name="r0"/><register name="r6"/><register name="r7"/>

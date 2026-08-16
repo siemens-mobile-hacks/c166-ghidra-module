@@ -20,6 +20,29 @@ This file contains the complete **C166 Instruction Set Manual** (converted from 
 
 **Always verify instruction behavior against this reference** before making changes to `c166.sinc`.
 
+## ⚠️ Important: TASKING Classic Large ABI Reference
+
+Before modifying or verifying `tasking-classic-large` calling conventions,
+parameter storage, return storage, data types, or pointer representation, consult:
+
+```
+/home/azq2/Documents/DIY/Siemens/C166/ST10 C Cross-Compiler User's Manual.pdf
+```
+
+Treat this manual as the primary ABI source and follow the **Large Memory
+Model** exactly.  Do not infer this ABI from another C166 memory model, another
+compiler, or Ghidra's default hidden-return behavior.  In particular, verify
+changes against sections 3.2.1.6, 3.5, 3.6, 3.15, and 3.16; section 3.15 table
+3-15 and section 3.16.5 define the user-stack/R4 convention for `double` and
+structure return values.
+
+Patches in `ghidra-patched` must not change the behavior of unrelated
+architectures.  A Ghidra core fix must either preserve a general existing API
+contract in an architecture-neutral way and include regression coverage, or be
+strictly gated to the C166 language and `tasking-classic-large` compiler spec.
+Before accepting a core patch, verify that non-C166 compiler specs retain their
+existing parameter, return-storage, and decompiler behavior.
+
 ---
 
 ## Table of Contents
@@ -415,7 +438,11 @@ Output: `dist/ghidra_<version>_PUBLIC_<date>_GhidraInfineon.zip`
 2. Delete `.sla` if SLEIGH changed
 3. Run `gradlew buildExtension`
 4. Always install the freshly built extension locally with `./install-local.sh`
-5. Reopen target binary (or clear analysis and re-analyze)
+5. If the change patches Ghidra core, always install the freshly built patched
+   distribution into `/opt/ghidra`, keeping the previous installation as a
+   recoverable backup.  Testing a temporary distribution is not a substitute
+   for updating the local installation.
+6. Reopen target binary (or clear analysis and re-analyze)
 
 Do not consider an extension change locally verified while Ghidra is still
 using an older installed JAR.  After every implementation change, run

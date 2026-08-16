@@ -19,6 +19,8 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
 - Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
 - Joins constant far code-pointer arguments as four-byte function pointers
   when their `SEGMENT:OFFSET` encoding names an executable function entry.
+- Models TASKING Classic Large `double` and aggregate results as caller-stack
+  blocks whose near pointer is returned in R4, without a hidden input parameter.
 - Provides `install-local.sh` for atomic local extension updates with backups.
 
 ## Features
@@ -124,7 +126,7 @@ than to an individual compiler spec.
 Functions left at Ghidra's `default` or `unknown` convention use this model
 automatically; assigning `__stdcall` manually is not required.
 
-ABI source: [TASKING C166/ST10 Classic v7.5 manuals](https://www.tasking.com/support/c166-classic/MAN_PDF_V7.5.ZIP), sections 3.2.1.6 and 3.5.
+ABI source: [TASKING C166/ST10 Classic v7.5 manuals](https://www.tasking.com/support/c166-classic/MAN_PDF_V7.5.ZIP), sections 3.2.1.6, 3.5, 3.15, and 3.16.5.
 
 | Language / compiler ID | Convention | Word parameters | 32-bit / far-pointer storage | Default C pointer |
 |------------------------|------------|-----------------|------------------------------|-------------------|
@@ -141,8 +143,9 @@ The new compiler spec also models the Classic spill rule: once an argument does
 not fit in the remaining parameter registers, it and all following arguments
 use the user stack. Fixed parameters of variadic functions still use registers;
 only the `...` portion is forced to the stack. Floating-point and aggregate
-arguments are stack-passed. Precise aggregate return semantics are not yet
-modeled.
+arguments are stack-passed. `double` and aggregate results use caller-provided
+user-stack storage; the callee returns its near pointer in R4 without receiving
+a hidden input parameter.
 
 TASKING **VX** uses a different ABI and is not currently supported by this
 module. Do not use `tasking-classic-large` for VX-generated binaries. Keil C166
@@ -207,7 +210,7 @@ argument count ambiguous are deliberately left unchanged.
 
 - Manually overridden switches show case labels as addresses (e.g., `case 0x12345:`) instead of indices
 - Nested switches may require manual script invocation for each `jmpi`
-- TASKING Classic aggregate returns and generic `PAGE:OFFSET` pointer arithmetic are not fully modeled
+- Generic TASKING Classic `PAGE:OFFSET` pointer arithmetic is not fully modeled
 - TASKING Classic huge-model `SEGMENT:OFFSET` pointers are not yet supported
 - Variadic calls with unused parameter registers remain ambiguous without additional type information
 

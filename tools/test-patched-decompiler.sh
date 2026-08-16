@@ -60,6 +60,7 @@ HOME="${test_home}" XDG_CONFIG_HOME="${config_dir}" "${headless}" \
 	-noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
 	-postScript C166FarPointerDecompilerTest.java \
+	-postScript C166IndirectReturnDecompilerTest.java \
 	-deleteProject 2>&1 | tee "${headless_log}"
 headless_status=${PIPESTATUS[0]}
 set -e
