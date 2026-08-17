@@ -18,12 +18,18 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
 - Adds a TASKING C166 Classic 7.5 large-model ABI with true four-byte C pointers.
 - Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
 - Joins constant far code-pointer arguments as four-byte function pointers
-  when their `SEGMENT:OFFSET` encoding names an executable function entry.
+  when their `SEGMENT:OFFSET` encoding names an executable function entry,
+  while requiring repeated or semantic evidence before propagating that type
+  backwards through wrappers.
+- Infers far data-pointer returns in the documented R5/R4 pair from proven
+  downstream pointer use without confusing scalar or callback returns.
+- Recognizes TASKING far-indirect dispatchers, applies their call fixup, and
+  removes stale analyzer-owned C parameters from the dispatcher itself.
 - Models TASKING Classic Large `double` and aggregate results as caller-stack
   blocks whose near pointer is returned in R4, without a hidden input parameter.
-- Models recognized TASKING Classic double-runtime helpers so user-stack
-  operands, arithmetic results, and preserved registers remain connected in
-  decompiler data flow.
+- Models recognized TASKING Classic double and 32-bit integer runtime helpers
+  so user-stack operands, arithmetic results, and preserved registers remain
+  connected in decompiler data flow.
 - Models R0 as the TASKING user stack without a fictitious return-address
   record, preserving initialized locals whose far address is passed to a call.
 - Repairs typed TASKING variadic call sites incrementally, including fixed far

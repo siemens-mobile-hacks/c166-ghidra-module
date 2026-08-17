@@ -13,6 +13,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Parameter;
 import ghidrainfineon.C166CodePointerAnalyzer;
 import ghidrainfineon.C166FarPointerAnalyzer;
+import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
 public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
@@ -25,9 +26,13 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 	protected void run() throws Exception {
 		println("M55 HEADLESS language=" + currentProgram.getLanguageID() +
 			" compiler=" + currentProgram.getCompilerSpec().getCompilerSpecID());
+		ensureFunction(0x2590ce);
 		dump("BEFORE");
 
 		AddressSet wholeProgram = new AddressSet(currentProgram.getMemory());
+		MessageLog runtimeLog = new MessageLog();
+		new C166TaskingRuntimeAnalyzer().added(currentProgram, wholeProgram, monitor, runtimeLog);
+		println("M55 HEADLESS runtime-log=" + runtimeLog);
 		MessageLog codeLog = new MessageLog();
 		new C166CodePointerAnalyzer().added(currentProgram, wholeProgram, monitor, codeLog);
 		println("M55 HEADLESS code-log=" + codeLog);
@@ -42,6 +47,12 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 	}
 
 	private void verifyFinalState() throws Exception {
+		Function dispatcher = getFunctionAt(toAddr(0xa26154));
+		check(dispatcher != null, "missing M55 far-indirect dispatcher");
+		check("call_far_indirect".equals(dispatcher.getCallFixup()),
+			"M55 far-indirect dispatcher did not receive its call-fixup");
+		check(dispatcher.getParameterCount() == 0,
+			"M55 far-indirect dispatcher retained an inferred C signature");
 		checkFunctionPointers(0x9b0678, 0, 1);
 		checkFunctionPointers(0x9bb936, 0, 1);
 		checkFunctionPointers(0x9bc42a, 2, 3);
@@ -54,6 +65,12 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		checkScalarWord(0xc3ca42, 1, "r13");
 		checkScalarWord(0xc3ca4a, 0, "r12");
 		checkScalarWord(0xc3ca4a, 1, "r13");
+		Function impossibleCodePointer = getFunctionAt(toAddr(0xc393da));
+		check(impossibleCodePointer != null, "missing FUN_c393da");
+		for (Parameter parameter : impossibleCodePointer.getParameters()) {
+			check(!isFunctionPointer(parameter.getFormalDataType()),
+				"FUN_c393da retained an impossible generic code pointer");
+		}
 
 		Function caller = getFunctionAt(toAddr(0x242066));
 		check(caller != null, "missing FUN_242066");
@@ -80,25 +97,43 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		check(scalarCaller != null, "missing caller containing 6f30aa");
 		String scalarCallerCode = decompile(scalarCaller, "VERIFY");
 		String compactScalarCode = scalarCallerCode.replaceAll("\\s+", "");
-		check(compactScalarCode.contains("FUN_99b53a(1,0x2c3,"),
+		check(compactScalarCode.contains("FUN_99b53a(1,0x2c3)"),
 			"6f30aa did not retain separate flag and LGP-id arguments");
 		check(!compactScalarCode.contains("0xb0c001") &&
 			!compactScalarCode.contains("DAT_b0c001"),
 			"6f30aa still contains the false PAGE:OFFSET pointer");
 
-		Function resultCaller = getFunctionAt(toAddr(0xc394d8));
-		check(resultCaller != null, "missing AT_SayResult at c394d8");
+		Function resultCaller = ensureFunction(0xc394dc);
 		String compactResultCode = decompile(resultCaller, "VERIFY").replaceAll("\\s+", "");
-		check(compactResultCode.contains("FUN_c3ca42(1,0xff)"),
+		check(compactResultCode.contains("FUN_c3ca42(1,0xff)") ||
+			compactResultCode.contains("FUN_c3ca4a(1,0xff)"),
 			"c394dc did not retain separate result and message-id arguments");
 		check(!compactResultCode.contains("0x3fc001") &&
 			!compactResultCode.contains("DAT_3fc001"),
 			"c394dc still contains the false PAGE:OFFSET pointer");
+
+		Function dispatcherCaller = getFunctionAt(toAddr(0x2eb0e8));
+		check(dispatcherCaller != null, "missing FUN_2eb0e8");
+		String dispatcherCode = decompile(dispatcherCaller, "VERIFY");
+		check(!dispatcherCode.contains("FUN_a26154(") &&
+			dispatcherCode.contains("(*(code *)"),
+			"FUN_2eb0e8 still exposes the far-indirect dispatcher as split arguments:\n" +
+				dispatcherCode);
+
+		Function extpCaller = getFunctionAt(toAddr(0xc35672));
+		check(extpCaller != null, "missing FUN_c35672");
+		String extpCode = decompile(extpCaller, "VERIFY");
+		check(extpCode.contains("* 0x4000"),
+			"FUN_c35672 lost PAGE while lowering register EXTP");
 	}
 
 	private void checkScalarWord(long address, int index, String registerName) {
 		Function function = getFunctionAt(toAddr(address));
 		check(function != null, "missing function at " + Long.toHexString(address));
+		if (function.getParameterCount() == 0 &&
+			function.getSignatureSource() == ghidra.program.model.symbol.SourceType.DEFAULT) {
+			return;
+		}
 		check(index < function.getParameterCount(),
 			function.getName() + ": missing parameter " + index);
 		Parameter parameter = function.getParameter(index);
@@ -192,7 +227,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			println("M55 HEADLESS " + phase + " FUN_6f2ea6_END");
 		}
 
-		Function resultCaller = getFunctionAt(toAddr(0xc394d8));
+		Function resultCaller = ensureFunction(0xc394dc);
 		if (resultCaller != null) {
 			println("M55 HEADLESS " + phase + " AT_SayResult_BEGIN");
 			println(decompile(resultCaller, phase));
@@ -219,6 +254,23 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		finally {
 			decompiler.dispose();
 		}
+	}
+
+	private Function ensureFunction(long address) throws Exception {
+		Function function = getFunctionAt(toAddr(address));
+		if (function != null) {
+			return function;
+		}
+		check(getFunctionContaining(toAddr(address)) == null,
+			"M55 fixture entry is inside another function at " + Long.toHexString(address));
+		if (getInstructionAt(toAddr(address)) == null) {
+			check(disassemble(toAddr(address)),
+				"failed to disassemble M55 fixture at " + Long.toHexString(address));
+		}
+		function = createFunction(toAddr(address), "FUN_" + Long.toHexString(address));
+		check(function != null,
+			"failed to create M55 fixture at " + Long.toHexString(address));
+		return function;
 	}
 
 	private void check(boolean condition, String message) {

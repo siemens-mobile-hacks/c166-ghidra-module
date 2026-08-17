@@ -169,7 +169,11 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 					return emitPagedSegment(addr, reg, offset & 0x3FFF, extp.immValue & 0x3FFL,
 							output, constSpace, uniqueSpace, uniqueOffset);
 				}
-				return emitRuntimePagedSegment(addr, reg, offset & 0x3FFFL, extp.gpRegister,
+				// Keep PAGE and OFFSET as separate arithmetic values.  A segmentop
+				// can lose the PAGE after an analyzer-owned stale pointer is split
+				// back into its two ABI words.
+				return emitShiftViaReg(addr, reg, offset & 0x3ffFL,
+					extp.gpRegister, 14,
 						output, constSpace, uniqueSpace, uniqueOffset);
 			}
 			return emitRawFallback(addr, reg, offset, output, constSpace, uniqueSpace, uniqueOffset);
@@ -215,19 +219,24 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 			Register pageRegister, Varnode output,
 			AddressSpace constantSpace, AddressSpace uniqueSpace, long uniqueOffset) {
 		Varnode offsetConstant = new Varnode(constantSpace.getAddress(offset), 2);
-		Varnode inner = new Varnode(uniqueSpace.getAddress(uniqueOffset), 2);
+		Varnode sum = new Varnode(uniqueSpace.getAddress(uniqueOffset), 2);
+		Varnode mask = new Varnode(constantSpace.getAddress(0x3fff), 2);
+		Varnode inner = new Varnode(uniqueSpace.getAddress(uniqueOffset + 4), 2);
 		Varnode page = new Varnode(pageRegister.getAddress(), pageRegister.getMinimumByteSize());
 		Varnode userop = new Varnode(constantSpace.getAddress(segmentUseropIndex), 4);
 		return new PcodeOp[] {
 			new PcodeOp(address, 0, PcodeOp.INT_ADD,
-				new Varnode[] { register, offsetConstant }, inner),
-			new PcodeOp(address, 1, PcodeOp.CALLOTHER,
+				new Varnode[] { register, offsetConstant }, sum),
+			new PcodeOp(address, 1, PcodeOp.INT_AND,
+				new Varnode[] { sum, mask }, inner),
+			new PcodeOp(address, 2, PcodeOp.CALLOTHER,
 				new Varnode[] { userop, page, inner }, output)
 		};
 	}
 
 	/**
-	 * Emit `output = (page << 14) + zext(reg + maskedOffset)` for paged access.
+	 * Emit `output = (page << 14) + zext((reg + maskedOffset) & 0x3fff)` for
+	 * paged access.
 	 *
 	 * The earlier implementation emitted `segment(page, reg + maskedOffset)`,
 	 * which the segment() pcodeop unfolds as `(page << 14) | sum`. The
@@ -240,35 +249,33 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 	 * decompiler fold the constant page+base into a single resolvable
 	 * address, recovering symbol references.
 	 *
-	 * Correctness: + and | only differ when sum overflows the 14-bit page
-	 * window (sum >= 0x4000). Since maskedOffset was already AND-ed with
-	 * 0x3FFF and reg-based indexing in compiler-generated code stays well
-	 * inside the page (cross-page indexing requires absolute long-mem
-	 * encoding, not [reg+#imm]), the carry path is unreachable for valid
-	 * code. Pathological assembler that writes [reg+#imm] with reg + imm
-	 * spilling into the page bits would already be semantically broken at
-	 * the source — and the disassembly operand would mislead just as much.
+	 * EXTP and DPP addressing always discard address bits 15..14 after the
+	 * 16-bit register addition.  Keeping the mask in p-code is required even
+	 * for unusual hand-written code and exactly follows the C166 manual.
 	 */
 	private PcodeOp[] emitPagedSegment(Address addr, Varnode reg, long maskedOffset, long page,
 			Varnode output, AddressSpace constSpace, AddressSpace uniqueSpace, long uniqueOffset) {
 		int seqnum = 0;
-		PcodeOp[] ops = new PcodeOp[2];
+		PcodeOp[] ops = new PcodeOp[4];
 
-		// Pre-fold the page contribution and the in-page offset into a single
-		// 24-bit constant. Putting the absolute address (e.g. 0x130AC) directly
-		// into the pcode lets the decompiler match it against the symbol table
-		// without further constant propagation across a zero-extend.
-		long absBase = ((page & 0x3FFL) << 14) | (maskedOffset & 0x3FFFL);
+		Varnode offsetConst = new Varnode(constSpace.getAddress(maskedOffset & 0x3fffL), 2);
+		Varnode sum = new Varnode(uniqueSpace.getAddress(uniqueOffset), 2);
+		ops[0] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD,
+			new Varnode[] { reg, offsetConst }, sum);
 
-		// 1. zreg:3 = zext(reg)
-		Varnode zreg = new Varnode(uniqueSpace.getAddress(uniqueOffset), 3);
-		ops[0] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ZEXT,
-				new Varnode[] { reg }, zreg);
+		Varnode pageMask = new Varnode(constSpace.getAddress(0x3fff), 2);
+		Varnode inner = new Varnode(uniqueSpace.getAddress(uniqueOffset + 4), 2);
+		ops[1] = new PcodeOp(addr, seqnum++, PcodeOp.INT_AND,
+			new Varnode[] { sum, pageMask }, inner);
 
-		// 2. output:3 = zreg + absBase
-		Varnode baseConst = new Varnode(constSpace.getAddress(absBase), 3);
-		ops[1] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD,
-				new Varnode[] { zreg, baseConst }, output);
+		Varnode zinner = new Varnode(uniqueSpace.getAddress(uniqueOffset + 8), 3);
+		ops[2] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ZEXT,
+			new Varnode[] { inner }, zinner);
+
+		Varnode pageBase =
+			new Varnode(constSpace.getAddress((page & 0x3ffL) << 14), 3);
+		ops[3] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD,
+			new Varnode[] { zinner, pageBase }, output);
 
 		return ops;
 	}
@@ -305,7 +312,8 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 	}
 
 	/**
-	 * Emit `output = (zext(gpReg) << shiftAmount) + zext(reg + maskedOffset)`
+	 * Emit `output = (zext(gpReg) << shiftAmount) +
+	 * zext((reg + maskedOffset) & addressMask)`
 	 * for register-mode EXTP (shift = 14) and EXTS (shift = 16).
 	 *
 	 * The segment/page value lives in `gpReg` at runtime, not in the
@@ -317,16 +325,13 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 	 * created (e.g. for `mov r5,#0x14; exts r5,#1; mov r5,[r4]` the
 	 * target becomes 0x14_0000 + r4).
 	 *
-	 * Carry-into-segment-bit caveat: same as emitSegmentShift16 /
-	 * emitPagedSegment — INT_ADD only differs from INT_OR if the in-page
-	 * sum overflows the page window. Compiler-generated `[reg+#imm]`
-	 * stays inside, so the carry path is unreachable for valid code.
+	 * EXTP uses a 14-bit inner-address mask; EXTS preserves all 16 bits.
 	 */
 	private PcodeOp[] emitShiftViaReg(Address addr, Varnode reg, long maskedOffset,
 			Register gpReg, int shiftAmount,
 			Varnode output, AddressSpace constSpace, AddressSpace uniqueSpace, long uniqueOffset) {
 		int seqnum = 0;
-		PcodeOp[] ops = new PcodeOp[5];
+		PcodeOp[] ops = new PcodeOp[6];
 
 		Varnode gpVarnode = new Varnode(gpReg.getAddress(), gpReg.getMinimumByteSize());
 
@@ -336,23 +341,31 @@ public class RegOffsetAddr extends InjectPayloadCallother {
 		ops[0] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD,
 				new Varnode[] { reg, offsetConst }, sum);
 
-		// 2. zsum:3 = zext(sum)
-		Varnode zsum = new Varnode(uniqueSpace.getAddress(uniqueOffset + 4), 3);
-		ops[1] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ZEXT, new Varnode[] { sum }, zsum);
+		// 2. inner:2 = sum & (EXTP ? 0x3fff : 0xffff)
+		long addressMask = shiftAmount == 14 ? 0x3fffL : 0xffffL;
+		Varnode mask = new Varnode(constSpace.getAddress(addressMask), 2);
+		Varnode inner = new Varnode(uniqueSpace.getAddress(uniqueOffset + 4), 2);
+		ops[1] = new PcodeOp(addr, seqnum++, PcodeOp.INT_AND,
+				new Varnode[] { sum, mask }, inner);
 
-		// 3. zgpReg:3 = zext(gpReg)
-		Varnode zgpReg = new Varnode(uniqueSpace.getAddress(uniqueOffset + 8), 3);
+		// 3. zsum:3 = zext(inner)
+		Varnode zsum = new Varnode(uniqueSpace.getAddress(uniqueOffset + 8), 3);
 		ops[2] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ZEXT,
+				new Varnode[] { inner }, zsum);
+
+		// 4. zgpReg:3 = zext(gpReg)
+		Varnode zgpReg = new Varnode(uniqueSpace.getAddress(uniqueOffset + 12), 3);
+		ops[3] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ZEXT,
 				new Varnode[] { gpVarnode }, zgpReg);
 
-		// 4. shifted:3 = zgpReg << shiftAmount
+		// 5. shifted:3 = zgpReg << shiftAmount
 		Varnode shiftConst = new Varnode(constSpace.getAddress(shiftAmount), 4);
-		Varnode shifted = new Varnode(uniqueSpace.getAddress(uniqueOffset + 12), 3);
-		ops[3] = new PcodeOp(addr, seqnum++, PcodeOp.INT_LEFT,
+		Varnode shifted = new Varnode(uniqueSpace.getAddress(uniqueOffset + 16), 3);
+		ops[4] = new PcodeOp(addr, seqnum++, PcodeOp.INT_LEFT,
 				new Varnode[] { zgpReg, shiftConst }, shifted);
 
-		// 5. output:3 = zsum + shifted
-		ops[4] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD,
+		// 6. output:3 = zsum + shifted
+		ops[5] = new PcodeOp(addr, seqnum++, PcodeOp.INT_ADD,
 				new Varnode[] { zsum, shifted }, output);
 
 		return ops;

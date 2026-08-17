@@ -183,6 +183,16 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 		Map<Function, Set<Integer>> scalarPairs = independentConstantWordPairs(
 			constantPairsByTarget, semanticEvidenceByTarget);
 		scalarPairs = propagateEntryForwardingScalarPairs(program, scalarPairs, monitor);
+		Map<Function, Set<Integer>> supportedEvidenceByTarget =
+			mutableSetMap(semanticEvidenceByTarget);
+		Map<Function, Set<Integer>> forwardingEvidenceByTarget =
+			mutableSetMap(semanticEvidenceByTarget);
+		// Register exact function-entry constants only after the independent-word
+		// rectangle check above.  Every occurrence supports the local callee type;
+		// only repeated occurrences become backwards-forwarding roots.  Four
+		// individually valid code addresses may still be two scalar arguments.
+		registerDirectEvidence(evidenceByTarget, scalarPairs,
+			supportedEvidenceByTarget, forwardingEvidenceByTarget);
 		int repairedPointers = repairScalarPointers(program, scalarPairs, log);
 		UpdateStats update = applyEvidence(program, scoresByTarget, evidenceByTarget,
 			semanticEvidenceByTarget, scalarPairs, updatedFunctions, ambiguousFunctions,
@@ -196,7 +206,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 		while (true) {
 			monitor.checkCancelled();
 			int added = collectForwardingEvidence(program, directCalls, blocks,
-				scoresByTarget, semanticEvidenceByTarget, monitor);
+				scoresByTarget, semanticEvidenceByTarget, forwardingEvidenceByTarget,
+				supportedEvidenceByTarget, monitor);
 			if (added == 0) {
 				break;
 			}
@@ -208,6 +219,10 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			inferredParameters += update.inferredParameters();
 			referenceCount += update.referenceCount();
 			referencesRemoved += update.referencesRemoved();
+		}
+		if (fullScan) {
+			repairedPointers += repairUnsupportedGenericFunctionPointers(program, callers,
+				supportedEvidenceByTarget, log);
 		}
 
 		report(program, (fullScan ? "Full" : "Incremental") + " scan: inspected " +
@@ -313,39 +328,7 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 	 * values are deliberately not used to type the dispatcher's own signature.
 	 */
 	private boolean isFarIndirectDispatcher(Program program, Function function) {
-		if ("call_far_indirect".equals(function.getCallFixup()) ||
-			"__call_far_indirect".equals(function.getName())) {
-			return true;
-		}
-		Instruction previousPrevious = null;
-		Instruction previous = null;
-		InstructionIterator instructions =
-			program.getListing().getInstructions(function.getBody(), true);
-		while (instructions.hasNext()) {
-			Instruction current = instructions.next();
-			if (current.getMnemonicString().equalsIgnoreCase("rets") &&
-				isRegisterPush(previousPrevious, "r5") &&
-				isRegisterPush(previous, "r4")) {
-				return true;
-			}
-			previousPrevious = previous;
-			previous = current;
-		}
-		return false;
-	}
-
-	private boolean isRegisterPush(Instruction instruction, String registerName) {
-		if (instruction == null) {
-			return false;
-		}
-		Register source = null;
-		if (instruction.getMnemonicString().equalsIgnoreCase("push")) {
-			source = operandRegister(instruction, 0);
-		}
-		else if (isStackPush(instruction)) {
-			source = operandRegister(instruction, 1);
-		}
-		return source != null && source.getName().equalsIgnoreCase(registerName);
+		return C166TaskingRuntimeAnalyzer.isFarIndirectDispatcher(program, function);
 	}
 
 	private Integer dispatcherTargetPair(Program program, Function function, Instruction call,
@@ -462,7 +445,9 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 
 	private int collectForwardingEvidence(Program program, List<DirectCallSite> directCalls,
 			BasicBlockModel blocks, Map<Function, Map<Integer, Integer>> scoresByTarget,
-			Map<Function, Set<Integer>> semanticEvidenceByTarget, TaskMonitor monitor)
+			Map<Function, Set<Integer>> semanticEvidenceByTarget,
+			Map<Function, Set<Integer>> forwardingEvidenceByTarget,
+			Map<Function, Set<Integer>> supportedEvidenceByTarget, TaskMonitor monitor)
 			throws CancelledException {
 		int added = 0;
 		for (DirectCallSite site : directCalls) {
@@ -470,9 +455,14 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
 				continue;
 			}
-			for (int start : forwardedCodePointerPairs(program, site, blocks, monitor)) {
+			for (int start : forwardedCodePointerPairs(program, site, blocks,
+				forwardingEvidenceByTarget, monitor)) {
 				if (addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
 					site.caller(), start)) {
+					forwardingEvidenceByTarget.computeIfAbsent(site.caller(),
+						ignored -> new HashSet<>()).add(start);
+					supportedEvidenceByTarget.computeIfAbsent(site.caller(),
+						ignored -> new HashSet<>()).add(start);
 					added++;
 				}
 			}
@@ -481,7 +471,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 	}
 
 	private Set<Integer> forwardedCodePointerPairs(Program program, DirectCallSite site,
-			BasicBlockModel blocks, TaskMonitor monitor) throws CancelledException {
+			BasicBlockModel blocks, Map<Function, Set<Integer>> trustedEvidence,
+			TaskMonitor monitor) throws CancelledException {
 		Set<Integer> result = new HashSet<>();
 		CodeBlock setupBlock = blocks.getFirstCodeBlockContaining(site.call().getAddress(), monitor);
 		AddressSetView setupRegion =
@@ -494,6 +485,18 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			if (targetStart == null) {
 				continue;
 			}
+			// Never use an analyzer-owned generic fpointer as its own proof.  It may
+			// be stale database state from an older pass.  Such a type propagates
+			// only when this run traced it back to repeated exact function entries or
+			// an R5:R4 far-indirect use.  A one-off exact-entry collision supports the
+			// local type but must not infect its callers.  Concrete USER_DEFINED or
+			// IMPORTED callbacks remain authoritative roots.
+			if (site.target().getSignatureSource() == SourceType.ANALYSIS &&
+				isGenericAnalysisFunctionPointer(site.target(),
+					parameter.getFormalDataType()) &&
+				!trustedEvidence.getOrDefault(site.target(), Set.of()).contains(targetStart)) {
+				continue;
+			}
 			Integer low = traceCallArgumentWord(program, site.caller(), setupRegion,
 				site.call(), targetStart);
 			Integer high = traceCallArgumentWord(program, site.caller(), setupRegion,
@@ -503,6 +506,91 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			}
 		}
 		return Set.copyOf(result);
+	}
+
+	private Map<Function, Set<Integer>> mutableSetMap(
+			Map<Function, Set<Integer>> source) {
+		Map<Function, Set<Integer>> copy = new HashMap<>();
+		for (Map.Entry<Function, Set<Integer>> entry : source.entrySet()) {
+			copy.put(entry.getKey(), new HashSet<>(entry.getValue()));
+		}
+		return copy;
+	}
+
+	private void registerDirectEvidence(
+			Map<Function, Map<Integer, List<CodePointerEvidence>>> evidenceByTarget,
+			Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> supportedEvidence,
+			Map<Function, Set<Integer>> forwardingEvidence) {
+		for (Map.Entry<Function, Map<Integer, List<CodePointerEvidence>>> entry :
+				evidenceByTarget.entrySet()) {
+			Set<Integer> scalar = scalarPairs.getOrDefault(entry.getKey(), Set.of());
+			for (Map.Entry<Integer, List<CodePointerEvidence>> occurrence :
+					entry.getValue().entrySet()) {
+				int start = occurrence.getKey();
+				if (!scalar.contains(start)) {
+					supportedEvidence.computeIfAbsent(entry.getKey(), ignored -> new HashSet<>())
+						.add(start);
+					// A single exact-entry constant is enough to type this callee's
+					// local slot, but not enough to propagate that type backwards
+					// through arbitrary callers.  It may be a data value which merely
+					// collides with a function entry (as in M55 FUN_9ab3d0).  Repeated
+					// occurrences or semantic far-indirect evidence are stable roots.
+					if (occurrence.getValue().size() >= 2) {
+						forwardingEvidence.computeIfAbsent(entry.getKey(),
+							ignored -> new HashSet<>()).add(start);
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Remove generic ANALYSIS fpointers which this complete scan cannot trace to
+	 * an exact function entry or an actual far-indirect call.  This is what keeps
+	 * old database types from becoming circular evidence on the next One Shot.
+	 * Concrete callback typedefs and non-analysis signatures are never changed.
+	 */
+	private int repairUnsupportedGenericFunctionPointers(Program program,
+			List<Function> functions, Map<Function, Set<Integer>> trustedEvidence,
+			MessageLog log) {
+		int repaired = 0;
+		for (Function function : functions) {
+			if (function.getSignatureSource() != SourceType.ANALYSIS) {
+				continue;
+			}
+			try {
+				Set<Integer> trusted = trustedEvidence.getOrDefault(function, Set.of());
+				List<Variable> parameters = new ArrayList<>();
+				boolean changed = false;
+				for (Parameter parameter : function.getParameters()) {
+					Integer start = parameterStart(parameter.getVariableStorage());
+					if (start != null && parameter.getVariableStorage().size() == 4 &&
+						isGenericAnalysisFunctionPointer(function,
+							parameter.getFormalDataType()) && !trusted.contains(start)) {
+						parameters.add(new ParameterImpl(null,
+							Undefined.getUndefinedDataType(2), program));
+						parameters.add(new ParameterImpl(null,
+							Undefined.getUndefinedDataType(2), program));
+						changed = true;
+					}
+					else {
+						parameters.add(new ParameterImpl(existingName(parameter),
+							parameter.getFormalDataType(), program));
+					}
+				}
+				if (!changed) {
+					continue;
+				}
+				function.updateFunction(CALLING_CONVENTION, null, parameters,
+					FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+				repaired++;
+			}
+			catch (DuplicateNameException | InvalidInputException e) {
+				log.appendException(e);
+			}
+		}
+		return repaired;
 	}
 
 	private Integer traceCallArgumentWord(Program program, Function caller,
@@ -851,14 +939,94 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 			}
 			int span = Math.max(1, parameter.getVariableStorage().size() / 2);
 			result.removeIf(candidate -> candidate < start + span && start < candidate + 2 &&
-				!hasPriorCodePointerReference(program,
-					occurrences.getOrDefault(candidate, List.of())) &&
-				!(semanticEvidence.contains(candidate) &&
-					isGenericAnalysisPointer(function, type)) &&
-				!isRepeatedGenericAnalysisPointer(function, type,
-					occurrences.getOrDefault(candidate, List.of())));
+				(hasDirectPagedDataUse(program, function, candidate) ||
+					(!hasPriorCodePointerReference(program,
+						occurrences.getOrDefault(candidate, List.of())) &&
+						!(semanticEvidence.contains(candidate) &&
+							isGenericAnalysisPointer(function, type)) &&
+						!isRepeatedGenericAnalysisPointer(function, type,
+							occurrences.getOrDefault(candidate, List.of())))));
 		}
 		return Set.copyOf(result);
+	}
+
+	/**
+	 * A real EXTP/DPP0 dereference sourced from both incoming words is stronger
+	 * than an old PARAM reference or a coincidental exact function-address
+	 * constant.  This also lets a fresh far-data pass repair generic fpointers
+	 * without the later code-pointer pass immediately restoring stale state.
+	 */
+	private boolean hasDirectPagedDataUse(Program program, Function function, int start) {
+		if (start < 0 || start >= 4) {
+			return false;
+		}
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction setup = instructions.next();
+			Register page = dynamicPageSource(setup);
+			if (page == null) {
+				continue;
+			}
+			Integer pageSlot = traceParameterRegister(program, function, function.getBody(),
+				setup, page, 0, new HashSet<>());
+			if (pageSlot == null || pageSlot != start + 1) {
+				continue;
+			}
+			int remaining = extensionRange(setup);
+			Instruction access = program.getListing().getInstructionAfter(setup.getAddress());
+			while (access != null && remaining-- > 0 &&
+				function.getBody().contains(access.getAddress())) {
+				for (int operand = 0; operand < access.getNumOperands(); operand++) {
+					if (!isMemoryOperand(access, operand)) {
+						continue;
+					}
+					Register base = operandRegister(access, operand);
+					Integer offsetSlot = base == null ? null : traceParameterRegister(program,
+						function, function.getBody(), access, base, 0, new HashSet<>());
+					if (offsetSlot != null && offsetSlot == start) {
+						return true;
+					}
+				}
+				access = program.getListing().getInstructionAfter(access.getAddress());
+			}
+		}
+		return false;
+	}
+
+	private Register dynamicPageSource(Instruction instruction) {
+		String mnemonic = instruction.getMnemonicString().toLowerCase();
+		if ((mnemonic.equals("extp") || mnemonic.equals("extpr")) &&
+			instruction.getNumOperands() != 0) {
+			Register source = operandRegister(instruction, 0);
+			if (source != null) {
+				return source;
+			}
+			for (Object input : instruction.getInputObjects()) {
+				if (input instanceof Register register) {
+					return register;
+				}
+			}
+			return null;
+		}
+		if (!mnemonic.equals("mov") || instruction.getNumOperands() < 2) {
+			return null;
+		}
+		for (Object result : instruction.getResultObjects()) {
+			if (result instanceof Register register &&
+				"dpp0".equalsIgnoreCase(register.getName())) {
+				return operandRegister(instruction, 1);
+			}
+		}
+		return null;
+	}
+
+	private int extensionRange(Instruction setup) {
+		Scalar range = setup.getNumOperands() > 1 ? setup.getScalar(1) : null;
+		if (range == null) {
+			return 1;
+		}
+		return Math.max(1, Math.min(4, (int) range.getUnsignedValue()));
 	}
 
 	private Set<Integer> removeScalarConflicts(Function function, Set<Integer> starts,

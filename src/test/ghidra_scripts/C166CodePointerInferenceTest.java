@@ -19,6 +19,7 @@ import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.TypedefDataType;
+import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.UnsignedShortDataType;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.Register;
@@ -34,6 +35,8 @@ import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
 import ghidrainfineon.C166CodePointerAnalyzer;
 import ghidrainfineon.C166FarPointerAnalyzer;
+import ghidrainfineon.C166PointerReturnAnalyzer;
+import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
 public class C166CodePointerInferenceTest extends GhidraScript {
 
@@ -157,6 +160,9 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Function staleRectangleFunctionPointer = fixture(
 			"repair_stale_rectangle_function_pointer", bytes(0xdb, 0x00));
 		setLegacyGenericFunctionPointers(staleRectangleFunctionPointer, "misclassified");
+		Function orphanStaleFunctionPointer = fixture(
+			"repair_orphan_stale_function_pointer", bytes(0xdb, 0x00));
+		setLegacyGenericFunctionPointers(orphanStaleFunctionPointer, "misclassified");
 		List<Function> rectangleCallers = new ArrayList<>();
 		for (Function gridTarget : List.of(grid00, grid01, grid10, grid11)) {
 			rectangleCallers.add(fixture("exact_entry_rectangle_caller_" +
@@ -181,10 +187,22 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
 			calls(existingDataPointer), bytes(0xdb, 0x00)));
 
-		// Once code inference establishes a function pointer, a later far-data pass
-		// must not reinterpret that type merely because the raw body also resembles
-		// a paged access.  True data semantics are analyzed first by analyzer
-		// priority, before code inference has a chance to type the pair.
+		// One exact function-entry constant supports the callee's local fpointer,
+		// but is not a strong enough root for backwards propagation.  The same
+		// slot may receive ordinary data from a wrapper; propagating the one-off
+		// collision would incorrectly turn the wrapper's data pointer into code.
+		Function singleExactTarget = fixture("single_exact_entry_target",
+			bytes(0xdb, 0x00));
+		Function singleExactTargetCaller = fixture("single_exact_entry_target_caller", concat(
+			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
+			calls(singleExactTarget), bytes(0xdb, 0x00)));
+		Function singleExactDataWrapper = fixture("single_exact_data_wrapper",
+			concat(calls(singleExactTarget), bytes(0xdb, 0x00)));
+		setAnalysisPointer(singleExactDataWrapper, "object");
+
+		// Direct paged dereference is stronger semantic evidence than a constant
+		// which merely happens to name a function entry.  It must repair a stale
+		// generic fpointer and later code-pointer passes must not restore it.
 		Function dataWins = fixture("paged_use_overrides_code_constant", pagedRead(13, 12));
 		Function dataWinsCaller = fixture("paged_use_overrides_code_constant_caller", concat(
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
@@ -195,6 +213,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		// dispatcher's own prototype, even if they happen to name code.
 		Function dispatcher = fixture("far_indirect_dispatcher_shape",
 			bytes(0xec, 0xf5, 0xec, 0xf4, 0xdb, 0x00));
+		setAnalysisWords(dispatcher, "stale0", "stale1", "stale2");
 		Function dispatcherCaller = fixture("far_indirect_dispatcher_caller", concat(
 			codePointerSetup(4, 5, freeTarget.getEntryPoint()),
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
@@ -282,6 +301,50 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			bytes(0xf0, 0xc8, 0xf0, 0xd9, 0xf0, 0xea, 0xf0, 0xfb),
 			calls(stalePush), bytes(0xdb, 0x00)));
 
+		// Table 3-15 returns a far pointer in R5:R4.  Two downstream data-pointer
+		// uses are sufficient evidence; an integer consumer is not, and an actual
+		// far-indirect use conflicts with data-pointer inference.
+		Function returnDataConsumer = fixture("return_data_pointer_consumer",
+			bytes(0xdb, 0x00));
+		setUserDataPointer(returnDataConsumer, "object");
+		Function dataReturn = fixture("two_uses_prove_data_pointer_return",
+			bytes(0xdb, 0x00));
+		Function dataReturnCaller = fixture("two_uses_prove_data_pointer_return_caller",
+			concat(calls(dataReturn), bytes(
+				0xf0, 0x84, 0xf0, 0x95, // R8:R9 = returned R4:R5
+				0xf0, 0xc8, 0xf0, 0xd9),
+				calls(returnDataConsumer), bytes(0xf0, 0xc8, 0xf0, 0xd9),
+				calls(returnDataConsumer), bytes(0xdb, 0x00)));
+		Function directPagedReturn = fixture("paged_use_proves_data_pointer_return",
+			bytes(0xdb, 0x00));
+		Function directPagedReturnCaller = fixture(
+			"paged_use_proves_data_pointer_return_caller",
+			concat(calls(directPagedReturn),
+				bytes(0xf0, 0x64, 0xf0, 0x75), // R6:R7 = returned R4:R5
+				pagedRead(7, 6)));
+		Function scalarReturnConsumer = fixture("scalar_return_consumer", bytes(0xdb, 0x00));
+		setUserWords(scalarReturnConsumer, "low", "high");
+		Function scalarReturn = fixture("scalar_r5_r4_return", bytes(0xdb, 0x00));
+		Function scalarReturnCaller = fixture("scalar_r5_r4_return_caller", concat(
+			calls(scalarReturn), calls(scalarReturnConsumer), bytes(0xdb, 0x00)));
+		Function conflictingReturn = fixture("conflicting_pointer_return", bytes(0xdb, 0x00));
+		Function conflictingReturnCaller = fixture("conflicting_pointer_return_caller",
+			concat(calls(conflictingReturn), bytes(
+				0xf0, 0x84, 0xf0, 0x95,
+				0xf0, 0xc8, 0xf0, 0xd9),
+				calls(returnDataConsumer), bytes(
+				0xf0, 0xc8, 0xf0, 0xd9),
+				calls(returnDataConsumer), bytes(
+				0xf0, 0x48, 0xf0, 0x59),
+				calls(dispatcher), bytes(0xdb, 0x00)));
+
+		C166TaskingRuntimeAnalyzer runtimeAnalyzer = new C166TaskingRuntimeAnalyzer();
+		check(runtimeAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "runtime analysis before code-pointer inference failed");
+		check("call_far_indirect".equals(dispatcher.getCallFixup()),
+			"far indirect dispatcher did not receive its call-fixup");
+		check(dispatcher.getParameterCount() == 0,
+			"far indirect dispatcher retained a stale analysis signature");
 		C166CodePointerAnalyzer analyzer = new C166CodePointerAnalyzer();
 		check(analyzer.added(currentProgram, twoCallbacksCaller.getBody(), monitor,
 			new MessageLog()), "incremental code-pointer analysis failed");
@@ -296,13 +359,15 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		pagedBodies.add(dataWins.getBody());
 		check(new C166FarPointerAnalyzer().added(currentProgram, pagedBodies, monitor,
 			new MessageLog()), "semantic far-data analysis failed");
-		checkCodeSignature(dataWins, "r13+r12");
+		checkDataPointer(dataWins, "r13+r12");
 
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "full code-pointer One Shot failed");
 		checkWordSignature(rectangleScalar, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleForwardingTarget, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(staleRectangleFunctionPointer, SourceType.ANALYSIS,
+			"r12", "r13");
+		checkWordSignature(orphanStaleFunctionPointer, SourceType.ANALYSIS,
 			"r12", "r13");
 		// A later full far-data One Shot must not use the recovered callback type
 		// itself as data evidence.  This is the real GUI ordering which previously
@@ -316,7 +381,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"r12", "r13");
 		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
 		checkMixedSignature(mixed);
-		checkCodeSignature(dataWins, "r13+r12");
+		checkDataPointer(dataWins, "r13+r12");
 		checkCodeSignature(stackCallback, "r12", "r13", "r14", "r15", "Stack[0x0]:4");
 		checkCodeSignature(copiedCallback, "r13+r12");
 		checkCodeSignature(twoStackCallbacks, "r12", "r13", "r14", "r15",
@@ -330,6 +395,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			existingDataPointer.getParameter(0).getFormalDataType() instanceof Pointer &&
 			!isFunctionPointer(existingDataPointer.getParameter(0).getFormalDataType()),
 			"existing data pointer was replaced by a function pointer");
+		checkCodeSignature(singleExactTarget, "r13+r12");
+		checkDataPointer(singleExactDataWrapper, "r13+r12");
 		check(dispatcher.getParameterCount() == 0,
 			"far indirect dispatcher's ordinary arguments were typed as callbacks");
 		checkCodeSignature(indirectTarget, "r13+r12");
@@ -351,7 +418,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkParamReference(twoCallbacksCaller.getEntryPoint().add(12),
 			freeTarget.getEntryPoint(), true);
 		checkParamReference(dataWinsCaller.getEntryPoint().add(4),
-			mallocTarget.getEntryPoint(), true);
+			mallocTarget.getEntryPoint(), false);
 		checkParamReference(dispatcherCaller.getEntryPoint().add(12),
 			mallocTarget.getEntryPoint(), false);
 		checkParamReference(branchMergeCaller.getEntryPoint().add(6),
@@ -392,21 +459,39 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 
 		String snapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
-			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
+			singleExactTarget, singleExactDataWrapper, dataWins, dispatcher,
+			indirectTarget, middleIndirectTarget, lateIndirectTarget,
 			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
 			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
-			staleRectangleFunctionPointer);
+			staleRectangleFunctionPointer, orphanStaleFunctionPointer);
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "second code-pointer analysis failed");
 		check(snapshot.equals(snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
-			dataWins, dispatcher, indirectTarget, middleIndirectTarget, lateIndirectTarget,
+			singleExactTarget, singleExactDataWrapper, dataWins, dispatcher,
+			indirectTarget, middleIndirectTarget, lateIndirectTarget,
 			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
 			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
-			staleRectangleFunctionPointer)),
+			staleRectangleFunctionPointer, orphanStaleFunctionPointer)),
 			"code-pointer inference is not idempotent");
+
+		C166PointerReturnAnalyzer returnAnalyzer = new C166PointerReturnAnalyzer();
+		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "far-pointer return inference failed");
+		checkDataPointerReturn(dataReturn);
+		checkDataPointerReturn(directPagedReturn);
+		check(Undefined.isUndefined(scalarReturn.getReturnType()),
+			"two-word scalar return was inferred as a pointer");
+		check(Undefined.isUndefined(conflictingReturn.getReturnType()),
+			"conflicting data/code return was inferred as a data pointer");
+		String returnSnapshot = snapshot(dataReturn, directPagedReturn, scalarReturn,
+			conflictingReturn);
+		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
+			new MessageLog()), "second far-pointer return inference failed");
+		check(returnSnapshot.equals(snapshot(dataReturn, directPagedReturn, scalarReturn,
+			conflictingReturn)), "far-pointer return inference is not idempotent");
 
 		// Keep references live so fixture creation cannot be optimized away by a
 		// future test refactor.
@@ -415,6 +500,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			copiedCallbackCaller != null && twoStackCallbacksCaller != null &&
 			ambiguousOverlapCaller != null && nonEntryCaller != null && userDefinedCaller != null &&
 			existingDataPointerCaller != null && dataWinsCaller != null &&
+			singleExactTargetCaller != null &&
 			dispatcherCaller != null && forwardingTarget != null &&
 			stackForwardingInterveningCall != null &&
 			branchMergeCaller != null && stalePushCaller != null &&
@@ -508,6 +594,14 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		}
 		function.updateFunction("__tasking_c166_classic", null, pointers,
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setUserDataPointer(Function function, String name) throws Exception {
+		Variable pointer = new ParameterImpl(name,
+			new PointerDataType(VoidDataType.dataType,
+				currentProgram.getDataTypeManager()), currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 	}
 
 	private void setUserFunctionPointer(Function function, String parameterName,
@@ -624,7 +718,19 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			expectedStorage.equals(describe(parameters[0].getVariableStorage())) &&
 			parameters[0].getFormalDataType() instanceof Pointer &&
 			!isFunctionPointer(parameters[0].getFormalDataType()),
-			function.getName() + ": semantic PAGE:OFFSET evidence did not win");
+			function.getName() + ": semantic PAGE:OFFSET evidence did not win: " +
+			function.getPrototypeString(true, true) + ", signature source=" +
+			function.getSignatureSource());
+	}
+
+	private void checkDataPointerReturn(Function function) {
+		check(function.getReturnType() instanceof Pointer &&
+			!isFunctionPointer(function.getReturnType()),
+			function.getName() + ": return is not a data pointer: " +
+				function.getReturnType().getDisplayName());
+		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
+			function.getName() + ": return storage is not R5:R4: " +
+				describe(function.getReturn().getVariableStorage()));
 	}
 
 	private boolean isFunctionPointer(DataType type) {

@@ -1,5 +1,6 @@
 package ghidrainfineon;
 
+import java.math.BigInteger;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -34,6 +35,7 @@ import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.Register;
+import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.lang.OperandType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Function.FunctionUpdateType;
@@ -94,6 +96,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String CALLING_CONVENTION = "__tasking_c166_classic";
+	private static final String GENERIC_FUNCTION_PATH = "/c166/function";
+	private static final String LEGACY_GENERIC_FUNCTION_PATH = "/__c166_far_function";
+	private static final String GENERIC_FUNCTION_POINTER_PATH = "/fpointer";
 	private static final int FIRST_ARGUMENT_REGISTER = 12;
 	private static final int LAST_ARGUMENT_REGISTER = 15;
 	private static final int DECOMPILE_TIMEOUT_SECONDS = 30;
@@ -273,23 +278,50 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				stats.ambiguousFunctions.add(function);
 				return false;
 			}
-			Set<Integer> pairStarts = retainSupportedPairs(function, inference.pairStarts(),
-				inference.liveSlots());
-			pairStarts = removeFunctionPointerConflicts(function, pairStarts);
+			Set<Integer> liveSlots = new HashSet<>(inference.liveSlots());
+			Set<Integer> pairStarts = new HashSet<>(retainSupportedPairs(function,
+				inference.pairStarts(), liveSlots));
+			Set<Integer> directPagedPairs = new HashSet<>(inference.directPagedPairs());
+			// A stale generic fpointer can suppress the very PIECE/SEGMENTOP p-code
+			// needed to rediscover its pair.  Seed only its exact ABI storage when the
+			// listing independently proves that pair drives a paged data access.
+			if (function.getSignatureSource() == SourceType.ANALYSIS) {
+				for (Parameter parameter : function.getParameters()) {
+					Integer start = parameterStart(parameter.getVariableStorage());
+					if (start != null && isGenericFunctionPointer(
+						parameter.getFormalDataType()) &&
+						containsDirectPagedDataUseForPair(program, function, start)) {
+						pairStarts.add(start);
+						directPagedPairs.add(start);
+						liveSlots.add(start);
+						liveSlots.add(start + 1);
+					}
+				}
+			}
+			for (int start : pairStarts) {
+				if (containsDirectPagedDataUseForPair(program, function, start) ||
+					containsDynamicPagedAccessSetupForPair(program, function, start)) {
+					directPagedPairs.add(start);
+				}
+			}
+			Map<Integer, DataType> pointerTypes = preferDirectPagedDataTypes(program,
+				function, inference.pointerTypes(), directPagedPairs);
+			pairStarts = removeFunctionPointerConflicts(function, pairStarts,
+				directPagedPairs, pointerTypes);
 			pairStarts = removeCallSiteScalarConflicts(function, pairStarts,
-				inference.directPagedPairs(), scalarPairs, strictScalarPairs);
+				directPagedPairs, scalarPairs, strictScalarPairs);
 			if (!forwardedScalarPairs.isEmpty()) {
 				Set<Integer> retained = new HashSet<>(pairStarts);
 				retained.removeAll(forwardedScalarPairs);
 				pairStarts = Set.copyOf(retained);
 			}
 			if (pairStarts.isEmpty() || signatureMatches(function, pairStarts,
-				inference.liveSlots(), inference.pointerTypes())) {
+				liveSlots, pointerTypes)) {
 				return repairedForwardedScalars;
 			}
 
-			updateSignature(program, function, pairStarts, inference.liveSlots(),
-				inference.pointerTypes());
+			updateSignature(program, function, pairStarts, liveSlots,
+				pointerTypes);
 			stats.inferredFunctions++;
 			stats.inferredPointers += pairStarts.size();
 			return true;
@@ -303,6 +335,33 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			stats.processedCandidates++;
 			monitor.setProgress(stats.processedCandidates);
 		}
+	}
+
+	/**
+	 * A direct C166 paged load/store is data-space use even when a stale generic
+	 * function-pointer HighSymbol made the decompiler type its PIECE as fpointer.
+	 * Strip only that analyzer-owned circular type; concrete callback typedefs and
+	 * non-analysis signatures remain protected by the conflict filter below.
+	 */
+	private Map<Integer, DataType> preferDirectPagedDataTypes(Program program,
+			Function function, Map<Integer, DataType> inferredTypes,
+			Set<Integer> directPagedPairs) {
+		Map<Integer, DataType> result = new HashMap<>(inferredTypes);
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return result;
+		}
+		for (int start : directPagedPairs) {
+			for (Parameter parameter : function.getParameters()) {
+				Integer existingStart = parameterStart(parameter.getVariableStorage());
+				if (Integer.valueOf(start).equals(existingStart) &&
+					isGenericFunctionPointer(parameter.getFormalDataType())) {
+					result.put(start, new PointerDataType(VoidDataType.dataType,
+						program.getDataTypeManager()));
+					break;
+				}
+			}
+		}
+		return result;
 	}
 
 	private String componentSignatureState(List<Function> component) {
@@ -397,8 +456,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			Function target = targetEntry.getKey();
 			for (Map.Entry<Integer, Set<ConstantWordPair>> pair :
 					targetEntry.getValue().entrySet()) {
-				if (hasScalarAnalysisCandidate(target, pair.getKey()) &&
-					!containsDynamicPagedAccessSetup(program, target) &&
+				if (!containsDynamicPagedAccessSetupForPair(program, target,
+						pair.getKey()) &&
 					hasIndependentConstantWords(pair.getValue())) {
 					scalarPairs.computeIfAbsent(target, ignored -> new HashSet<>())
 						.add(pair.getKey());
@@ -419,6 +478,25 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				log.appendException(e);
 			}
 		}
+		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
+				occurrences.entrySet()) {
+			monitor.checkCancelled();
+			Function target = targetEntry.getKey();
+			Set<Integer> contradicted = scalarPairs.getOrDefault(target, Set.of());
+			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
+				try {
+					boolean inferDataPointer =
+						pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
+						!contradicted.contains(pair.getKey()) &&
+						directlyConsumesSeedPair(program, target, pair.getKey());
+					repairedPointers += replaceImpossibleGenericCodePointer(program, target,
+						pair.getKey(), inferDataPointer);
+				}
+				catch (DuplicateNameException | InvalidInputException e) {
+					log.appendException(e);
+				}
+			}
+		}
 
 		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
 				occurrences.entrySet()) {
@@ -429,6 +507,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
 				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
 					!contradicted.contains(pair.getKey()) &&
+					directlyConsumesSeedPair(program, target, pair.getKey()) &&
 					!overlapsExistingPointer(target, pair.getKey())) {
 					scores.put(pair.getKey(), pair.getValue().size());
 				}
@@ -468,6 +547,101 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return new CallSiteSeedStats(seededFunctions, seededParameters,
 			acceptedOccurrences, scalarConflicts, repairedPointers,
 			immutableSetMap(scalarPairs), immutableSetMap(strictScalarPairs));
+	}
+
+	/**
+	 * Repair a stale generic code-pointer inference before decompiling callers.
+	 * A constant occurrence reaches this method only when its PAGE is greater than
+	 * 0xff, its OFFSET is canonical, and the resulting data address is mapped.
+	 * One such value is enough to refute a code pointer, while promotion to a data
+	 * pointer still requires repeated evidence and direct consumption.  Limiting
+	 * the replacement to the analyzer-owned generic fpointer types preserves
+	 * concrete callback types and every USER_DEFINED or IMPORTED signature.
+	 */
+	private int replaceImpossibleGenericCodePointer(Program program, Function function,
+			int pairStart, boolean consumed)
+			throws DuplicateNameException, InvalidInputException {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return 0;
+		}
+		List<Variable> parameters = new ArrayList<>();
+		boolean replaced = false;
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (Integer.valueOf(pairStart).equals(start) &&
+				parameter.getVariableStorage().size() == 4 &&
+				isGenericFunctionPointer(parameter.getFormalDataType())) {
+				if (consumed) {
+					parameters.add(new ParameterImpl(existingName(parameter),
+						new PointerDataType(VoidDataType.dataType,
+							program.getDataTypeManager()), program));
+				}
+				else {
+					parameters.add(new ParameterImpl(null,
+						Undefined.getUndefinedDataType(2), program));
+					parameters.add(new ParameterImpl(null,
+						Undefined.getUndefinedDataType(2), program));
+				}
+				replaced = true;
+			}
+			else {
+				parameters.add(new ParameterImpl(existingName(parameter),
+					parameter.getFormalDataType(), program));
+			}
+		}
+		if (!replaced) {
+			return 0;
+		}
+		function.updateFunction(CALLING_CONVENTION, null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+		return 1;
+	}
+
+	/**
+	 * Constant call-site values are meaningful only when the callee consumes the
+	 * incoming words.  Registers which merely happen to be live across a no-arg
+	 * call are not arguments.  Calls terminate this cheap proof: forwarding is
+	 * handled later from the callee's established signature.
+	 */
+	private boolean directlyConsumesSeedPair(Program program, Function function,
+			int pairStart) {
+		if (pairStart >= 4) {
+			// Stack seed support predates this register-liveness guard.  Stack words
+			// are materialized by explicit loads and are validated by the semantic pass.
+			return true;
+		}
+		Register low = program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + pairStart));
+		Register high =
+			program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + pairStart + 1));
+		boolean lowLive = low != null;
+		boolean highLive = high != null;
+		boolean lowRead = false;
+		boolean highRead = false;
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext() && (lowLive || highLive)) {
+			Instruction instruction = instructions.next();
+			if (instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				break;
+			}
+			for (Object input : instruction.getInputObjects()) {
+				if (!(input instanceof Register register)) {
+					continue;
+				}
+				lowRead |= lowLive && overlaps(low, register);
+				highRead |= highLive && overlaps(high, register);
+			}
+			if (lowRead && highRead) {
+				return true;
+			}
+			if (lowLive && writesRegister(instruction, low)) {
+				lowLive = false;
+			}
+			if (highLive && writesRegister(instruction, high)) {
+				highLive = false;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -651,7 +825,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		for (Parameter parameter : function.getParameters()) {
 			Integer start = parameterStart(parameter.getVariableStorage());
 			if (start != null && contradicted.contains(start) &&
-				isGenericVoidPointer(parameter.getFormalDataType()) &&
+				(isGenericVoidPointer(parameter.getFormalDataType()) ||
+					isGenericFunctionPointer(parameter.getFormalDataType())) &&
 				parameter.getVariableStorage().size() == 4) {
 				parameters.add(new ParameterImpl(null, Undefined.getUndefinedDataType(2), program));
 				parameters.add(new ParameterImpl(null, Undefined.getUndefinedDataType(2), program));
@@ -1371,6 +1546,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		// call-site values, not additional formal parameters.  Extending such a
 		// signature corrupts both the declared ABI and later prototype overrides.
 		return !function.isExternal() && !function.isThunk() && !function.hasVarArgs() &&
+			function.getCallFixup() == null &&
 			mayUpdate(function) && usesTaskingConvention(function);
 	}
 
@@ -1410,11 +1586,122 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return false;
 	}
 
+	/**
+	 * Decide whether a dynamic PAGE setup belongs to one particular incoming
+	 * argument pair.  A function can dereference a returned/local far pointer and
+	 * still consume two unrelated scalar arguments; an unrelated EXTP must not
+	 * defeat the complete call-site rectangle proof for those arguments.
+	 */
+	private boolean containsDynamicPagedAccessSetupForPair(Program program,
+			Function function, int pairStart) {
+		if (pairStart >= 4) {
+			return containsDynamicPagedAccessSetup(program, function);
+		}
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction instruction = instructions.next();
+			Register source = dynamicPageSource(instruction);
+			Integer slot = source == null ? null : tracePageSourceToInputSlot(program,
+				function, instruction, source);
+			if (slot != null && slot == pairStart + 1) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Recover direct architectural data use from the listing as well as p-code.
+	 * A stale fpointer HighSymbol can cause the decompiler to replace the original
+	 * EXTP/DPP address construction with a typed PIECE, so p-code alone would make
+	 * the old inferred type self-supporting.
+	 */
+	private boolean containsDirectPagedDataUseForPair(Program program,
+			Function function, int pairStart) {
+		if (pairStart < 0 || pairStart >= 4) {
+			return false;
+		}
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction setup = instructions.next();
+			Register page = dynamicPageSource(setup);
+			Integer pageSlot = page == null ? null : tracePageSourceToInputSlot(program,
+				function, setup, page);
+			if (pageSlot == null || pageSlot != pairStart + 1) {
+				continue;
+			}
+			Scalar range = setup.getNumOperands() > 1 ? setup.getScalar(1) : null;
+			int remaining = range == null ? 1 :
+				Math.max(1, Math.min(4, (int) range.getUnsignedValue()));
+			Instruction access = program.getListing().getInstructionAfter(setup.getAddress());
+			while (access != null && remaining-- > 0 &&
+				function.getBody().contains(access.getAddress())) {
+				for (int operand = 0; operand < access.getNumOperands(); operand++) {
+					String spelling = access.getDefaultOperandRepresentation(operand).trim();
+					if (!spelling.startsWith("[")) {
+						continue;
+					}
+					Register base = operandRegister(access, operand);
+					Integer offsetSlot = base == null ? null : tracePageSourceToInputSlot(
+						program, function, access, base);
+					if (offsetSlot != null && offsetSlot == pairStart) {
+						return true;
+					}
+				}
+				access = program.getListing().getInstructionAfter(access.getAddress());
+			}
+		}
+		return false;
+	}
+
+	private Integer tracePageSourceToInputSlot(Program program, Function function,
+			Instruction setup, Register source) {
+		Register traced = source;
+		Instruction instruction = program.getListing().getInstructionBefore(setup.getAddress());
+		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
+				scanned++, instruction =
+					program.getListing().getInstructionBefore(instruction.getAddress())) {
+			if (!function.getBody().contains(instruction.getAddress())) {
+				break;
+			}
+			if (instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				return null;
+			}
+			if (!writesRegister(instruction, traced)) {
+				continue;
+			}
+			if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
+				instruction.getNumOperands() < 2 ||
+				OperandType.isIndirect(instruction.getOperandType(1))) {
+				return null;
+			}
+			Register previous = operandRegister(instruction, 1);
+			if (previous == null) {
+				return null;
+			}
+			traced = previous;
+		}
+		return argumentSlot(traced);
+	}
+
 	private Register dynamicPageSource(Instruction instruction) {
 		String mnemonic = instruction.getMnemonicString().toLowerCase();
 		if ((mnemonic.equals("extp") || mnemonic.equals("extpr")) &&
 			instruction.getNumOperands() != 0) {
-			return operandRegister(instruction, 0);
+			Register source = operandRegister(instruction, 0);
+			if (source != null) {
+				return source;
+			}
+			// C166 EXTP's register and count are represented as one composite
+			// operand by the listing API, so getOpObjects(0) may omit the register.
+			for (Object input : instruction.getInputObjects()) {
+				if (input instanceof Register register) {
+					return register;
+				}
+			}
+			return null;
 		}
 		if (!mnemonic.equals("mov") || instruction.getNumOperands() < 2) {
 			return null;
@@ -1534,6 +1821,12 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				page = operation.getInput(1);
 				offset = operation.getInput(2);
 			}
+			else if (isExplicitRegisterExtpAddress(program, operation)) {
+				Varnode[] pair = explicitRegisterExtpPair(operation);
+				page = pair[0];
+				offset = pair[1];
+				directPagedAccess = true;
+			}
 			else if (isTypedFarPointerPiece(operation)) {
 				page = operation.getInput(0);
 				offset = operation.getInput(1);
@@ -1565,6 +1858,63 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return new Inference(selection.starts(), liveSlots, pointerTypes,
 			globalPointerStarts, directPagedPairs,
 			selection.ambiguous() && selection.score() != 0);
+	}
+
+	/**
+	 * Register-mode EXTP is emitted as explicit `(page << 14) + inner` p-code.
+	 * It must not use SEGMENTOP: under the large-model far-pointer ABI the
+	 * decompiler first interprets SEGMENTOP's two words as SEGMENT:OFFSET and
+	 * can manufacture an out-of-range page<<16 address.  Recover the same
+	 * PAGE:OFFSET inference evidence from the explicit architectural operation,
+	 * but only at an instruction whose decode context proves register-mode EXTP.
+	 */
+	private boolean isExplicitRegisterExtpAddress(Program program, PcodeOpAST operation) {
+		if (operation.getOpcode() != PcodeOp.INT_ADD || operation.getNumInputs() != 2 ||
+			explicitRegisterExtpPair(operation) == null) {
+			return false;
+		}
+		Address address = operation.getSeqnum().getTarget();
+		ProgramContext context = program.getProgramContext();
+		return isContextOne(context, "ExtpEn", address) &&
+			isContextOne(context, "ExtpRegMode", address);
+	}
+
+	private Varnode[] explicitRegisterExtpPair(PcodeOp operation) {
+		for (int pageInput = 0; pageInput < 2; pageInput++) {
+			Varnode page = shiftedPageSource(operation.getInput(pageInput));
+			if (page != null) {
+				return new Varnode[] { page, operation.getInput(1 - pageInput) };
+			}
+		}
+		return null;
+	}
+
+	private Varnode shiftedPageSource(Varnode value) {
+		PcodeOp definition = value == null ? null : value.getDef();
+		if (definition == null || definition.getNumInputs() != 2) {
+			return null;
+		}
+		if (definition.getOpcode() == PcodeOp.INT_LEFT &&
+			definition.getInput(1).isConstant() &&
+			definition.getInput(1).getOffset() == 14) {
+			return definition.getInput(0);
+		}
+		if (definition.getOpcode() == PcodeOp.INT_MULT) {
+			for (int i = 0; i < 2; i++) {
+				if (definition.getInput(i).isConstant() &&
+					definition.getInput(i).getOffset() == 0x4000) {
+					return definition.getInput(1 - i);
+				}
+			}
+		}
+		return null;
+	}
+
+	private boolean isContextOne(ProgramContext context, String registerName,
+			Address address) {
+		Register register = context.getRegister(registerName);
+		BigInteger value = register == null ? null : context.getValue(register, address, false);
+		return BigInteger.ONE.equals(value);
 	}
 
 	/**
@@ -1921,6 +2271,19 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			case PcodeOp.SUBPIECE:
 				return traceGlobalWordAddress(program, definition.getInput(0), depth + 1,
 					visited);
+			case PcodeOp.INT_ADD:
+			case PcodeOp.INT_AND:
+				if (definition.getNumInputs() == 2) {
+					if (definition.getInput(0).isConstant()) {
+						return traceGlobalWordAddress(program, definition.getInput(1), depth + 1,
+							visited);
+					}
+					if (definition.getInput(1).isConstant()) {
+						return traceGlobalWordAddress(program, definition.getInput(0), depth + 1,
+							visited);
+					}
+				}
+				return null;
 			default:
 				return null;
 		}
@@ -2046,6 +2409,24 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			target = typeDef.getBaseDataType();
 		}
 		return target instanceof FunctionDefinition;
+	}
+
+	private boolean isGenericFunctionPointer(DataType type) {
+		if (!isFunctionPointer(type)) {
+			return false;
+		}
+		if (type instanceof TypeDef &&
+			GENERIC_FUNCTION_POINTER_PATH.equals(type.getPathName())) {
+			return true;
+		}
+		Pointer pointer = pointerDataType(type);
+		DataType target = pointer.getDataType();
+		while (target instanceof TypeDef typeDef) {
+			target = typeDef.getBaseDataType();
+		}
+		String path = target.getPathName();
+		return GENERIC_FUNCTION_PATH.equals(path) ||
+			LEGACY_GENERIC_FUNCTION_PATH.equals(path);
 	}
 
 	private void mergePointerType(Program program, Map<Integer, DataType> pointerTypes,
@@ -2338,7 +2719,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	 * SEGMENT:OFFSET names an exact executable function entry.
 	 */
 	private Set<Integer> removeFunctionPointerConflicts(Function function,
-			Set<Integer> pairStarts) {
+			Set<Integer> pairStarts, Set<Integer> directPagedPairs,
+			Map<Integer, DataType> pointerTypes) {
 		Set<Integer> retained = new HashSet<>();
 		for (int candidateStart : pairStarts) {
 			boolean overlaps = false;
@@ -2353,7 +2735,12 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				int span = Math.max(1, parameter.getVariableStorage().size() / 2);
 				if (candidateStart < existingStart + span &&
 					existingStart < candidateStart + 2) {
-					overlaps = true;
+					DataType inferred = pointerTypes.get(candidateStart);
+					boolean provenData = directPagedPairs.contains(candidateStart) ||
+						(inferred != null && pointerDataType(inferred) != null &&
+							!isFunctionPointer(inferred));
+					overlaps = !(function.getSignatureSource() == SourceType.ANALYSIS &&
+						isGenericFunctionPointer(parameter.getFormalDataType()) && provenData);
 					break;
 				}
 			}
@@ -2486,7 +2873,8 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	private boolean existingPointerSatisfies(DataType existing, DataType inferred) {
 		if (isFunctionPointer(existing)) {
-			return true;
+			return !(isGenericFunctionPointer(existing) && inferred != null &&
+				pointerDataType(inferred) != null && !isFunctionPointer(inferred));
 		}
 		Pointer existingPointer = pointerDataType(existing);
 		Pointer inferredPointer = isFunctionPointer(inferred) ? null : pointerDataType(inferred);
@@ -2502,7 +2890,10 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	private DataType inferredPointerType(Program program, Parameter existing,
 			DataType inferred) {
 		if (existing != null && isFunctionPointer(existing.getFormalDataType())) {
-			return existing.getFormalDataType();
+			if (!isGenericFunctionPointer(existing.getFormalDataType()) || inferred == null ||
+				pointerDataType(inferred) == null || isFunctionPointer(inferred)) {
+				return existing.getFormalDataType();
+			}
 		}
 		if (existing != null && isPointerType(existing.getFormalDataType()) &&
 			!isFunctionPointer(existing.getFormalDataType())) {

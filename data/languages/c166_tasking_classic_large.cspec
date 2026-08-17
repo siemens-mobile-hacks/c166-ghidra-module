@@ -46,6 +46,47 @@
     </callfixup>
 
     <!--
+        TASKING 32-bit integer expression helpers use R5:R4 for the left
+        operand/result and R11:R10 for the right operand.  They do not use the
+        ordinary C parameter registers R12-R15.
+    -->
+    <callfixup name="c166_tasking_mulu4">
+        <pcode>
+            <body><![CDATA[
+            local left:4 = (zext(r5) << 16) | zext(r4);
+            local right:4 = (zext(r11) << 16) | zext(r10);
+            local result:4 = left * right;
+            r4 = trunc(result);
+            r5 = trunc(result >> 16);
+            ]]></body>
+        </pcode>
+    </callfixup>
+
+    <callfixup name="c166_tasking_divu4">
+        <pcode>
+            <body><![CDATA[
+            local dividend:4 = (zext(r5) << 16) | zext(r4);
+            local divisor:4 = (zext(r11) << 16) | zext(r10);
+            local result:4 = dividend / divisor;
+            r4 = trunc(result);
+            r5 = trunc(result >> 16);
+            ]]></body>
+        </pcode>
+    </callfixup>
+
+    <callfixup name="c166_tasking_modu4">
+        <pcode>
+            <body><![CDATA[
+            local dividend:4 = (zext(r5) << 16) | zext(r4);
+            local divisor:4 = (zext(r11) << 16) | zext(r10);
+            local result:4 = dividend % divisor;
+            r4 = trunc(result);
+            r5 = trunc(result >> 16);
+            ]]></body>
+        </pcode>
+    </callfixup>
+
+    <!--
         TASKING's double support routines move the software user-stack pointer
         themselves.  Treating them as ordinary calls hides both the R0 change
         and the copied value from the decompiler, leaving later double

@@ -3,6 +3,7 @@ package ghidrainfineon;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
@@ -14,13 +15,19 @@ import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Function.FunctionUpdateType;
 import ghidra.program.model.listing.FunctionManager;
+import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
+import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
@@ -44,7 +51,7 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 
 	public C166TaskingRuntimeAnalyzer() {
 		super("C166 TASKING Runtime Helpers",
-			"Models TASKING Classic double runtime data flow and register preservation.",
+		"Models TASKING Classic indirect calls and arithmetic runtime data flow.",
 			AnalyzerType.FUNCTION_ANALYZER);
 		setPriority(AnalysisPriority.FUNCTION_ANALYSIS.after());
 		setDefaultEnablement(true);
@@ -70,6 +77,8 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 
 		int matched = 0;
 		int conventions = 0;
+		int dispatchers = 0;
+		int runtimeSignatures = 0;
 		while (functions.hasNext()) {
 			monitor.checkCancelled();
 			Function function = functions.next();
@@ -81,10 +90,17 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 				continue;
 			}
 
-			String fixup = matchingFixup(memory, function);
+			boolean dispatcher = isFarIndirectDispatcher(program, function);
+			String fixup = dispatcher ? "call_far_indirect" : matchingFixup(memory, function);
 			if (fixup != null && function.getCallFixup() == null) {
 				function.setCallFixup(fixup);
 				matched++;
+			}
+			if (fixup != null && clearAnalysisRuntimeSignature(function, log)) {
+				runtimeSignatures++;
+			}
+			if (dispatcher) {
+				dispatchers++;
 			}
 			if (matchesAny(memory, function, PRESERVING_RUNTIME_HELPERS) &&
 				mayAssignRuntimeConvention(function)) {
@@ -98,10 +114,11 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 			}
 		}
 
-		if (matched != 0 || conventions != 0) {
-			report(program, "Applied " + matched + " precise runtime p-code model(s) and " +
-				conventions + " ABI register-preservation model(s) to TASKING double " +
-				"runtime helpers.");
+		if (matched != 0 || conventions != 0 || dispatchers != 0) {
+			report(program, "Applied " + matched + " precise runtime p-code model(s), " +
+				conventions + " ABI register-preservation model(s), and recognized " +
+				dispatchers + " far-indirect dispatcher(s); repaired " +
+				runtimeSignatures + " stale runtime signature(s).");
 		}
 		return true;
 	}
@@ -149,6 +166,12 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 
 	private static Map<String, byte[]> runtimeHelpers() {
 		Map<String, byte[]> helpers = new LinkedHashMap<>();
+		helpers.put("c166_tasking_mulu4",
+			bytes("70552d05d1101b5acc00f2f50efe70bb2d05d1101bb4cc0002f50efed1101b4acc0002f50cfef2f40efedb00"));
+		helpers.put("c166_tasking_divu4",
+			bytes("70bb3d0ff6f50efed1105baacc00f2f50efef6f40efed1107baacc00f2f40efedb00"));
+		helpers.put("c166_tasking_modu4",
+			bytes("70bb3d0ef6f50efed1105baacc00f6f40efed1107baacc00f2f40cfee005db00"));
 		helpers.put("c166_tasking_load8n", new byte[] {
 			0x26, (byte) 0xf0, 0x08, 0x00, (byte) 0xf0, (byte) 0xa0,
 			(byte) 0xd8, (byte) 0xa4, 0x08, 0x42,
@@ -199,6 +222,77 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 		helpers.put("c166_tasking_swap8r",
 			bytes("a82bd8bab82a08a2a82bd8bab82a08a2a82bd8bab82a08a2"));
 		return Map.copyOf(helpers);
+	}
+
+	/**
+	 * TASKING implements a far indirect call by pushing the SEGMENT:OFFSET
+	 * target from R5:R4 onto the C166 system stack and returning into it.  The
+	 * ordinary target arguments remain in their normal ABI locations, so the
+	 * dispatcher itself must never acquire a C prototype inferred from R12-R15.
+	 */
+	static boolean isFarIndirectDispatcher(Program program, Function function) {
+		if ("call_far_indirect".equals(function.getCallFixup()) ||
+			"__call_far_indirect".equals(function.getName())) {
+			return true;
+		}
+		Instruction previousPrevious = null;
+		Instruction previous = null;
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction current = instructions.next();
+			if (current.getMnemonicString().equalsIgnoreCase("rets") &&
+				isRegisterPush(previousPrevious, "r5") &&
+				isRegisterPush(previous, "r4")) {
+				return true;
+			}
+			previousPrevious = previous;
+			previous = current;
+		}
+		return false;
+	}
+
+	private static boolean isRegisterPush(Instruction instruction, String registerName) {
+		if (instruction == null || instruction.getNumOperands() == 0) {
+			return false;
+		}
+		int sourceOperand;
+		if (instruction.getMnemonicString().equalsIgnoreCase("push")) {
+			sourceOperand = 0;
+		}
+		else if (instruction.getMnemonicString().equalsIgnoreCase("mov") &&
+			instruction.getNumOperands() >= 2 &&
+			instruction.getDefaultOperandRepresentation(0).replace(" ", "")
+				.equalsIgnoreCase("[-r0]")) {
+			sourceOperand = 1;
+		}
+		else {
+			return false;
+		}
+		for (Object object : instruction.getOpObjects(sourceOperand)) {
+			if (object instanceof Register register) {
+				return registerName.equalsIgnoreCase(register.getName());
+			}
+		}
+		return false;
+	}
+
+	private static boolean clearAnalysisRuntimeSignature(Function function,
+			MessageLog log) {
+		if (function.getParameterCount() == 0 ||
+			function.getSignatureSource() == SourceType.USER_DEFINED ||
+			function.getSignatureSource() == SourceType.IMPORTED) {
+			return false;
+		}
+		try {
+			function.updateFunction(function.getCallingConventionName(), null, List.of(),
+				FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+			return true;
+		}
+		catch (DuplicateNameException | InvalidInputException e) {
+			log.appendException(e);
+			return false;
+		}
 	}
 
 	private static byte[][] preservingRuntimeHelpers() {

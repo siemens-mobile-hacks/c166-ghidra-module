@@ -234,13 +234,29 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		createMemoryBlock("constant_callsite_data", toAddr(0x563100),
 			new byte[0x100], false);
 		Function constantSeedStore = fixture("constant_callsite_pair_store",
-			bytes(0xdb, 0x00));
+			bytes(0x88, 0xd0, 0x88, 0xc0, 0xdb, 0x00));
 		fixture("constant_callsite_caller_a",
 			constantPairCall(constantSeedStore, 0x31be, 0x158));
 		fixture("constant_callsite_caller_b",
 			constantPairCall(constantSeedStore, 0x316a, 0x158));
+		// A stale generic code pointer cannot survive repeated PAGE values above
+		// the 8-bit C166 code-segment limit.  This is the M55 FUN_c393da failure
+		// mode which otherwise makes the decompiler map raw 0x1950e3b.
+		Function staleGenericCodePointer = fixture(
+			"repair_impossible_generic_code_pointer", bytes(0xdb, 0x00));
+		setAnalysisGenericFunctionPointer(staleGenericCodePointer, "misclassified");
+		fixture("stale_generic_code_pointer_caller_a",
+			constantPairCall(staleGenericCodePointer, 0x313e, 0x158));
+		Function staleConsumedGenericCodePointer = fixture(
+			"repair_consumed_generic_code_pointer",
+			bytes(0x88, 0xd0, 0x88, 0xc0, 0xdb, 0x00));
+		setAnalysisGenericFunctionPointer(staleConsumedGenericCodePointer, "misclassified");
+		fixture("stale_consumed_code_pointer_caller_a",
+			constantPairCall(staleConsumedGenericCodePointer, 0x313e, 0x158));
+		fixture("stale_consumed_code_pointer_caller_b",
+			constantPairCall(staleConsumedGenericCodePointer, 0x316a, 0x158));
 		Function objectAndConstantSeed = fixture("object_and_constant_callsite_pair",
-			bytes(0xdb, 0x00));
+			bytes(0x88, 0xf0, 0x88, 0xe0, 0xdb, 0x00));
 		setAnalysisObjectAndWords(objectAndConstantSeed);
 		fixture("object_and_constant_caller_a",
 			constantPairCallAtSlot2(objectAndConstantSeed, 0x31be, 0x158));
@@ -304,6 +320,37 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			constantPairCall(rectangleScalarPair, 0x003b, 0x00ae));
 		fixture("rectangle_scalar_caller_3b_af",
 			constantPairCall(rectangleScalarPair, 0x003b, 0x00af));
+
+		Function freshRectangleScalarPair = fixture(
+			"fresh_rectangle_pair_is_not_a_pointer", bytes(0xdb, 0x00));
+		fixture("fresh_rectangle_caller_39_ae",
+			constantPairCall(freshRectangleScalarPair, 0x0039, 0x00ae));
+		fixture("fresh_rectangle_caller_39_af",
+			constantPairCall(freshRectangleScalarPair, 0x0039, 0x00af));
+		fixture("fresh_rectangle_caller_3b_ae",
+			constantPairCall(freshRectangleScalarPair, 0x003b, 0x00ae));
+		fixture("fresh_rectangle_caller_3b_af",
+			constantPairCall(freshRectangleScalarPair, 0x003b, 0x00af));
+
+		// M55 FUN_c3ca4a shape: both scalar words are spilled before a call, then
+		// an unrelated returned R5:R4 pointer is dereferenced.  That EXTP must not
+		// suppress the scalar rectangle for R13:R12.
+		Function unrelatedPointerProducer = fixture(
+			"unrelated_paged_pointer_producer", bytes(0xdb, 0x00));
+		Function rectangleWithUnrelatedExtp = fixture(
+			"rectangle_with_unrelated_extp",
+			concat(bytes(0x88, 0xd0, 0x88, 0xc0),
+				callInstruction(unrelatedPointerProducer.getEntryPoint()),
+				bytes(0x98, 0xc0, 0xdc, 0x45, 0xc4, 0xc4, 0x2c, 0x00,
+					0x98, 0xd0, 0xdb, 0x00)));
+		fixture("unrelated_extp_caller_313e_158",
+			constantPairCall(rectangleWithUnrelatedExtp, 0x313e, 0x158));
+		fixture("unrelated_extp_caller_316a_158",
+			constantPairCall(rectangleWithUnrelatedExtp, 0x316a, 0x158));
+		fixture("unrelated_extp_caller_313e_159",
+			constantPairCall(rectangleWithUnrelatedExtp, 0x313e, 0x159));
+		fixture("unrelated_extp_caller_316a_159",
+			constantPairCall(rectangleWithUnrelatedExtp, 0x316a, 0x159));
 
 		Function rectangleRealPointer = fixture("rectangle_with_real_paged_access",
 			pagedRead(13, 12));
@@ -461,6 +508,11 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 
 		checkNoParameters(ambiguous);
 		checkSignature(constantSeedStore, Set.of(0), "r13+r12");
+		checkWordSignature(staleGenericCodePointer, SourceType.ANALYSIS, "r12", "r13");
+		checkSignature(staleConsumedGenericCodePointer, Set.of(0), "r13+r12");
+		check(!(((Pointer) staleConsumedGenericCodePointer.getParameter(0)
+			.getFormalDataType()).getDataType() instanceof FunctionDefinition),
+			"consumed impossible generic code pointer was not repaired as data");
 		checkSignature(objectAndConstantSeed, Set.of(0, 1),
 			"r13+r12", "r15+r14");
 		check(typedVariadicTarget.hasVarArgs(),
@@ -470,6 +522,8 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkWordSignature(staleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleForwardTarget, SourceType.ANALYSIS, "r12", "r13");
+		checkNoParameters(freshRectangleScalarPair);
+		checkNoParameters(rectangleWithUnrelatedExtp);
 		checkCharPointer(rectangleTypedSink, "r13+r12");
 		checkSignature(rectangleRealPointer, Set.of(0), "r13+r12");
 		checkCharPointer(rectangleConcretePointer, "r13+r12");
@@ -668,6 +722,18 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 
 	private void setAnalysisFunctionPointer(Function function, String name) throws Exception {
 		Variable pointer = new ParameterImpl(name, functionPointerType(), currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisGenericFunctionPointer(Function function, String name)
+			throws Exception {
+		FunctionDefinitionDataType definition = new FunctionDefinitionDataType(
+			new CategoryPath("/c166"), "function", currentProgram.getDataTypeManager());
+		DataType resolved = currentProgram.getDataTypeManager().addDataType(definition,
+			DataTypeConflictHandler.KEEP_HANDLER);
+		Variable pointer = new ParameterImpl(name,
+			new PointerDataType(resolved, currentProgram.getDataTypeManager()), currentProgram);
 		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}

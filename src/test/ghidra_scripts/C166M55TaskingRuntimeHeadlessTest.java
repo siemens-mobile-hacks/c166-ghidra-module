@@ -24,7 +24,7 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 		for (long address : new long[] {
 			0xc483caL, 0xc483e8L, 0xc483feL, 0xc48416L, 0xc47df0L,
 			0xc47becL, 0xc479e4L, 0xc479ecL, 0xc48584L, 0xc48128L,
-			0xc484f2L, 0xc48106L
+			0xc484f2L, 0xc48106L, 0xf5fec6L, 0xf5ff60L, 0xf65adeL
 		}) {
 			Function function = requiredFunction(address);
 			function.setInline(false);
@@ -45,6 +45,13 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 		checkFixup(0xc48128L, "c166_tasking_dvf8r");
 		checkFixup(0xc484f2L, "c166_tasking_ngf8r");
 		checkFixup(0xc48106L, "c166_tasking_swap8r");
+		checkFixup(0xf5fec6L, "c166_tasking_mulu4");
+		checkFixup(0xf5ff60L, "c166_tasking_divu4");
+		checkFixup(0xf65adeL, "c166_tasking_modu4");
+		check(requiredFunction(0xf5fec6L).getParameterCount() == 0 &&
+			requiredFunction(0xf5ff60L).getParameterCount() == 0 &&
+			requiredFunction(0xf65adeL).getParameterCount() == 0,
+			"integer runtime helper retained a stale inferred C signature");
 
 		DoubleDataType doubleType = new DoubleDataType(currentProgram.getDataTypeManager());
 		Function floor = requiredFunction(0xbf78c8L);
@@ -73,6 +80,8 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 			String floorCode = decompile(decompiler, floor);
 			String expCode = decompile(decompiler, exp);
 			String ldexpCode = decompile(decompiler, ldexp);
+			String integerRuntimeCode = decompile(decompiler, requiredFunction(0x34212eL));
+			String formerlyFailingCode = decompile(decompiler, requiredFunction(0x217328L));
 			check(!floorCode.contains("Variable defined which should be unmapped: __x"),
 				"floor still has an unmapped double parameter");
 			check(!expCode.contains("double __x_") &&
@@ -87,6 +96,13 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 				"exp does not pass its computed double expression to floor");
 			check(expCode.contains(ldexp.getName() + "("),
 				"exp no longer contains its ldexp call");
+			check(!integerRuntimeCode.contains("FUN_f5fec6(") &&
+				!integerRuntimeCode.contains("__c166_far_function") &&
+				!integerRuntimeCode.contains("extraout_RH4") &&
+				!integerRuntimeCode.contains("extraout_RL5"),
+				"integer runtime still poisons FUN_34212e data flow");
+			check(!formerlyFailingCode.isBlank(),
+				"FUN_217328 produced no decompiler output");
 			println("M55 TASKING double runtime data-flow test passed.");
 		}
 		finally {

@@ -137,6 +137,16 @@ public class C166IndirectReturnDecompilerTest extends GhidraScript {
 			0x2d, (byte) 0xdd, 0x46, (byte) 0xf1,
 			(byte) 0xdb, 0
 		});
+		Function mulu4 = function(toAddr(0x3000), "tasking_mulu4", bytes(
+			"70552d05d1101b5acc00f2f50efe70bb2d05d1101bb4cc0002f50efed1101b4acc0002f50cfef2f40efedb00"));
+		Function divu4 = function(toAddr(0x3100), "tasking_divu4", bytes(
+			"70bb3d0ff6f50efed1105baacc00f2f50efef6f40efed1107baacc00f2f40efedb00"));
+		Function modu4 = function(toAddr(0x3200), "tasking_modu4", bytes(
+			"70bb3d0ef6f50efed1105baacc00f6f40efed1107baacc00f2f40cfee005db00"));
+		byte[] muluNearMissBytes = bytes(
+			"70552d05d1101b5acc00f2f50efe70bb2d05d1101bb4cc0002f50efed1101b4acc0002f50cfef2f40efedb01");
+		Function muluNearMiss = function(toAddr(0x3300), "not_tasking_mulu4",
+			muluNearMissBytes);
 		C166TaskingRuntimeAnalyzer runtimeAnalyzer = new C166TaskingRuntimeAnalyzer();
 		check(runtimeAnalyzer.canAnalyze(currentProgram),
 			"TASKING runtime analyzer rejected the large-model language");
@@ -152,6 +162,14 @@ public class C166IndirectReturnDecompilerTest extends GhidraScript {
 			"TASKING __ngf8r did not receive its ABI register-preservation model");
 		check("c166_tasking_mlf8r".equals(mlf8r.getCallFixup()),
 			"TASKING __mlf8r did not receive its arithmetic model");
+		check("c166_tasking_mulu4".equals(mulu4.getCallFixup()),
+			"TASKING 32-bit unsigned multiply helper was not recognized");
+		check("c166_tasking_divu4".equals(divu4.getCallFixup()),
+			"TASKING 32-bit unsigned divide helper was not recognized");
+		check("c166_tasking_modu4".equals(modu4.getCallFixup()),
+			"TASKING 32-bit unsigned remainder helper was not recognized");
+		check(muluNearMiss.getCallFixup() == null,
+			"near-match integer runtime code was assigned a call-fixup");
 		check(nearMiss.getCallFixup() == null,
 			"near-match runtime code was incorrectly assigned a call-fixup");
 		Function runtimeCaller = function(toAddr(0x1400), "runtime_double_argument",
@@ -286,6 +304,14 @@ public class C166IndirectReturnDecompilerTest extends GhidraScript {
 		check(result.decompileCompleted(),
 			function.getName() + " did not decompile: " + result.getErrorMessage());
 		return result.getDecompiledFunction().getC();
+	}
+
+	private byte[] bytes(String hex) {
+		byte[] result = new byte[hex.length() / 2];
+		for (int i = 0; i < result.length; i++) {
+			result[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+		}
+		return result;
 	}
 
 	private void useDevelopmentDecompilerIfRequested() throws Exception {

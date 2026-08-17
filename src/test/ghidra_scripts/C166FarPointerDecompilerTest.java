@@ -99,6 +99,8 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		createLabel(toAddr(0x196e), "PTR_00196e", true);
 		data(0x37da6, 0x100, true);
 		createLabel(toAddr(0x37da6), "snprintf_buffer", true);
+		data(0x654e3b, 1, true);
+		createLabel(toAddr(0x654e3b), "extp_register_target", true);
 		string(0x56735e, "fixed-stack-fixture");
 		string(0x5679ac, "third-stack-argument");
 		data(0x56978d, 0x10, false);       // page 0x15a, offset 0x178d
@@ -182,6 +184,13 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			new MessageLog()), "stack far-pointer analyzer failed");
 		checkThreePointerSignature(exactTarget);
 		setThreeCharPointers(exactTarget);
+		Function extpRegisterConstant = functionWithCode(0x3400,
+			"extp_register_constant_page", bytes(
+				0xe6, 0xf6, 0x3b, 0x0e, // mov r6,#0x0e3b
+				0xe6, 0xf7, 0x95, 0x01, // mov r7,#0x0195
+				0xdc, 0x47,             // extp r7,#1
+				0xb9, 0x26,             // movb [r6],RL1
+				0xdb, 0x00));
 
 		callers.add(caller(0x2200, "call_pair_0", bytes(
 			0xe6, 0xfc, 0x00, 0x10, // R12 = offset 0x1000
@@ -597,6 +606,11 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		check(decompiler.openProgram(currentProgram),
 			"failed to initialize decompiler: " + decompiler.getLastMessage());
 		try {
+			String extpCode = decompile(decompiler, extpRegisterConstant);
+			check(extpCode.contains("extp_register_target") &&
+				!extpCode.contains("0x1950e3b"),
+				"register EXTP was not normalized to page<<14 address 0x654e3b:\n" +
+					extpCode);
 			String pair0 = decompile(decompiler, callers.get(0));
 			checkCleanPointerCall(pair0, "\"blabla\"");
 
