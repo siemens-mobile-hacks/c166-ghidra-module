@@ -208,6 +208,66 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
 			calls(dataWins), bytes(0xdb, 0x00)));
 
+		// A carry-coupled R13:R12 value is one 32-bit scalar.  Propagate that
+		// evidence backwards through a wrapper and replace a stale generic
+		// function pointer without splitting the ABI storage into two words.
+		Function packedArithmetic = fixture("packed_scalar_carry_arithmetic", bytes(
+			0x26, 0xfc, 0x34, 0x12,       // sub R12,#0x1234
+			0x36, 0xfd, 0x00, 0x00,       // subc R13,#0
+			0xdb, 0x00));
+		Function packedForwardingWrapper = fixture("packed_scalar_forwarding_wrapper",
+			concat(
+				bytes(0x2d, 0x00), // validation branch to the forwarding call
+				calls(packedArithmetic), bytes(0xdb, 0x00)));
+		setLegacyGenericFunctionPointers(packedForwardingWrapper, "size");
+		Function packedForwardingCaller = fixture("packed_scalar_forwarding_caller", concat(
+			bytes(0xe6, 0xfc, 0x40, 0x00, 0xe6, 0xfd, 0x00, 0x00),
+			calls(packedForwardingWrapper), bytes(0xdb, 0x00)));
+		Function packedNarrowingTarget = fixture("packed_scalar_narrowing_target",
+			bytes(0xdb, 0x00));
+		setUserWords(packedNarrowingTarget, "length");
+		Function packedNarrowingWrapper = fixture("packed_scalar_narrowing_wrapper",
+			concat(calls(packedNarrowingTarget), bytes(0xdb, 0x00)));
+		setLegacyGenericFunctionPointers(packedNarrowingWrapper, "wide_length");
+		Function packedNarrowingCaller = fixture("packed_scalar_narrowing_caller", concat(
+			bytes(0xe6, 0xfc, 0x10, 0x00, 0xe6, 0xfd, 0x00, 0x00),
+			calls(packedNarrowingWrapper), bytes(0xdb, 0x00)));
+
+		// TASKING 3.6: after three word parameters, a four-byte value cannot fit
+		// in R15 and spills whole.  Reproduce the stale signature previously seen
+		// on FUN_26cee4: a synthetic R15 word followed by two stack fpointers.
+		// Each stack slot receives both an exact function entry and a non-code
+		// scalar.  The repaired signature must be three words plus two undefined4
+		// stack values, with no invented R15 parameter.
+		Function packedStackSpill = fixture("packed_scalar_stack_spill", bytes(
+			0xd4, 0x40, 0x04, 0x00,       // R4 = Stack[4] low
+			0xd4, 0x50, 0x06, 0x00,       // R5 = Stack[6] high
+			0x26, 0xf4, 0x01, 0x00,       // sub R4,#1
+			0x36, 0xf5, 0x00, 0x00,       // subc R5,#0
+			0xdb, 0x00));
+		setAnalysisWordsAndLegacyFunctionPointers(packedStackSpill,
+			new String[] { "word0", "word1", "word2", "spill_hole" },
+			new String[] { "value0", "value1" });
+		Function packedStackExactCaller = fixture("packed_scalar_stack_exact_caller", concat(
+			codePointerSetup(8, 9, freeTarget.getEntryPoint()),
+			bytes(0x88, 0x90, 0x88, 0x80),
+			codePointerSetup(6, 7, mallocTarget.getEntryPoint()),
+			bytes(0x88, 0x70, 0x88, 0x60, 0xf0, 0xf7),
+			bytes(0xe6, 0xfc, 0x01, 0x00, 0xe6, 0xfd, 0x02, 0x00,
+				0xe6, 0xfe, 0x03, 0x00),
+			calls(packedStackSpill),
+			bytes(0x06, 0xf0, 0x08, 0x00, 0xdb, 0x00)));
+		Function packedStackScalarCaller = fixture("packed_scalar_stack_value_caller", concat(
+			bytes(
+				0xe6, 0xf8, 0x10, 0x00, 0xe6, 0xf9, 0x00, 0x00,
+				0x88, 0x90, 0x88, 0x80,
+				0xe6, 0xf6, 0x04, 0x00, 0xe6, 0xf7, 0x00, 0x00,
+				0x88, 0x70, 0x88, 0x60, 0xf0, 0xf7,
+				0xe6, 0xfc, 0x01, 0x00, 0xe6, 0xfd, 0x02, 0x00,
+				0xe6, 0xfe, 0x03, 0x00),
+			calls(packedStackSpill),
+			bytes(0x06, 0xf0, 0x08, 0x00, 0xdb, 0x00)));
+
 		// A far indirect dispatcher consumes only R5:R4 as the target.  Values in
 		// R12-R15 are ordinary arguments of the runtime target and cannot type the
 		// dispatcher's own prototype, even if they happen to name code.
@@ -242,14 +302,49 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 					0xd4, 0x40, 0x02, 0x00),            // R4 = [SP+2]
 				calls(dispatcher),
 				bytes(0x06, 0xf0, 0x04, 0x00, 0xdb, 0x00)));
+		// Real TASKING code often validates first, then saves the incoming callback
+		// in a new basic block before loading R5:R4.  The semantic tracer must cross
+		// that predecessor boundary without allowing ordinary constant inference to
+		// do the same.
+		Function branchSavedIndirectTarget = fixture(
+			"branch_saved_parameter_used_as_far_indirect_target", concat(
+				bytes(
+					0x2d, 0x00,                         // conditional branch to the push
+					0x88, 0xc0,                         // push R12
+					0x88, 0xd0,                         // push R13
+					0xd4, 0x50, 0x00, 0x00,             // R5 = [SP]
+					0xd4, 0x40, 0x02, 0x00),            // R4 = [SP+2]
+				calls(dispatcher),
+				bytes(0x06, 0xf0, 0x04, 0x00, 0xdb, 0x00)));
+		Function semanticInterveningCall = fixture(
+			"callee_saved_callback_intervening_call", bytes(0xdb, 0x00));
+		Function calleeSavedIndirectTarget = fixture(
+			"callee_saved_parameter_used_as_far_indirect_target", concat(
+				bytes(
+					0xf0, 0x8e,                         // R8 = R14
+					0xf0, 0x9f,                         // R9 = R15
+					0x2d, 0x00),                        // validation branch
+				calls(semanticInterveningCall),
+				bytes(
+					0xf0, 0x48,                         // R4 = R8
+					0xf0, 0x59),                        // R5 = R9
+				calls(dispatcher), bytes(0xdb, 0x00)));
 		// Semantic use as R5:R4 is stronger than a generic ANALYSIS void *.  This
 		// reproduces FUN_2590ce after the earlier far-data pass typed its callback
 		// parameter as data.
 		Function analysisPointerIndirectTarget = fixture(
 			"analysis_pointer_used_as_far_indirect_target", concat(
+				pagedAccess(13, 12),
 				bytes(0xf0, 0x4c, 0xf0, 0x5d),
 				calls(dispatcher), bytes(0xdb, 0x00)));
 		setAnalysisPointer(analysisPointerIndirectTarget, "callback");
+		// FunctionDB delegates updateFunction() on a thunk to its target.  A full
+		// cleanup pass must therefore skip the thunk: it has no local evidence map,
+		// but splitting its inherited fpointer would silently split the proven
+		// callback on the target (the real shape is FUN_92c0c6 -> FUN_9057dc).
+		Function analysisPointerIndirectThunk = fixture(
+			"analysis_pointer_indirect_target_thunk", bytes(0xdb, 0x00));
+		analysisPointerIndirectThunk.setThunkedFunction(analysisPointerIndirectTarget);
 
 		// Function-pointer types must propagate backwards through wrappers to a
 		// fixed point.  The second wrapper needs a later pass after the first one is
@@ -369,6 +464,14 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"r12", "r13");
 		checkWordSignature(orphanStaleFunctionPointer, SourceType.ANALYSIS,
 			"r12", "r13");
+		checkSemanticCodeEvidence(analysisPointerIndirectTarget, 0);
+		checkSemanticCodeEvidence(branchSavedIndirectTarget, 0);
+		checkSemanticCodeEvidence(calleeSavedIndirectTarget, 2);
+		checkCodeSignature(analysisPointerIndirectTarget, "r13+r12");
+		check(analysisPointerIndirectThunk.isThunk() &&
+			analysisPointerIndirectThunk.getThunkedFunction(true).getEntryPoint().equals(
+				analysisPointerIndirectTarget.getEntryPoint()),
+			"callback thunk no longer targets the semantic callback function");
 		// A later full far-data One Shot must not use the recovered callback type
 		// itself as data evidence.  This is the real GUI ordering which previously
 		// changed FUN_9b0678(fpointer, ...) back to void *.
@@ -382,6 +485,9 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
 		checkMixedSignature(mixed);
 		checkDataPointer(dataWins, "r13+r12");
+		checkPackedScalar(packedForwardingWrapper, "r13+r12");
+		checkPackedScalar(packedNarrowingWrapper, "r13+r12");
+		checkPackedStackScalars(packedStackSpill);
 		checkCodeSignature(stackCallback, "r12", "r13", "r14", "r15", "Stack[0x0]:4");
 		checkCodeSignature(copiedCallback, "r13+r12");
 		checkCodeSignature(twoStackCallbacks, "r12", "r13", "r14", "r15",
@@ -403,6 +509,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkCodeSignature(middleIndirectTarget, "r12", "r14+r13");
 		checkCodeSignature(lateIndirectTarget, "r12", "r13", "r15+r14");
 		checkCodeSignature(savedIndirectTarget, "r13+r12");
+		checkCodeSignature(branchSavedIndirectTarget, "r13+r12");
+		checkCodeSignature(calleeSavedIndirectTarget, "r12", "r13", "r15+r14");
 		checkCodeSignature(analysisPointerIndirectTarget, "r13+r12");
 		checkCodeSignature(forwardingWrapper, "r13+r12");
 		checkCodeSignature(secondLevelForwardingWrapper, "r13+r12");
@@ -460,22 +568,28 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		String snapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
 			singleExactTarget, singleExactDataWrapper, dataWins, dispatcher,
+			packedForwardingWrapper, packedNarrowingWrapper, packedStackSpill,
 			indirectTarget, middleIndirectTarget, lateIndirectTarget,
-			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
+			reversedIndirectTarget, savedIndirectTarget, branchSavedIndirectTarget,
+			calleeSavedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
 			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
 			staleRectangleFunctionPointer, orphanStaleFunctionPointer);
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "second code-pointer analysis failed");
-		check(snapshot.equals(snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
+		String secondSnapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
 			singleExactTarget, singleExactDataWrapper, dataWins, dispatcher,
+			packedForwardingWrapper, packedNarrowingWrapper, packedStackSpill,
 			indirectTarget, middleIndirectTarget, lateIndirectTarget,
-			reversedIndirectTarget, savedIndirectTarget, analysisPointerIndirectTarget,
+			reversedIndirectTarget, savedIndirectTarget, branchSavedIndirectTarget,
+			calleeSavedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
 			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
-			staleRectangleFunctionPointer, orphanStaleFunctionPointer)),
-			"code-pointer inference is not idempotent");
+			staleRectangleFunctionPointer, orphanStaleFunctionPointer);
+		check(snapshot.equals(secondSnapshot),
+			"code-pointer inference is not idempotent\nBEFORE:\n" + snapshot +
+				"\nAFTER:\n" + secondSnapshot);
 
 		C166PointerReturnAnalyzer returnAnalyzer = new C166PointerReturnAnalyzer();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
@@ -502,8 +616,13 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			existingDataPointerCaller != null && dataWinsCaller != null &&
 			singleExactTargetCaller != null &&
 			dispatcherCaller != null && forwardingTarget != null &&
+			analysisPointerIndirectThunk != null &&
+			semanticInterveningCall != null &&
 			stackForwardingInterveningCall != null &&
 			branchMergeCaller != null && stalePushCaller != null &&
+			packedForwardingCaller != null && packedNarrowingCaller != null &&
+			packedStackExactCaller != null &&
+			packedStackScalarCaller != null &&
 			rectangleCallers.size() == 4,
 			"missing caller fixture");
 		println("TASKING code-pointer inference matrix passed.");
@@ -552,7 +671,11 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 	}
 
 	private byte[] pagedRead(int highRegister, int lowRegister) {
-		return bytes(0xdc, 0x40 | highRegister, 0xa8, 0x40 | lowRegister, 0xdb, 0x00);
+		return concat(pagedAccess(highRegister, lowRegister), bytes(0xdb, 0x00));
+	}
+
+	private byte[] pagedAccess(int highRegister, int lowRegister) {
+		return bytes(0xdc, 0x40 | highRegister, 0xa8, 0x40 | lowRegister);
 	}
 
 	private byte[] concat(byte[]... parts) {
@@ -664,6 +787,25 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 
+	private void setAnalysisWordsAndLegacyFunctionPointers(Function function,
+			String[] wordNames, String[] pointerNames) throws Exception {
+		FunctionDefinitionDataType prototype = new FunctionDefinitionDataType(
+			"__c166_far_function", currentProgram.getDataTypeManager());
+		prototype.setVarArgs(true);
+		DataType pointer = new PointerDataType(prototype,
+			currentProgram.getDataTypeManager());
+		List<Variable> parameters = new ArrayList<>();
+		for (String name : wordNames) {
+			parameters.add(new ParameterImpl(name,
+				Undefined.getUndefinedDataType(2), currentProgram));
+		}
+		for (String name : pointerNames) {
+			parameters.add(new ParameterImpl(name, pointer, currentProgram));
+		}
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
 	private void setWords(Function function, SourceType source, String... names) throws Exception {
 		List<Variable> parameters = new ArrayList<>();
 		for (String name : names) {
@@ -696,6 +838,15 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		}
 	}
 
+	private void checkSemanticCodeEvidence(Function function, int start) {
+		String slots = currentProgram.getOptions("C166 TASKING Code Pointer Inference")
+			.getString("Semantic code-pointer parameter slots at " +
+				function.getEntryPoint(), null);
+		check(slots != null && ("," + slots + ",").contains("," + start + ","),
+			function.getName() + ": missing semantic code-pointer evidence for slot " +
+				start + ", got " + slots);
+	}
+
 	private void checkMixedSignature(Function function) {
 		Parameter[] parameters = function.getParameters();
 		check(parameters.length == 2, "mixed signature parameter count is " + parameters.length);
@@ -710,6 +861,39 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"mixed PAGE:OFFSET data pointer was not preserved");
 		check("data_offset".equals(parameters[1].getName()),
 			"mixed data-pointer parameter name was lost");
+	}
+
+	private void checkPackedScalar(Function function, String expectedStorage) {
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == 1,
+			function.getName() + ": packed scalar parameter count is " + parameters.length);
+		check(expectedStorage.equals(describe(parameters[0].getVariableStorage())),
+			function.getName() + ": packed scalar storage is " +
+				describe(parameters[0].getVariableStorage()));
+		check(parameters[0].getFormalDataType().getLength() == 4 &&
+			Undefined.isUndefined(parameters[0].getFormalDataType()) &&
+			!isFunctionPointer(parameters[0].getFormalDataType()),
+			function.getName() + ": packed scalar type is " +
+				parameters[0].getFormalDataType().getDisplayName());
+	}
+
+	private void checkPackedStackScalars(Function function) {
+		Parameter[] parameters = function.getParameters();
+		check(parameters.length == 5,
+			function.getName() + ": expected five parameters, got " + parameters.length);
+		String[] expected = { "r12", "r13", "r14", "Stack[0x0]:4", "Stack[0x4]:4" };
+		for (int i = 0; i < parameters.length; i++) {
+			check(expected[i].equals(describe(parameters[i].getVariableStorage())),
+				function.getName() + "[" + i + "]: unexpected storage " +
+					describe(parameters[i].getVariableStorage()));
+		}
+		for (int i = 3; i < parameters.length; i++) {
+			check(parameters[i].getFormalDataType().getLength() == 4 &&
+				Undefined.isUndefined(parameters[i].getFormalDataType()) &&
+				!isFunctionPointer(parameters[i].getFormalDataType()),
+				function.getName() + "[" + i + "]: expected packed undefined4, got " +
+					parameters[i].getFormalDataType().getDisplayName());
+		}
 	}
 
 	private void checkDataPointer(Function function, String expectedStorage) {

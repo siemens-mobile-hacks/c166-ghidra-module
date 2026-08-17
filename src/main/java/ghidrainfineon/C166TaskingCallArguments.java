@@ -48,7 +48,8 @@ final class C166TaskingCallArguments {
 			registerBankOccupied &= value.defined();
 		}
 		if (registerBankOccupied) {
-			recoverPushedWords(program, caller, setupRegion, call, words);
+			recoverPushedWords(program, caller, setupRegion, call, words,
+				stackArgumentWords(program, call));
 		}
 		return new CallWords(Map.copyOf(words), registerBankOccupied);
 	}
@@ -105,12 +106,16 @@ final class C166TaskingCallArguments {
 	}
 
 	private static void recoverPushedWords(Program program, Function function,
-			AddressSetView setupRegion, Instruction call, Map<Integer, WordValue> words) {
+			AddressSetView setupRegion, Instruction call, Map<Integer, WordValue> words,
+			Integer maximumWords) {
 		Instruction instruction = program.getListing().getInstructionBefore(call.getAddress());
 		int word = 0;
 		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
 				scanned++, instruction =
 					program.getListing().getInstructionBefore(instruction.getAddress())) {
+			if (maximumWords != null && word >= maximumWords) {
+				break;
+			}
 			if (!function.getBody().contains(instruction.getAddress()) ||
 				!setupRegion.contains(instruction.getAddress()) ||
 				instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
@@ -130,6 +135,27 @@ final class C166TaskingCallArguments {
 			words.put(4 + word, value);
 			word++;
 		}
+	}
+
+	/**
+	 * TASKING uses caller cleanup for user-stack arguments.  The immediate
+	 * post-call ADD R0,#bytes is therefore an exact bound on argument pushes;
+	 * older recovery could walk into saved registers below those arguments and
+	 * mistake them for additional parameter words.
+	 */
+	private static Integer stackArgumentWords(Program program, Instruction call) {
+		Instruction cleanup = program.getListing().getInstructionAfter(call.getAddress());
+		if (cleanup == null || !cleanup.getMnemonicString().equalsIgnoreCase("add") ||
+			cleanup.getNumOperands() < 2) {
+			return 0;
+		}
+		Register destination = operandRegister(cleanup, 0);
+		Scalar bytes = cleanup.getScalar(1);
+		if (destination == null || !destination.getName().equalsIgnoreCase("r0") ||
+			bytes == null || (bytes.getUnsignedValue() & 1) != 0) {
+			return 0;
+		}
+		return (int) (bytes.getUnsignedValue() / 2);
 	}
 
 	private static boolean isStackPush(Instruction instruction) {

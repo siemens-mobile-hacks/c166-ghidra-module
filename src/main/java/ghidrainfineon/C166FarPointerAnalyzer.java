@@ -306,7 +306,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 			Map<Integer, DataType> pointerTypes = preferDirectPagedDataTypes(program,
 				function, inference.pointerTypes(), directPagedPairs);
-			pairStarts = removeFunctionPointerConflicts(function, pairStarts,
+			pairStarts = removeFunctionPointerConflicts(program, function, pairStarts,
 				directPagedPairs, pointerTypes);
 			pairStarts = removeCallSiteScalarConflicts(function, pairStarts,
 				directPagedPairs, scalarPairs, strictScalarPairs);
@@ -561,7 +561,9 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	private int replaceImpossibleGenericCodePointer(Program program, Function function,
 			int pairStart, boolean consumed)
 			throws DuplicateNameException, InvalidInputException {
-		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS ||
+			C166CodePointerAnalyzer.hasSemanticCodePointerEvidence(program, function,
+				pairStart)) {
 			return 0;
 		}
 		List<Variable> parameters = new ArrayList<>();
@@ -2712,13 +2714,14 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 
 	/**
 	 * Code-pointer inference runs after data inference during normal analysis, but
-	 * users can rerun either one-shot analyzer independently.  Once a parameter is
-	 * a function pointer, a later far-data pass must not reinterpret or split any
-	 * part of its ABI storage, even if downstream forwarding produces an apparent
-	 * PAGE:OFFSET pair.  The code analyzer has stronger evidence: the constant
-	 * SEGMENT:OFFSET names an exact executable function entry.
+	 * users can rerun either one-shot analyzer independently.  Concrete callback
+	 * types are always authoritative.  An analyzer-owned generic fpointer may be
+	 * repaired as data only when it has no semantic marker from the code-pointer
+	 * pass.  A direct or transitively forwarded far-indirect use is stronger than
+	 * an apparent PAGE:OFFSET operation recovered from the same stale HighSymbol;
+	 * a coincidental exact function-address constant alone is intentionally not.
 	 */
-	private Set<Integer> removeFunctionPointerConflicts(Function function,
+	private Set<Integer> removeFunctionPointerConflicts(Program program, Function function,
 			Set<Integer> pairStarts, Set<Integer> directPagedPairs,
 			Map<Integer, DataType> pointerTypes) {
 		Set<Integer> retained = new HashSet<>();
@@ -2739,8 +2742,12 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 					boolean provenData = directPagedPairs.contains(candidateStart) ||
 						(inferred != null && pointerDataType(inferred) != null &&
 							!isFunctionPointer(inferred));
+					boolean provenCode =
+						C166CodePointerAnalyzer.hasSemanticCodePointerEvidence(program,
+							function, existingStart);
 					overlaps = !(function.getSignatureSource() == SourceType.ANALYSIS &&
-						isGenericFunctionPointer(parameter.getFormalDataType()) && provenData);
+						isGenericFunctionPointer(parameter.getFormalDataType()) && provenData &&
+						!provenCode);
 					break;
 				}
 			}

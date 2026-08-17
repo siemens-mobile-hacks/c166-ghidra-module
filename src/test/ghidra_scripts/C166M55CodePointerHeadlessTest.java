@@ -1,16 +1,34 @@
 // Headless diagnostic for the real M55_v91.bin Ghidra database.
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.FunctionDefinition;
+import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.data.TypedefDataType;
+import ghidra.program.model.data.Undefined;
+import ghidra.program.model.data.UnsignedIntegerDataType;
+import ghidra.program.model.data.UnsignedShortDataType;
+import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Function.FunctionUpdateType;
 import ghidra.program.model.listing.Parameter;
+import ghidra.program.model.listing.ParameterImpl;
+import ghidra.program.model.listing.Variable;
+import ghidra.program.model.symbol.SourceType;
 import ghidrainfineon.C166CodePointerAnalyzer;
 import ghidrainfineon.C166FarPointerAnalyzer;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
@@ -19,7 +37,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 	private static final long[] TARGETS = {
 		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce, 0x99b53a,
-		0xc3ca42, 0xc3ca4a
+		0xc3ca42, 0xc3ca4a, 0x26cee4, 0x26cd1c, 0xc58cb6, 0x740b28, 0x9057dc
 	};
 
 	@Override
@@ -27,6 +45,9 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		println("M55 HEADLESS language=" + currentProgram.getLanguageID() +
 			" compiler=" + currentProgram.getCompilerSpec().getCompilerSpecID());
 		ensureFunction(0x2590ce);
+		seedScalarRegressionState();
+		PointerCounts beforeCounts = pointerCounts();
+		Set<String> beforeCodePointers = codePointerSlots();
 		dump("BEFORE");
 
 		AddressSet wholeProgram = new AddressSet(currentProgram.getMemory());
@@ -37,13 +58,144 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		new C166CodePointerAnalyzer().added(currentProgram, wholeProgram, monitor, codeLog);
 		println("M55 HEADLESS code-log=" + codeLog);
 		dump("AFTER_CODE");
+		verifyScalarState("AFTER_CODE");
+		checkFunctionPointers(0x740b28, 0, 1);
+		checkFunctionPointers(0x9057dc, 1);
+		PointerCounts afterCodeCounts = pointerCounts();
+		Set<String> afterCodePointers = codePointerSlots();
 
 		MessageLog farLog = new MessageLog();
 		new C166FarPointerAnalyzer().added(currentProgram, wholeProgram, monitor, farLog);
 		println("M55 HEADLESS far-log=" + farLog);
 		dump("AFTER_CODE_THEN_FAR");
 		verifyFinalState();
+		PointerCounts afterFarCounts = pointerCounts();
+		Set<String> afterFarPointers = codePointerSlots();
+		println("M55 HEADLESS pointer-counts before=" + beforeCounts +
+			" after-code=" + afterCodeCounts + " after-far=" + afterFarCounts);
+		println("M55 HEADLESS code-pointers removed-by-code=" +
+			difference(beforeCodePointers, afterCodePointers));
+		println("M55 HEADLESS code-pointers added-by-code=" +
+			difference(afterCodePointers, beforeCodePointers));
+		println("M55 HEADLESS code-pointers removed-by-far=" +
+			difference(afterCodePointers, afterFarPointers));
+		println("M55 HEADLESS code-pointers added-by-far=" +
+			difference(afterFarPointers, afterCodePointers));
 		println("M55 real-program code-pointer regression passed.");
+	}
+
+	private Set<String> codePointerSlots() {
+		Set<String> result = new TreeSet<>();
+		var functions = currentProgram.getFunctionManager().getFunctions(true);
+		while (functions.hasNext()) {
+			Function function = functions.next();
+			for (Parameter parameter : function.getParameters()) {
+				if (isFunctionPointer(parameter.getFormalDataType())) {
+					result.add(function.getEntryPoint() + ":" +
+						describe(parameter.getVariableStorage()));
+				}
+			}
+		}
+		return Set.copyOf(result);
+	}
+
+	private Set<String> difference(Set<String> first, Set<String> second) {
+		Set<String> result = new TreeSet<>(first);
+		result.removeAll(second);
+		return result;
+	}
+
+	private PointerCounts pointerCounts() {
+		int code = 0;
+		int data = 0;
+		int packedScalars = 0;
+		var functions = currentProgram.getFunctionManager().getFunctions(true);
+		while (functions.hasNext()) {
+			for (Parameter parameter : functions.next().getParameters()) {
+				DataType type = parameter.getFormalDataType();
+				if (isFunctionPointer(type)) {
+					code++;
+				}
+				else if (isPointer(type)) {
+					data++;
+				}
+				else if (type.getLength() == 4 && Undefined.isUndefined(type)) {
+					packedScalars++;
+				}
+			}
+		}
+		return new PointerCounts(code, data, packedScalars);
+	}
+
+	private record PointerCounts(int codePointers, int dataPointers, int packedScalars) {
+	}
+
+	private void seedScalarRegressionState() throws Exception {
+		DataType fpointer = ensureCanonicalFunctionPointer();
+		check(fpointer != null && isFunctionPointer(fpointer),
+			"missing canonical fpointer type");
+		DataType word = Undefined.getUndefinedDataType(2);
+		DataType dataPointer = new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager());
+
+		setAnalysisParameters(requiredFunction(0xc58cb6), fpointer);
+		setAnalysisParameters(requiredFunction(0x26cd1c),
+			word, word, fpointer, dataPointer, fpointer);
+		setAnalysisParameters(requiredFunction(0x26cee4),
+			word, word, word, word, fpointer, fpointer);
+
+		// The current GUI database receives these prototypes from the runtime
+		// archive.  The saved headless fixture predates that archive import, so
+		// reproduce the same typed scalar sinks before testing stale-signature
+		// migration.
+		DataType uint16 = UnsignedShortDataType.dataType;
+		DataType uint32 = UnsignedIntegerDataType.dataType;
+		setParameters(requiredFunction(0xa417e8), SourceType.USER_DEFINED,
+			uint16, uint32, uint16, dataPointer, dataPointer);
+		setParameters(requiredFunction(0xa4172e), SourceType.USER_DEFINED,
+			uint16, dataPointer, uint16, dataPointer);
+	}
+
+	private DataType ensureCanonicalFunctionPointer() {
+		DataType existing = currentProgram.getDataTypeManager().getDataType("/fpointer");
+		if (existing instanceof TypeDef && isFunctionPointer(existing)) {
+			return existing;
+		}
+		DataType function = currentProgram.getDataTypeManager().getDataType("/c166/function");
+		if (!(function instanceof FunctionDefinition)) {
+			FunctionDefinitionDataType definition = new FunctionDefinitionDataType(
+				new CategoryPath("/c166"), "function",
+				currentProgram.getDataTypeManager());
+			definition.setVarArgs(true);
+			function = currentProgram.getDataTypeManager().resolve(definition,
+				DataTypeConflictHandler.DEFAULT_HANDLER);
+		}
+		DataType pointer = new PointerDataType(function,
+			currentProgram.getDataTypeManager());
+		return currentProgram.getDataTypeManager().resolve(new TypedefDataType(
+			CategoryPath.ROOT, "fpointer", pointer,
+			currentProgram.getDataTypeManager()),
+			DataTypeConflictHandler.DEFAULT_HANDLER);
+	}
+
+	private Function requiredFunction(long address) {
+		Function function = getFunctionAt(toAddr(address));
+		check(function != null, "missing function at " + Long.toHexString(address));
+		return function;
+	}
+
+	private void setAnalysisParameters(Function function, DataType... types) throws Exception {
+		setParameters(function, SourceType.ANALYSIS, types);
+	}
+
+	private void setParameters(Function function, SourceType source, DataType... types)
+			throws Exception {
+		List<Variable> parameters = new ArrayList<>();
+		for (DataType type : types) {
+			parameters.add(new ParameterImpl(null, type, currentProgram));
+		}
+		function.updateFunction("__tasking_c166_classic", null, parameters,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, source);
 	}
 
 	private void verifyFinalState() throws Exception {
@@ -59,6 +211,8 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		checkFunctionPointers(0x29ffde, 2);
 		checkFunctionPointers(0x25901a, 1, 2);
 		checkFunctionPointers(0x2590ce, 0, 1);
+		checkFunctionPointers(0x740b28, 0, 1);
+		checkFunctionPointers(0x9057dc, 1);
 		checkScalarWord(0x99b53a, 0, "r12");
 		checkScalarWord(0x99b53a, 1, "r13");
 		checkScalarWord(0xc3ca42, 0, "r12");
@@ -71,6 +225,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			check(!isFunctionPointer(parameter.getFormalDataType()),
 				"FUN_c393da retained an impossible generic code pointer");
 		}
+		verifyScalarState("FINAL");
 
 		Function caller = getFunctionAt(toAddr(0x242066));
 		check(caller != null, "missing FUN_242066");
@@ -97,13 +252,15 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		check(scalarCaller != null, "missing caller containing 6f30aa");
 		String scalarCallerCode = decompile(scalarCaller, "VERIFY");
 		String compactScalarCode = scalarCallerCode.replaceAll("\\s+", "");
-		check(compactScalarCode.contains("FUN_99b53a(1,0x2c3)"),
+		check(compactScalarCode.contains("FUN_99b53a(1,0x2c3,") ||
+			compactScalarCode.contains("FUN_99b53a(1,0x2c3)"),
 			"6f30aa did not retain separate flag and LGP-id arguments");
 		check(!compactScalarCode.contains("0xb0c001") &&
 			!compactScalarCode.contains("DAT_b0c001"),
 			"6f30aa still contains the false PAGE:OFFSET pointer");
 
-		Function resultCaller = ensureFunction(0xc394dc);
+		Function resultCaller = getFunctionContaining(toAddr(0xc394dc));
+		check(resultCaller != null, "missing caller containing c394dc");
 		String compactResultCode = decompile(resultCaller, "VERIFY").replaceAll("\\s+", "");
 		check(compactResultCode.contains("FUN_c3ca42(1,0xff)") ||
 			compactResultCode.contains("FUN_c3ca4a(1,0xff)"),
@@ -125,6 +282,28 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		String extpCode = decompile(extpCaller, "VERIFY");
 		check(extpCode.contains("* 0x4000"),
 			"FUN_c35672 lost PAGE while lowering register EXTP");
+	}
+
+	private void verifyScalarState(String stage) throws Exception {
+		checkPackedScalar(0xc58cb6, 0, "r13+r12");
+		checkPackedScalar(0x26cd1c, 2, "r15+r14");
+		checkDataPointer(0x26cd1c, 3, "Stack[0x0]:4");
+		checkPackedScalar(0x26cd1c, 4, "Stack[0x4]:4");
+		Function recursiveScalar = getFunctionAt(toAddr(0x26cee4));
+		check(recursiveScalar != null, stage + ": missing FUN_26cee4");
+		check(recursiveScalar.getParameterCount() == 5,
+			stage + ": FUN_26cee4 expected five ABI parameters, got " +
+				recursiveScalar.getPrototypeString(true, true));
+		checkScalarWord(0x26cee4, 0, "r12");
+		checkScalarWord(0x26cee4, 1, "r13");
+		checkScalarWord(0x26cee4, 2, "r14");
+		checkPackedScalar(0x26cee4, 3, "Stack[0x0]:4");
+		checkPackedScalar(0x26cee4, 4, "Stack[0x4]:4");
+		String recursiveCode = decompile(recursiveScalar, stage);
+		check(!recursiveCode.contains("fpointer") &&
+			!recursiveCode.contains("(function *)"),
+			stage + ": FUN_26cee4 retained false function-pointer arguments:\n" +
+				recursiveCode);
 	}
 
 	private void checkScalarWord(long address, int index, String registerName) {
@@ -156,6 +335,54 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			current = typeDef.getBaseDataType();
 		}
 		return current instanceof Pointer;
+	}
+
+	private void checkPackedScalar(long address, int index, String storage) {
+		Function function = getFunctionAt(toAddr(address));
+		check(function != null, "missing function at " + Long.toHexString(address));
+		check(index < function.getParameterCount(),
+			function.getName() + ": missing packed scalar parameter " + index);
+		Parameter parameter = function.getParameter(index);
+		check(storage.equals(describe(parameter.getVariableStorage())),
+			function.getName() + "[" + index + "] expected " + storage + ", got " +
+				describe(parameter.getVariableStorage()));
+		check(parameter.getFormalDataType().getLength() == 4 &&
+			Undefined.isUndefined(parameter.getFormalDataType()) &&
+			!isPointer(parameter.getFormalDataType()),
+			function.getName() + "[" + index + "] is not a packed scalar: " +
+				parameter.getFormalDataType().getDisplayName());
+	}
+
+	private void checkDataPointer(long address, int index, String storage) {
+		Function function = getFunctionAt(toAddr(address));
+		check(function != null && index < function.getParameterCount(),
+			"missing data-pointer parameter at " + Long.toHexString(address));
+		Parameter parameter = function.getParameter(index);
+		check(storage.equals(describe(parameter.getVariableStorage())) &&
+			isPointer(parameter.getFormalDataType()) &&
+			!isFunctionPointer(parameter.getFormalDataType()),
+			function.getName() + "[" + index + "] is not the expected data pointer: " +
+				parameter.getFormalDataType().getDisplayName() + " " +
+				parameter.getVariableStorage());
+	}
+
+	private String describe(ghidra.program.model.listing.VariableStorage storage) {
+		List<Register> registers = storage.getRegisters();
+		if (registers != null && !registers.isEmpty()) {
+			StringBuilder result = new StringBuilder();
+			for (Register register : registers) {
+				if (result.length() != 0) {
+					result.append('+');
+				}
+				result.append(register.getName().toLowerCase());
+			}
+			return result.toString();
+		}
+		if (storage.isStackStorage()) {
+			return "Stack[0x" + Long.toHexString(storage.getStackOffset()) + "]:" +
+				storage.size();
+		}
+		return storage.toString();
 	}
 
 	private void checkFunctionPointers(long address, int... indexes) {
@@ -227,7 +454,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			println("M55 HEADLESS " + phase + " FUN_6f2ea6_END");
 		}
 
-		Function resultCaller = ensureFunction(0xc394dc);
+		Function resultCaller = getFunctionContaining(toAddr(0xc394dc));
 		if (resultCaller != null) {
 			println("M55 HEADLESS " + phase + " AT_SayResult_BEGIN");
 			println(decompile(resultCaller, phase));

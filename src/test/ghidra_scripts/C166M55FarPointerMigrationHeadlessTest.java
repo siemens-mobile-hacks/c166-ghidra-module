@@ -62,7 +62,9 @@ public class C166M55FarPointerMigrationHeadlessTest extends GhidraScript {
 			// every dereference must use the Large Model physical page shift.
 			check(extpCode.contains("* 0x4000"),
 				"FUN_c35672 lost PAGE while lowering register EXTP");
-			String scalarCode = decompile(decompiler, ensureFunction(0xc394dc))
+			Function scalarCaller = getFunctionContaining(toAddr(0xc394dc));
+			check(scalarCaller != null, "missing caller containing c394dc");
+			String scalarCode = decompile(decompiler, scalarCaller)
 				.replaceAll("\\s+", "");
 			check(scalarCode.contains("FUN_c3ca42(1,0xff)") ||
 				scalarCode.contains("FUN_c3ca4a(1,0xff)"),
@@ -86,23 +88,6 @@ public class C166M55FarPointerMigrationHeadlessTest extends GhidraScript {
 	private Function requiredFunction(long address) {
 		Function function = getFunctionAt(toAddr(address));
 		check(function != null, "missing function at " + Long.toHexString(address));
-		return function;
-	}
-
-	private Function ensureFunction(long address) throws Exception {
-		Function function = getFunctionAt(toAddr(address));
-		if (function != null) {
-			return function;
-		}
-		check(getFunctionContaining(toAddr(address)) == null,
-			"M55 fixture entry is inside another function at " + Long.toHexString(address));
-		if (getInstructionAt(toAddr(address)) == null) {
-			check(disassemble(toAddr(address)),
-				"failed to disassemble M55 fixture at " + Long.toHexString(address));
-		}
-		function = createFunction(toAddr(address), "FUN_" + Long.toHexString(address));
-		check(function != null,
-			"failed to create M55 fixture at " + Long.toHexString(address));
 		return function;
 	}
 

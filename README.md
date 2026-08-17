@@ -21,6 +21,9 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
   when their `SEGMENT:OFFSET` encoding names an executable function entry,
   while requiring repeated or semantic evidence before propagating that type
   backwards through wrappers.
+- Distinguishes TASKING packed 32-bit scalar pairs from far callbacks, keeps
+  semantic callback evidence stable across analyzer passes, and avoids changing
+  callback target signatures indirectly through thunks.
 - Infers far data-pointer returns in the documented R5/R4 pair from proven
   downstream pointer use without confusing scalar or callback returns.
 - Recognizes TASKING far-indirect dispatchers, applies their call fixup, and
