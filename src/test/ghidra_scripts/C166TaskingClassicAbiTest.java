@@ -4,6 +4,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import ghidra.app.script.GhidraScript;
+import ghidra.app.services.Analyzer;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.CategoryPath;
@@ -28,11 +29,14 @@ import ghidra.program.model.lang.ParameterPieces;
 import ghidra.program.model.lang.PrototypeModel;
 import ghidra.program.model.lang.PrototypePieces;
 import ghidra.program.model.listing.VariableStorage;
-import ghidrainfineon.C166CodePointerAnalyzer;
-import ghidrainfineon.C166FarPointerAnalyzer;
-import ghidrainfineon.C166TaskingDataTypeAnalyzer;
+import ghidra.util.classfinder.ClassSearcher;
+import ghidrainfineon.C166ArchitectureProfile;
+import ghidrainfineon.C166CodePointerPhase;
+import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166TaskingDataTypePhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
-import ghidrainfineon.C166VariadicCallAnalyzer;
+import ghidrainfineon.C166TaskingTypeInferenceAnalyzer;
+import ghidrainfineon.C166VariadicCallPhase;
 
 public class C166TaskingClassicAbiTest extends GhidraScript {
 
@@ -41,43 +45,35 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 	@Override
 	protected void run() throws Exception {
 		String compilerId = currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString();
-		if ("tasking".equals(compilerId)) {
-			check(!new C166CodePointerAnalyzer().canAnalyze(currentProgram),
-				"code-pointer analyzer leaked into legacy compiler spec");
-			check(!new C166FarPointerAnalyzer().canAnalyze(currentProgram),
-				"far-pointer analyzer leaked into legacy compiler spec");
-			check(!new C166VariadicCallAnalyzer().canAnalyze(currentProgram),
-				"variadic analyzer leaked into legacy compiler spec");
-			check(!new C166TaskingDataTypeAnalyzer().canAnalyze(currentProgram),
-				"TASKING data-type analyzer leaked into legacy compiler spec");
-			check(!new C166TaskingRuntimeAnalyzer().canAnalyze(currentProgram),
-				"TASKING runtime analyzer leaked into legacy compiler spec");
-			check(currentProgram.getDefaultPointerSize() == 3,
-				"legacy pointer size changed to " + currentProgram.getDefaultPointerSize());
-			check(currentProgram.getRegister("ARGFP12") == null,
-				"TASKING-only ARGFP12 leaked into the legacy language");
-			check(!hasUserop("farsegment_arg"),
-				"TASKING-only farsegment_arg leaked into the legacy language");
-			check("__stdcall".equals(
-				currentProgram.getCompilerSpec().getDefaultCallingConvention().getName()),
-				"legacy default convention changed");
-			check(currentProgram.getCompilerSpec().getCallingConvention("__keil_c166") != null,
-				"legacy __keil_c166 convention is missing");
-			println("Legacy TASKING/Keil compiler spec compatibility tests passed.");
-			return;
-		}
 		check("tasking-classic-large".equals(compilerId),
 			"wrong compiler spec: " + compilerId);
-		check(new C166CodePointerAnalyzer().canAnalyze(currentProgram),
-			"code-pointer analyzer does not accept TASKING Classic large");
-		check(new C166FarPointerAnalyzer().canAnalyze(currentProgram),
-			"far-pointer analyzer does not accept TASKING Classic large");
-		check(new C166VariadicCallAnalyzer().canAnalyze(currentProgram),
-			"variadic analyzer does not accept TASKING Classic large");
-		check(new C166TaskingDataTypeAnalyzer().canAnalyze(currentProgram),
-			"data-type analyzer does not accept TASKING Classic large");
+		check(new C166CodePointerPhase().canAnalyze(currentProgram),
+			"code-pointer phase does not accept TASKING Classic large");
+		check(new C166FarPointerPhase().canAnalyze(currentProgram),
+			"far-pointer phase does not accept TASKING Classic large");
+		check(new C166VariadicCallPhase().canAnalyze(currentProgram),
+			"variadic phase does not accept TASKING Classic large");
+		check(new C166TaskingDataTypePhase().canAnalyze(currentProgram),
+			"data-type phase does not accept TASKING Classic large");
 		check(new C166TaskingRuntimeAnalyzer().canAnalyze(currentProgram),
 			"runtime analyzer does not accept TASKING Classic large");
+		C166TaskingTypeInferenceAnalyzer unified =
+			new C166TaskingTypeInferenceAnalyzer();
+		check(unified.canAnalyze(currentProgram) &&
+			unified.getDefaultEnablement(currentProgram),
+			"unified TASKING type inference is not the enabled analyzer");
+		Set<String> discoveredAnalyzers = ClassSearcher.getClasses(Analyzer.class).stream()
+			.filter(type -> type.getName().startsWith("ghidrainfineon.C166"))
+			.map(Class::getSimpleName)
+			.collect(Collectors.toSet());
+		check(discoveredAnalyzers.contains("C166TaskingTypeInferenceAnalyzer"),
+			"unified TASKING type inference is absent from ClassSearcher");
+		for (String phase : Set.of("C166CodePointerPhase", "C166FarPointerPhase",
+			"C166PointerReturnPhase", "C166TaskingDataTypePhase",
+			"C166VariadicCallPhase")) {
+			check(!discoveredAnalyzers.contains(phase),
+				"internal phase leaked into Ghidra Analyzer list: " + phase);
+		}
 		check(currentProgram.getCompilerSpec().getCallingConvention(
 			"__tasking_c166_double_runtime") != null,
 			"TASKING double-runtime calling convention is missing");
@@ -85,6 +81,9 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 		check("C166:LE:16:tasking-classic-large".equals(languageId) ||
 			"C166:CS:LE:16:tasking-classic-large".equals(languageId),
 			"wrong language: " + languageId);
+		check(C166ArchitectureProfile.TASKING_CLASSIC_LARGE.equals(
+			currentProgram.getLanguage().getProperty(C166ArchitectureProfile.PROPERTY)),
+			"TASKING Classic Large ABI profile is missing");
 
 		model = currentProgram.getCompilerSpec().getDefaultCallingConvention();
 		check("__tasking_c166_classic".equals(model.getName()),
@@ -222,7 +221,7 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 			DataTypeConflictHandler.REPLACE_HANDLER);
 		check(manager.getDataType("/stddef.h/size_t").getLength() == 4,
 			"failed to construct the wrong imported size_t fixture");
-		C166TaskingDataTypeAnalyzer analyzer = new C166TaskingDataTypeAnalyzer();
+		C166TaskingDataTypePhase analyzer = new C166TaskingDataTypePhase();
 		check(analyzer.added(currentProgram, new AddressSet(), monitor, new MessageLog()),
 			"TASKING data-type analyzer failed");
 		DataType normalized = manager.getDataType("/stddef.h/size_t");

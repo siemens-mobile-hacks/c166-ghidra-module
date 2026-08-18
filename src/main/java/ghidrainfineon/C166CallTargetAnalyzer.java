@@ -50,8 +50,6 @@ import ghidra.util.task.TaskMonitor;
 public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 
 	private static final int MAX_DIAGNOSTIC_EXAMPLES = 8;
-	private static final Set<String> SUPPORTED_PROCESSORS =
-		Set.of("Infineon C167CR", "Infineon C167CS");
 	private final Set<Program> analyzedPrograms =
 		Collections.newSetFromMap(new WeakHashMap<>());
 
@@ -69,8 +67,7 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return SUPPORTED_PROCESSORS.contains(
-			program.getLanguage().getProcessor().toString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override

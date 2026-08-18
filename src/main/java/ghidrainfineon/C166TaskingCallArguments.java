@@ -1,5 +1,6 @@
 package ghidrainfineon;
 
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -14,6 +15,7 @@ import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.scalar.Scalar;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.task.TaskMonitor;
@@ -81,28 +83,106 @@ final class C166TaskingCallArguments {
 			if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
 				instruction.getNumOperands() < 2 ||
 				OperandType.isIndirect(instruction.getOperandType(0))) {
-				return WordValue.DEFINED_UNKNOWN;
+				return WordValue.definedUnknown(instruction.getAddress());
 			}
 			Register destination = operandRegister(instruction, 0);
 			if (destination == null || !overlaps(register, destination)) {
-				return WordValue.DEFINED_UNKNOWN;
+				return WordValue.definedUnknown(instruction.getAddress());
 			}
 			int sourceType = instruction.getOperandType(1);
 			Scalar scalar = instruction.getScalar(1);
 			if (scalar != null && OperandType.isScalar(sourceType) &&
 				!OperandType.isAddress(sourceType) && !OperandType.isIndirect(sourceType)) {
 				return new WordValue(true, scalar.getUnsignedValue() & 0xffff,
-					instruction.getAddress());
+					instruction.getAddress(), null);
+			}
+			if (scalar != null && OperandType.isAddress(sourceType)) {
+				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
+					instruction, scalar.getUnsignedValue(), depth + 1, visited);
+				return new WordValue(true, null, instruction.getAddress(), loadAddress);
+			}
+			Address directAddress = operandAddress(instruction, 1);
+			if (directAddress != null) {
+				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
+					instruction, directAddress.getOffset(), depth + 1, visited);
+				return new WordValue(true, null, instruction.getAddress(), loadAddress);
+			}
+			Scalar directScalar = operandScalar(instruction, 1);
+			if (directScalar != null) {
+				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
+					instruction, directScalar.getUnsignedValue(), depth + 1, visited);
+				return new WordValue(true, null, instruction.getAddress(), loadAddress);
 			}
 			Register source = operandRegister(instruction, 1);
 			if (source != null && !OperandType.isIndirect(sourceType)) {
 				WordValue traced = traceRegister(program, function, setupRegion, instruction,
 					source, depth + 1, visited);
-				return traced.constant() == null ? WordValue.DEFINED_UNKNOWN : traced;
+				return traced.defined() ? traced :
+					WordValue.definedUnknown(instruction.getAddress());
 			}
-			return WordValue.DEFINED_UNKNOWN;
+			return WordValue.definedUnknown(instruction.getAddress());
 		}
 		return WordValue.UNKNOWN;
+	}
+
+	private static Address resolveDirectDataAddress(Program program, Function function,
+			AddressSetView setupRegion, Instruction instruction, long raw, int depth,
+			Set<String> visited) {
+		ProgramContext context = program.getProgramContext();
+		Long extsEnabled = contextValue(context, "ExtsEn", instruction.getAddress());
+		if (extsEnabled != null && extsEnabled != 0) {
+			Long segment = effectiveOverride(program, function, setupRegion, instruction,
+				"Exts", "ExtsReg", "ExtsRegMode", depth, visited);
+			return segment == null ? null : toAddress(program,
+				((segment & 0xffL) << 16) | (raw & 0xffffL));
+		}
+		Long extpEnabled = contextValue(context, "ExtpEn", instruction.getAddress());
+		if (extpEnabled != null && extpEnabled != 0) {
+			Long page = effectiveOverride(program, function, setupRegion, instruction,
+				"Extp", "ExtpReg", "ExtpRegMode", depth, visited);
+			return page == null ? null : toAddress(program,
+				((page & 0x3ffL) << 14) | (raw & 0x3fffL));
+		}
+
+		int dppIndex = (int) ((raw >>> 14) & 3);
+		Register dpp = program.getRegister("DPP" + dppIndex);
+		WordValue traced = traceRegister(program, function, setupRegion, instruction,
+			dpp, depth, new HashSet<>(visited));
+		Long page = traced.constant();
+		if (page == null) {
+			if (C166PagedAddressEmitter.containingFunctionWrites(program,
+				instruction.getAddress(), dpp)) {
+				return null;
+			}
+			// Architectural reset state maps all four 16 KiB windows 1:1. DPP is
+			// an ordinary register, so persisted ProgramContext is not evidence.
+			page = (long)dppIndex;
+		}
+		return toAddress(program, ((page & 0x3ffL) << 14) | (raw & 0x3fffL));
+	}
+
+	private static Long effectiveOverride(Program program, Function function,
+			AddressSetView setupRegion, Instruction instruction, String immediateName,
+			String indexName, String modeName, int depth, Set<String> visited) {
+		ProgramContext context = program.getProgramContext();
+		Long registerMode = contextValue(context, modeName, instruction.getAddress());
+		if (registerMode != null && registerMode != 0) {
+			Long index = contextValue(context, indexName, instruction.getAddress());
+			Register register = index == null ? null : program.getRegister("r" + (index & 0xf));
+			return traceRegister(program, function, setupRegion, instruction, register,
+				depth, new HashSet<>(visited)).constant();
+		}
+		return contextValue(context, immediateName, instruction.getAddress());
+	}
+
+	private static Long contextValue(ProgramContext context, String name, Address address) {
+		Register register = context.getRegister(name);
+		BigInteger value = register == null ? null : context.getValue(register, address, false);
+		return value == null ? null : value.longValue();
+	}
+
+	private static Address toAddress(Program program, long offset) {
+		return program.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
 	}
 
 	private static void recoverPushedWords(Program program, Function function,
@@ -129,7 +209,7 @@ final class C166TaskingCallArguments {
 				continue;
 			}
 			Register source = operandRegister(instruction, 1);
-			WordValue value = source == null ? WordValue.DEFINED_UNKNOWN :
+			WordValue value = source == null ? WordValue.definedUnknown(instruction.getAddress()) :
 				traceRegister(program, function, setupRegion, instruction, source, 0,
 					new HashSet<>());
 			words.put(4 + word, value);
@@ -190,9 +270,30 @@ final class C166TaskingCallArguments {
 		return null;
 	}
 
-	record WordValue(boolean defined, Long constant, Address source) {
-		private static final WordValue UNKNOWN = new WordValue(false, null, null);
-		private static final WordValue DEFINED_UNKNOWN = new WordValue(true, null, null);
+	private static Address operandAddress(Instruction instruction, int operand) {
+		for (Object object : instruction.getOpObjects(operand)) {
+			if (object instanceof Address address) {
+				return address;
+			}
+		}
+		return null;
+	}
+
+	private static Scalar operandScalar(Instruction instruction, int operand) {
+		for (Object object : instruction.getOpObjects(operand)) {
+			if (object instanceof Scalar scalar) {
+				return scalar;
+			}
+		}
+		return null;
+	}
+
+	record WordValue(boolean defined, Long constant, Address source, Address loadAddress) {
+		private static final WordValue UNKNOWN = new WordValue(false, null, null, null);
+
+		private static WordValue definedUnknown(Address source) {
+			return new WordValue(true, null, source, null);
+		}
 	}
 
 	record CallWords(Map<Integer, WordValue> words, boolean registerBankOccupied) {

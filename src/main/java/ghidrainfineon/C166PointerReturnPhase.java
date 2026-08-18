@@ -9,9 +9,6 @@ import java.util.Map;
 import java.util.Set;
 
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
-import ghidra.app.services.AbstractAnalyzer;
-import ghidra.app.services.AnalysisPriority;
-import ghidra.app.services.AnalyzerType;
 import ghidra.app.services.ConsoleService;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
@@ -51,26 +48,17 @@ import ghidra.util.task.TaskMonitor;
  * Feeding the pair to a function-pointer formal or the far-indirect dispatcher
  * is contradictory evidence and suppresses the update.
  */
-public class C166PointerReturnAnalyzer extends AbstractAnalyzer {
+public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
-	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String CALLING_CONVENTION = "__tasking_c166_classic";
 
-	public C166PointerReturnAnalyzer() {
-		super("C166 TASKING Far Pointer Return Inference",
-			"Infers R5:R4 data-pointer returns from proven downstream pointer use.",
-			AnalyzerType.FUNCTION_ANALYZER);
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after()
-			.after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
+	public C166PointerReturnPhase() {
+		super("C166 TASKING Far Pointer Return Inference");
 	}
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return program.getLanguageID().getIdAsString().startsWith("C166:") &&
-			COMPILER_ID.equals(
-				program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override
@@ -102,7 +90,7 @@ public class C166PointerReturnAnalyzer extends AbstractAnalyzer {
 			if (item.hasCodeUse()) {
 				if (item.hasDataUse()) {
 					conflicts++;
-					log.appendMsg(getName(), function.getEntryPoint() +
+					report(program, function.getEntryPoint() +
 						": conflicting data/code return evidence (" +
 						item.dataUses().size() + " typed data use(s), direct paged=" +
 						item.directPagedUse() + ", " + item.codeUses().size() +

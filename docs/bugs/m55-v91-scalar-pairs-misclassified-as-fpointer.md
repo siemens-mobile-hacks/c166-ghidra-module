@@ -1,48 +1,48 @@
-# M55 v91: 32-битные scalar-пары ошибочно распознаются как `fpointer`
+# M55 v91: 32-bit scalar pairs misclassified as `fpointer`
 
-Дата исследования: 2026-08-17.
+Investigation date: 2026-08-17.
 
-Статус: исправлено в C166-модуле и проверено полным headless-прогоном реального
-M55 v91. Изменения Ghidra core не потребовались.
+Status: fixed in the C166 module and verified by a complete headless run against
+the real M55 v91 database. No Ghidra core changes were required.
 
-## Краткий итог
+## Summary
 
-В нескольких функциях M55 v91 обычные 32-битные целые аргументы получили тип
-`fpointer`. Это не косметическая ошибка: ложный тип меняет ABI-раскладку
-формальных параметров, сдвигает границу между регистрами и стеком и портит
-dataflow декомпилятора.
+Several ordinary 32-bit integer arguments in M55 v91 were assigned the
+`fpointer` type. This was not merely cosmetic: the false type changed the ABI
+layout of formal parameters, shifted the register/stack boundary, and damaged
+the decompiler's data flow.
 
-Подтверждены как минимум три случая:
+At least three cases were confirmed:
 
-- два stack-аргумента `FUN_26cee4` являются 32-битными scalar-значениями, а не
-  callback'ами;
-- offset и length в `FUN_26cd1c` ошибочно представлены как `fpointer`;
-- единственный аргумент allocation wrapper `FUN_c58cb6` является 32-битным
-  размером, хотя сохранён как `fpointer`. У этой функции не менее 100
-  показанных MCP call xref, поэтому дефект широко виден в декомпиляции.
+- two stack arguments of `FUN_26cee4` are 32-bit scalar values, not callbacks;
+- the offset and length in `FUN_26cd1c` were incorrectly represented as
+  `fpointer`;
+- the sole argument of the allocation wrapper `FUN_c58cb6` is a 32-bit size,
+  despite being stored as `fpointer`. The function has at least 100 call xrefs
+  shown by MCP, so the defect affected a large amount of decompiled output.
 
-Общий признак: два 16-битных слова образуют одно 32-битное значение, которое
-случайно совпадает с адресом начала существующей функции. Текущее exact-entry
-свидетельство оказывается сильнее доказательств scalar-use.
+The common pattern is that two 16-bit words form one 32-bit value that happens
+to equal the start address of an existing function. Exact-entry evidence was
+incorrectly allowed to outweigh evidence of scalar use.
 
-## Контекст проверки
+## Verification context
 
-- Программа: `M55_v91.bin`.
-- Открытый объект Ghidra: `/Siemens/EGOLD/M55_v91.bin`.
+- Program: `M55_v91.bin`.
+- Open Ghidra object: `/Siemens/EGOLD/M55_v91.bin`.
 - Language/compiler: C166, TASKING Classic Large Memory Model.
-- Основная исследованная функция: `FUN_26cee4` по адресу `0x26cee4`.
-- Метод: сохранённые сигнатуры, декомпиляция, листинг и call xref проверены в
-  текущей GUI-базе через MCP.
-- ABI-источник для последующего исправления:
+- Primary function investigated: `FUN_26cee4` at `0x26cee4`.
+- Method: saved signatures, decompilation, listing, and call xrefs were checked
+  in the current GUI database through MCP.
+- ABI source used for the subsequent fix:
   `/home/azq2/Documents/DIY/Siemens/C166/ST10 C Cross-Compiler User's Manual.pdf`.
 
-Исходное состояние сначала было зафиксировано без изменений базы. После
-реализации исправления тот же набор дефектных сигнатур воспроизводится тестом
-перед запуском анализаторов; результаты проверки приведены ниже.
+The initial state was recorded without modifying the database. After the fix
+was implemented, the test reproduced the same defective signatures before
+running the analyzers; the verification results are documented below.
 
-## Дефект 1: `FUN_26cee4`
+## Defect 1: `FUN_26cee4`
 
-### Сохранённая сигнатура
+### Saved signature
 
 ```c
 undefined1 __tasking_c166_classic FUN_26cee4(
@@ -54,25 +54,25 @@ undefined1 __tasking_c166_classic FUN_26cee4(
     fpointer param_6);
 ```
 
-Она описывает четыре 16-битных параметра и два function pointer. Листинг всех
-проверенных вызовов показывает другую физическую раскладку:
+This describes four 16-bit parameters and two function pointers. The listing
+at every inspected call site shows a different physical layout:
 
-| Аргумент | Storage | Наблюдаемая форма |
+| Argument | Storage | Observed form |
 |---|---|---|
-| 1 | `R12` | 16-битный scalar |
-| 2 | `R13` | 16-битный scalar |
-| 3 | `R14` | 16-битный scalar |
-| 4 | `Stack[0]:4` | 32-битный scalar |
-| 5 | `Stack[4]:4` | 32-битный scalar |
+| 1 | `R12` | 16-bit scalar |
+| 2 | `R13` | 16-bit scalar |
+| 3 | `R14` | 16-bit scalar |
+| 4 | `Stack[0]:4` | 32-bit scalar |
+| 5 | `Stack[4]:4` | 32-bit scalar |
 
-После трёх register words следующий четырёхбайтовый аргумент уже не помещается
-целиком в `R15`, поэтому по TASKING ABI он передаётся через стек. `R15` в этой
-раскладке является незанятой дырой, а не отдельным `param_4`.
+After three register words, the next four-byte argument cannot fit entirely in
+`R15`, so the TASKING ABI places it on the stack. `R15` is an unused hole in
+this layout, not a separate `param_4`.
 
-### Рекурсивный вызов
+### Recursive call
 
-В диапазоне `0x26d052..0x26d074` функция кладёт на стек две пары слов, задаёт
-`R12`, `R13`, `R14`, вызывает саму себя и затем освобождает восемь байт:
+In the range `0x26d052..0x26d074`, the function pushes two word pairs, sets
+`R12`, `R13`, and `R14`, calls itself, and then releases eight bytes:
 
 ```asm
 mov  r7,[r0+#0x9e]
@@ -90,41 +90,42 @@ calls FUN_26cee4
 add  r0,#8
 ```
 
-Это физически три register words плюс два 32-битных stack values. Ни одна из
-стековых пар не вызывается косвенно и не используется как адрес кода.
+This is physically three register words followed by two 32-bit stack values.
+Neither stack pair is called indirectly or used as a code address.
 
-### Проверенные внешние вызовы
+### Inspected external calls
 
-Прямые call xref находятся по адресам `0xc95dc4`, `0xc96456`, `0xc976f6`,
-`0xc97918`, `0xc97a08`, `0xc97e60`, `0xc97ee6`; ещё один вызов — рекурсивный
+Direct call xrefs are present at `0xc95dc4`, `0xc96456`, `0xc976f6`,
+`0xc97918`, `0xc97a08`, `0xc97e60`, and `0xc97ee6`; the recursive call is at
 `0x26d070`.
 
-Характерные setup'ы:
+Representative setups include:
 
-- перед `0xc97918` передаются одна локальная 32-битная пара и `0:0`;
-- перед `0xc97ee6` передаются 32-битный size и значение `4:0`;
-- перед `0xc95dc4` передаются `0x10:0` и `0:0`;
-- перед `0xc96456` передаются `R9:R8` и zero-extended scalar field.
+- before `0xc97918`, one local 32-bit pair and `0:0` are passed;
+- before `0xc97ee6`, a 32-bit size and the value `4:0` are passed;
+- before `0xc95dc4`, `0x10:0` and `0:0` are passed;
+- before `0xc96456`, `R9:R8` and a zero-extended scalar field are passed.
 
-Во всех случаях после вызова выполняется cleanup восьми байт. Текущая
-декомпиляция превращает эти значения в выражения вроде `(fpointer)0x4`,
-`(fpointer)0x10` и `(fpointer)ZEXT24(...)`.
+Every call is followed by an eight-byte cleanup. The defective decompilation
+turns these values into expressions such as `(fpointer)0x4`, `(fpointer)0x10`,
+and `(fpointer)ZEXT24(...)`.
 
-### Ожидаемое направление сигнатуры
+### Expected signature direction
 
-С учётом только ABI и наблюдаемого use правильная форма должна быть близка к:
+Considering only the ABI and observed uses, the correct form should be close
+to:
 
 ```c
 undefined1 FUN_26cee4(int, int, int, uint32_t, uint32_t);
 ```
 
-Имена и signedness последних аргументов пока не установлены. Существенное
-требование — каждый из них должен оставаться одним четырёхбайтовым scalar, а
-не `fpointer` и не двумя независимыми `undefined2`.
+The names and signedness of the last two arguments are not established. The
+essential requirement is that each remains one four-byte scalar rather than an
+`fpointer` or two independent `undefined2` values.
 
-## Дефект 2: `FUN_26cd1c`
+## Defect 2: `FUN_26cd1c`
 
-### Сохранённая сигнатура
+### Saved signature
 
 ```c
 undefined1 __tasking_c166_classic FUN_26cd1c(
@@ -135,37 +136,39 @@ undefined1 __tasking_c166_classic FUN_26cd1c(
     fpointer param_5);
 ```
 
-По коду wrapper'а параметры имеют следующую семантику:
+The wrapper code gives the parameters the following semantics:
 
-- `param_3` передаётся в scalar-параметр `offset` функции `sys_lseek` и
-  является 32-битным file offset в `R15:R14`;
-- `param_4` является настоящим far data pointer на буфер;
-- `param_5` является 32-битной длиной на стеке, а не адресом функции.
+- `param_3` is passed to the scalar `offset` parameter of `sys_lseek` and is a
+  32-bit file offset in `R15:R14`;
+- `param_4` is a genuine far data pointer to a buffer;
+- `param_5` is a 32-bit stack length, not a function address.
 
-Вызов `0xc97e70..0xc97e90` кладёт на стек `4:0` как length и far-адрес
-локального буфера, задаёт нулевой offset в `R15:R14` и освобождает восемь байт
-после вызова. Вызов `0xc95dd4..0xc95df6` аналогично передаёт length `0x10:0`.
+The call at `0xc97e70..0xc97e90` pushes `4:0` as the length and the far address
+of a local buffer, sets a zero offset in `R15:R14`, and releases eight bytes
+after the call. The call at `0xc95dd4..0xc95df6` similarly passes `0x10:0` as
+the length.
 
-Правильная семантическая форма поэтому ближе к:
+The correct semantic form is therefore closer to:
 
 ```c
 undefined1 FUN_26cd1c(int fd_like, int arg,
                       uint32_t offset, void *buffer, uint32_t length);
 ```
 
-Точные имена, signedness и возможное сужение длины внутри wrapper'а требуют
-дополнительной проверки; отсутствие function-pointer semantics уже доказано.
+Exact names, signedness, and any narrowing of the length inside the wrapper
+require further investigation. The absence of function-pointer semantics is
+already proven.
 
-## Дефект 3: `FUN_c58cb6`
+## Defect 3: `FUN_c58cb6`
 
-### Сохранённая сигнатура
+### Saved signature
 
 ```c
 undefined1 __tasking_c166_classic FUN_c58cb6(fpointer param_1);
 ```
 
-Функция сохраняет `R13:R12`, задаёт `R14 = 0` и передаёт исходную пару в
-allocator core `FUN_c58ce6`:
+The function saves `R13:R12`, sets `R14 = 0`, and forwards the original pair to
+the allocator core `FUN_c58ce6`:
 
 ```asm
 push  r8
@@ -175,86 +178,85 @@ mov   r14,#0
 calls FUN_c58ce6
 ```
 
-Начало `FUN_c58ce6` выполняет 32-битное вычитание через `sub/subc`:
+The start of `FUN_c58ce6` performs a 32-bit subtraction with `sub/subc`:
 
 ```asm
 sub   r12,#0x3fec
 subc  r13,#0
 ```
 
-Это прямое scalar-use пары `R13:R12`. Аргумент является размером allocation,
-а не callback'ом. Вызовы сейчас массово печатаются как:
+This is a direct scalar use of the `R13:R12` pair. The argument is an
+allocation size, not a callback. Calls were broadly printed as:
 
 ```c
 FUN_c58cb6((fpointer)(ulong)size);
 ```
 
-MCP вернул первые 100 xref и достиг лимита выдачи, поэтому фактическое число
-вызовов может быть больше. Даже один ложный прототип здесь загрязняет большой
-объём декомпиляции.
+MCP returned the first 100 xrefs and reached its output limit, so the actual
+number of calls may be higher. Even one false prototype here contaminates a
+large amount of decompiled output.
 
-## Дефект 4: far-pass снимает доказанные callback-типы
+## Defect 4: the far pass removes proven callback types
 
-Первоначальный scalar fix выявил обратную регрессию при последовательном
-запуске анализаторов: code-pointer pass правильно выставлял `fpointer`, после
-чего полный far-data pass снова заменял часть этих параметров на `void *` или
-два `undefined2`.
+The initial scalar fix exposed the opposite regression when analyzers were run
+in sequence: the code-pointer pass correctly assigned `fpointer`, after which
+the complete far-data pass replaced some of those parameters with `void *` or
+two `undefined2` values.
 
-На реальной M55 подтверждены два разных пути настоящего code-use:
+Two distinct genuine code-use paths were confirmed in the real M55 database:
 
-- `FUN_740b28` сохраняет входные пары, восстанавливает их в `R5:R4` и вызывает
-  TASKING far-indirect dispatcher `FUN_a26154`; оба первых параметра являются
-  callback'ами;
-- четвёртый параметр `FUN_9bc42a` передаётся через forwarding chain в
-  `FUN_9057dc`, где `R15:R14` копируется в `R5:R4` непосредственно перед тем же
-  dispatcher'ом.
+- `FUN_740b28` saves its incoming pairs, restores them into `R5:R4`, and calls
+  the TASKING far-indirect dispatcher `FUN_a26154`; both first parameters are
+  callbacks;
+- the fourth parameter of `FUN_9bc42a` travels through a forwarding chain into
+  `FUN_9057dc`, where `R15:R14` is copied to `R5:R4` immediately before the
+  same dispatcher.
 
-Это не совпадение с адресом начала функции: в обоих случаях есть достижимый
-косвенный вызов. Ошибка состояла из трёх частей:
+These are not coincidences with a function entry point: both cases have a
+reachable indirect call. The error had three parts:
 
-1. semantic code-use не сохранялся отдельно от более слабого exact-entry
-   evidence;
-2. трассировка обрывалась на границе basic block, хотя callback был безопасно
-   сохранён на user stack или в callee-saved `R6-R9`;
-3. far-pass не мог отличить generic analyzer-owned `fpointer`, доказанный
-   косвенным вызовом, от старого ошибочного типа.
+1. Semantic code-use evidence was not retained separately from weaker
+   exact-entry evidence.
+2. Tracing stopped at a basic-block boundary even when a callback had been
+   safely saved on the user stack or in callee-saved `R6-R9`.
+3. The far pass could not distinguish a generic analyzer-owned `fpointer`
+   proven by indirect use from an old incorrect type.
 
-Руководство TASKING, раздел 3.7, прямо задаёт для `R6-R9` стратегию “saved by
-callee”. Поэтому strong semantic tracer может проходить через вызов для этих
-регистров, но обязан отвергать значение после любого явного переопределения.
-Обычная speculative constant inference этого послабления не получает.
+Section 3.7 of the TASKING manual explicitly marks `R6-R9` as “saved by
+callee.” A strong semantic tracer may therefore follow these registers across
+a call, but it must reject the value after any explicit redefinition. Ordinary
+speculative constant inference does not receive this exemption.
 
-## Дефект 5: cleanup меняет target через thunk
+## Defect 5: cleanup changes the target through a thunk
 
-Полный headless-прогон обнаружил ещё одну причину, по которой исправленный
-`FUN_9057dc` снова становился
-`FUN_9057dc(void *, undefined2, undefined2)`. Сразу перед cleanup его сигнатура
-и semantic evidence были правильными:
+The complete headless run found another reason the corrected `FUN_9057dc`
+reverted to `FUN_9057dc(void *, undefined2, undefined2)`. Immediately before
+cleanup, both its signature and semantic evidence were correct:
 
 ```c
 FUN_9057dc(void *, fpointer);
 ```
 
-Изменение происходило при обработке другой функции — `FUN_92c0c6`. Проверка
-сохранённой базы подтвердила, что это thunk на `FUN_9057dc`:
+The change occurred while another function, `FUN_92c0c6`, was being processed.
+The saved database confirmed that it is a thunk to `FUN_9057dc`:
 
 ```text
 92c0c6 isThunk=true target=9057dc
 ```
 
-В Ghidra `FunctionDB.updateFunction()` для thunk делегирует обновление его
-конечному target. У thunk нет собственного semantic-evidence slot, поэтому
-cleanup считал унаследованный generic `fpointer` неподтверждённым и, пытаясь
-разбить его у `FUN_92c0c6`, фактически разбивал параметр `FUN_9057dc`.
+In Ghidra, `FunctionDB.updateFunction()` delegates an update on a thunk to its
+ultimate target. The thunk has no semantic-evidence slot of its own, so cleanup
+considered the inherited generic `fpointer` unsubstantiated. In attempting to
+split it on `FUN_92c0c6`, cleanup actually split the parameter of `FUN_9057dc`.
 
-Это не дефект хранения четырёхбайтового function pointer и не требует патча
-Ghidra core. Любые сигнатурные repair-проходы C166-анализатора должны исключать
-thunk'и: их сигнатура принадлежит target и может меняться только на основании
-evidence этого target.
+This is not a defect in four-byte function-pointer storage and does not require
+a Ghidra core patch. Every C166 analyzer signature-repair pass must skip
+thunks: their signature belongs to the target and may be changed only using
+evidence from that target.
 
-## Контрольные функции
+## Control functions
 
-`FUN_26cda4` и `FUN_26ce2c` имеют более близкую к реальности раскладку:
+`FUN_26cda4` and `FUN_26ce2c` have a layout closer to reality:
 
 ```c
 undefined1 FUN_x(undefined2, undefined2,
@@ -262,166 +264,173 @@ undefined1 FUN_x(undefined2, undefined2,
                  void *buffer, undefined2 length);
 ```
 
-Их декомпиляция собирает `offset_lo/offset_hi` через `CONCAT22` для
-`sys_lseek`, сохраняет настоящий far data pointer на буфер и не превращает
-scalar length в callback. Это контрольное доказательство, что соседний код
-реально различает file offsets, buffers и lengths; `fpointer` в
-`FUN_26cd1c` не отражает API семейства.
+Their decompilation combines `offset_lo/offset_hi` with `CONCAT22` for
+`sys_lseek`, preserves the real far data pointer to the buffer, and does not
+turn the scalar length into a callback. This is control evidence that adjacent
+code genuinely distinguishes file offsets, buffers, and lengths; the
+`fpointer` in `FUN_26cd1c` does not describe the API family.
 
-## Влияние дефекта
+## Impact
 
-Ложный `fpointer` вызывает сразу несколько проблем:
+A false `fpointer` causes several problems at once:
 
-1. Декомпилятор печатает scalar constants и sizes как адреса функций.
-2. Межпроцедурное распространение может переносить ложный callback type в
-   wrappers и вызывающие функции.
-3. В TASKING Classic Large четырёхбайтовый тип влияет на решение
-   register-versus-stack. Ошибочная замена scalar-пары двумя `undefined2`
-   создаёт фиктивный аргумент в `R15` и сдвигает реальные stack arguments.
-4. Рекурсивный вызов `FUN_26cee4` перестаёт совпадать с собственной
-   сигнатурой, из-за чего появляются `_2_2_`, `ZEXT24` и несвязанные значения.
-5. Для часто вызываемого `FUN_c58cb6` ошибка размножается по большому числу
+1. The decompiler prints scalar constants and sizes as function addresses.
+2. Interprocedural propagation can carry the false callback type into wrappers
+   and callers.
+3. In TASKING Classic Large, a four-byte type affects register-versus-stack
+   allocation. Incorrectly replacing a scalar pair with two `undefined2`
+   parameters creates a fictitious argument in `R15` and shifts the real stack
+   arguments.
+4. The recursive call to `FUN_26cee4` no longer matches its own signature,
+   producing `_2_2_`, `ZEXT24`, and disconnected values.
+5. For the frequently called `FUN_c58cb6`, the error spreads across many
    allocation call sites.
 
-## Предполагаемая причина
+## Suspected cause
 
-Это пока гипотеза по результатам чтения базы и текущего анализатора, а не
-окончательный диагноз с instrumented trace.
+This section records the hypothesis formed from inspecting the database and
+the analyzer at the time, rather than a final diagnosis from an instrumented
+trace.
 
-`C166CodePointerAnalyzer` считает пару `SEGMENT:OFFSET` сильным
-function-pointer evidence, если вычисленный адрес в точности совпадает с
-началом существующей функции. Для constants, offsets, lengths и sizes такое
-совпадение возможно случайно. Имеющиеся ограничения хорошо отсекают некоторые
-data pointers и две независимо изменяющиеся word-позиции, но не распознают
-положительное 32-битное scalar-use:
+`C166CodePointerPhase` treated a `SEGMENT:OFFSET` pair as strong
+function-pointer evidence when the computed address exactly matched the start
+of an existing function. Constants, offsets, lengths, and sizes can match by
+accident. Existing constraints filtered some data pointers and pairs of
+independently changing word positions, but did not recognize positive 32-bit
+scalar use such as:
 
-- арифметику парой инструкций `add/addc`, `sub/subc` и аналогами;
-- передачу пары в уже типизированный 32-битный scalar-параметр;
-- последовательное forwarding одной пары как size/offset/count;
-- TASKING spill rule, по которому четырёхбайтовый аргумент целиком уходит на
-  стек, если для него остался только `R15`.
+- paired `add/addc`, `sub/subc`, and similar arithmetic;
+- passing a pair into an already typed 32-bit scalar parameter;
+- repeatedly forwarding one pair as a size, offset, or count;
+- the TASKING spill rule under which a four-byte argument is placed wholly on
+  the stack when only `R15` remains available.
 
-Отдельная опасность находится в repair path: снятие ложного generic pointer с
-последующим разбиением на два `undefined2` исправляет категорию типа, но может
-оставить ABI неверным. Для описанных случаев нужен единый четырёхбайтовый
-scalar type (`undefined4`, `uint32_t`, `ulong` или signed-вариант после
-семантической проверки).
+The repair path presented a separate risk: removing a false generic pointer
+and then splitting it into two `undefined2` parameters corrects the type
+category but can leave the ABI layout wrong. These cases require one four-byte
+scalar type (`undefined4`, `uint32_t`, `ulong`, or a signed variant after
+semantic verification).
 
-## Требования к будущему исправлению
+## Fix requirements
 
-Исправление не должно сводиться к whitelist конкретных адресов M55. Оно должно
-классифицировать один и тот же четырёхбайтовый storage как одну из четырёх
-категорий:
+The fix must not be an M55 address whitelist. It must classify the same
+four-byte storage into one of four categories:
 
-- два независимых 16-битных scalar — два `undefined2`;
-- единый 32-битный scalar — один четырёхбайтовый integer type;
-- far data pointer — `void *`/конкретный data pointer;
-- far code pointer — `fpointer`, только при доказанном code-use.
+- two independent 16-bit scalars: two `undefined2` parameters;
+- one 32-bit scalar: one four-byte integer type;
+- far data pointer: `void *` or a concrete data pointer;
+- far code pointer: `fpointer`, only with proven code use.
 
-Минимальные ограничения:
+Minimum constraints:
 
-- активация только для C166 + `tasking-classic-large`;
-- exact function entry само по себе не должно побеждать сильное scalar-use;
-- существующий импортированный или user-defined function-pointer type нельзя
-  снимать без противоречащего доказательства;
-- настоящий callback, который передаётся в far-indirect call, должен остаться
+- activation only for C166 with `tasking-classic-large`;
+- an exact function entry alone must not outweigh strong scalar-use evidence;
+- an existing imported or user-defined function-pointer type must not be
+  removed without contradictory evidence;
+- a genuine callback forwarded into a far-indirect call must remain
   `fpointer`;
-- настоящий far data pointer должен остаться data pointer;
-- решение должно учитывать формальную TASKING Large ABI-раскладку, включая
-  невозможность частично разместить четырёхбайтовый аргумент в последнем
-  свободном 16-битном регистре.
+- a genuine far data pointer must remain a data pointer;
+- the decision must follow the formal TASKING Large ABI layout, including the
+  inability to place only part of a four-byte argument in the last free 16-bit
+  register.
 
-## План проверки будущего исправления
+## Verification plan
 
-1. Добавить synthetic tests на все четыре категории, включая register spill
-   после трёх 16-битных аргументов.
-2. Отдельно покрыть scalar evidence через `sub/subc` и передачу в typed
+1. Add synthetic tests for all four categories, including register spill after
+   three 16-bit arguments.
+2. Cover scalar evidence from `sub/subc` and from passing a value into a typed
    `uint32_t` argument.
-3. Добавить negative test: exact function-entry constant, используемая как
-   size/offset, не становится `fpointer`.
-4. Добавить positive test: exact function entry, реально достигающая
-   far-indirect call, остаётся `fpointer`.
-5. Запустить полный `tools/test-tasking-abi.sh` с legacy C166/C167 controls.
-6. Установить собранный модуль через `install-local.sh`.
-7. Повторить headless-анализ реального M55 v91 и проверить минимум
-   `FUN_26cee4`, `FUN_26cd1c`, `FUN_c58cb6` и их перечисленные call sites.
-8. Сравнить полную декомпиляцию до/после по количеству новых pointer types и
-   убедиться, что настоящие callbacks не потеряны.
+3. Add a negative test in which an exact function-entry constant used as a
+   size or offset does not become `fpointer`.
+4. Add a positive test in which an exact function entry that actually reaches
+   a far-indirect call remains `fpointer`.
+5. Run the complete `tools/test-tasking-abi.sh` suite with the historical
+   legacy C166/C167 controls used at the time of this investigation.
+6. Install the built module with `install-local.sh`.
+7. Repeat headless analysis of the real M55 v91 image and inspect at least
+   `FUN_26cee4`, `FUN_26cd1c`, `FUN_c58cb6`, and the listed call sites.
+8. Compare the full before/after decompilation by the number of new pointer
+   types and confirm that genuine callbacks are retained.
 
-## Критерии приёмки
+## Acceptance criteria
 
-- В `FUN_26cee4` остаются три register scalar arguments и две единые
-  четырёхбайтовые stack scalar values; фиктивного `R15`-параметра нет.
-- В `FUN_26cd1c` offset и length не являются `fpointer`, buffer остаётся far
-  data pointer.
-- `FUN_c58cb6` принимает 32-битный size без cast к `fpointer` во всех
-  проверенных callers.
-- Повторный запуск анализаторов идемпотентен и не возвращает ложные типы.
-- C166 legacy controls проходят без изменения поведения.
-- Изменения Ghidra core, если они вообще понадобятся, строго ограничены C166 +
-  `tasking-classic-large` и не меняют ARM или другие архитектуры.
+- `FUN_26cee4` retains three register scalar arguments and two unified
+  four-byte stack scalar values, with no fictitious `R15` parameter.
+- In `FUN_26cd1c`, offset and length are not `fpointer`, while the buffer
+  remains a far data pointer.
+- `FUN_c58cb6` accepts a 32-bit size without an `fpointer` cast in every
+  inspected caller.
+- Repeated analyzer runs are idempotent and do not restore the false types.
+- The historical C166 legacy controls pass without behavior changes.
+- Any Ghidra core change, if one is ever required, is strictly gated to C166
+  with `tasking-classic-large` and does not affect ARM or other architectures.
 
-## Реализованное исправление
+## Implemented fix
 
-Исправление находится только в C166-модуле и активируется существующим
-ограничением анализатора `C166:*` + `tasking-classic-large`.
+The fix is entirely in the C166 module and is activated by the analyzer's
+existing C166 plus `tasking-classic-large` restriction.
 
-- Пары, участвующие в `add/addc` или `sub/subc`, считаются единым 32-битным
-  scalar storage, если оба слова консервативно трассируются к соседним входным
-  ABI slots.
-- Scalar evidence переносится назад через direct calls в уже типизированные
-  integer-параметры, включая integer typedef'ы runtime archive.
-- Для stack values разрешён отдельный scalar-only fallback через вычисленный
-  TASKING frame delta. Speculative exact-entry inference остаётся block-local;
-  fallback получает только уже доказанный semantic dispatcher/forwarding path.
-- Перенос входных register values через границу basic block допускается только
-  если в линейном префиксе функции нет ни определения соответствующего
-  регистра, ни вызова, который мог его затереть. Для `R6-R9` вызов не считается
-  clobber согласно TASKING saved-by-callee ABI.
-- Ложный generic `fpointer` при доказанном packed scalar заменяется одним
-  `undefined4`, а не двумя `undefined2`.
-- Учтено правило TASKING 3.6: если после трёх word arguments четырёхбайтовый
-  аргумент не помещается целиком, он полностью уходит на стек; ложный
-  placeholder в `R15` удаляется.
-- Восстановление pushed stack arguments ограничено точным размером немедленного
-  caller cleanup `add r0,#bytes`, чтобы сохранённые регистры ниже аргументов не
-  становились фиктивными параметрами.
-- Доказанное использование пары как цели TASKING far-indirect dispatcher
-  публикуется отдельно от exact-entry evidence и сохраняется между code/far
-  анализаторами. В read-only headless используется transient marker того же
-  объекта `Program`, а в обычной базе маркер дополнительно сохраняется в
-  program options.
-- Strong semantic tracer проходит через проверочные ветвления, восстановление
-  входного user-stack slot и callee-saved `R6-R9`, только пока ни один
-  наблюдаемый путь не переопределяет значение.
-- Для уже доказанного dispatcher-use берётся тело функции, а не глобальный
-  `BasicBlockModel`: это сохраняет непосредственно предшествующие `mov` и не
-  запускает дорогой поиск блока по всей full-flash базе.
-- Cleanup ложных generic `fpointer` и packed-scalar repair не обновляют thunk:
-  Ghidra делегирует такое обновление target, а evidence alias-функции не может
-  переписывать сигнатуру target. Synthetic-тест воспроизводит этот контракт,
-  реальный контроль использует `FUN_92c0c6 -> FUN_9057dc`.
+- Pairs used by `add/addc` or `sub/subc` are treated as one 32-bit scalar
+  storage when both words conservatively trace to adjacent incoming ABI slots.
+- Scalar evidence propagates backward through direct calls into already typed
+  integer parameters, including integer typedefs from the runtime archive.
+- Stack values have a separate scalar-only fallback based on the calculated
+  TASKING frame delta. Speculative exact-entry inference remains block-local;
+  only an already proven semantic dispatcher or forwarding path receives the
+  fallback.
+- Incoming register values may cross a basic-block boundary only if the linear
+  function prefix contains neither a definition of the register nor a call
+  that could clobber it. Calls do not clobber `R6-R9` under the TASKING
+  saved-by-callee ABI.
+- A false generic `fpointer` with proven packed-scalar use is replaced by one
+  `undefined4`, not two `undefined2` parameters.
+- TASKING rule 3.6 is honored: when a four-byte argument does not fit after
+  three word arguments, it goes entirely on the stack and the false `R15`
+  placeholder is removed.
+- Reconstruction of pushed stack arguments is bounded by the exact size of the
+  immediate caller cleanup, `add r0,#bytes`, so saved registers below the
+  arguments do not become fictitious parameters.
+- Proven use of a pair as the target of the TASKING far-indirect dispatcher is
+  published separately from exact-entry evidence and retained between the code
+  and far analyzers. Read-only headless operation uses a transient marker on
+  the same `Program` object; ordinary databases additionally persist the
+  marker in program options.
+- The strong semantic tracer follows validation branches, restored incoming
+  user-stack slots, and callee-saved `R6-R9`, but only while no observed path
+  redefines the value.
+- Proven dispatcher use is traced within the function body instead of using a
+  global `BasicBlockModel`. This retains immediately preceding `mov`
+  instructions and avoids an expensive whole-image block lookup.
+- Cleanup of false generic `fpointer` types and packed-scalar repair skip
+  thunks. Ghidra delegates thunk updates to the target, while evidence from an
+  alias function must not rewrite the target signature. A synthetic test
+  reproduces this contract, and the real-program control uses
+  `FUN_92c0c6 -> FUN_9057dc`.
 
-## Результаты проверки
+## Verification results
 
-Полный `tools/test-tasking-abi.sh` прошёл для:
+At the time of this investigation, the complete `tools/test-tasking-abi.sh`
+suite passed for:
 
 - `C166:LE:16:tasking-classic-large`;
-- legacy `C166:LE:16:default:tasking`;
+- the legacy `C166:LE:16:default:tasking` control;
 - `C166:CS:LE:16:tasking-classic-large`;
-- code-pointer/far-pointer positive, negative, ambiguity и idempotence fixtures.
+- code-pointer and far-pointer positive, negative, ambiguity, and idempotence
+  fixtures.
 
-Real-program harness также был уточнён по двум найденным ложным падениям:
+The real-program harness was also corrected for two false failures found
+during verification:
 
-- проверка call-site `0x6f30aa` допускает оставшиеся третий и четвёртый
-  аргументы `FUN_99b53a`, но по-прежнему требует отдельные первые значения
-  `1, 0x2c3` и запрещает ложный packed pointer `0xb0c001`;
-- `0xc394dc` трактуется как адрес инструкции внутри реальной `AT_SayResult`, а
-  не как искусственный entry новой функции посередине существующего body.
+- the call-site check at `0x6f30aa` permits the remaining third and fourth
+  arguments of `FUN_99b53a`, while still requiring the first two separate
+  values `1, 0x2c3` and rejecting the false packed pointer `0xb0c001`;
+- `0xc394dc` is treated as an instruction address inside the real
+  `AT_SayResult`, not as an artificial entry point for a new function in the
+  middle of an existing body.
 
-Реальный headless-тест открывает сохранённый M55 v91 read-only, воспроизводит
-старые ложные `fpointer`-сигнатуры, запускает runtime, code-pointer и полный
-far-pointer анализаторы. Итоговые формы:
+The real headless test opens the saved M55 v91 database read-only, reproduces
+the old false `fpointer` signatures, and runs the runtime, code-pointer, and
+complete far-pointer analyzers. The final forms are:
 
 ```c
 FUN_26cee4(undefined2, undefined2, undefined2, undefined4, undefined4);
@@ -429,13 +438,13 @@ FUN_26cd1c(undefined2, undefined2, undefined4, void *, undefined4);
 FUN_c58cb6(undefined4);
 ```
 
-У `FUN_26cee4` storages равны `R12`, `R13`, `R14`, `Stack[0]:4`,
-`Stack[4]:4`; фиктивного `R15` нет. Полный far-pointer pass не возвращает
-ложные указатели. Контрольные реальные callbacks в `FUN_9b0678`, `FUN_9bb936`,
-`FUN_9bc42a`, `FUN_29ffde`, `FUN_25901a`, `FUN_2590ce`, `FUN_740b28` и
-`FUN_9057dc` сохраняются, а
-`FUN_242066` продолжает декомпилироваться с `FUN_253d0e`/`FUN_253d7c`, без
-ошибочных PAGE:OFFSET адресов `0x97d0e`/`0x97d7c`.
+The storages for `FUN_26cee4` are `R12`, `R13`, `R14`, `Stack[0]:4`, and
+`Stack[4]:4`; the fictitious `R15` parameter is gone. The complete far-pointer
+pass does not restore false pointers. Real callback controls in `FUN_9b0678`,
+`FUN_9bb936`, `FUN_9bc42a`, `FUN_29ffde`, `FUN_25901a`, `FUN_2590ce`,
+`FUN_740b28`, and `FUN_9057dc` are preserved. `FUN_242066` continues to
+decompile with `FUN_253d0e` and `FUN_253d7c`, without the erroneous PAGE:OFFSET
+addresses `0x97d0e` and `0x97d7c`.
 
-Проверенная сборка установлена через `install-local.sh`. Для её загрузки нужен
-перезапуск Ghidra.
+The verified build was installed with `install-local.sh`. Ghidra must be
+restarted to load it.

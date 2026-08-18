@@ -29,8 +29,8 @@ import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.ParameterImpl;
 import ghidra.program.model.listing.Variable;
 import ghidra.program.model.symbol.SourceType;
-import ghidrainfineon.C166CodePointerAnalyzer;
-import ghidrainfineon.C166FarPointerAnalyzer;
+import ghidrainfineon.C166CodePointerPhase;
+import ghidrainfineon.C166FarPointerPhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
 public class C166M55CodePointerHeadlessTest extends GhidraScript {
@@ -55,7 +55,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		new C166TaskingRuntimeAnalyzer().added(currentProgram, wholeProgram, monitor, runtimeLog);
 		println("M55 HEADLESS runtime-log=" + runtimeLog);
 		MessageLog codeLog = new MessageLog();
-		new C166CodePointerAnalyzer().added(currentProgram, wholeProgram, monitor, codeLog);
+		new C166CodePointerPhase().added(currentProgram, wholeProgram, monitor, codeLog);
 		println("M55 HEADLESS code-log=" + codeLog);
 		dump("AFTER_CODE");
 		verifyScalarState("AFTER_CODE");
@@ -65,7 +65,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		Set<String> afterCodePointers = codePointerSlots();
 
 		MessageLog farLog = new MessageLog();
-		new C166FarPointerAnalyzer().added(currentProgram, wholeProgram, monitor, farLog);
+		new C166FarPointerPhase().added(currentProgram, wholeProgram, monitor, farLog);
 		println("M55 HEADLESS far-log=" + farLog);
 		dump("AFTER_CODE_THEN_FAR");
 		verifyFinalState();

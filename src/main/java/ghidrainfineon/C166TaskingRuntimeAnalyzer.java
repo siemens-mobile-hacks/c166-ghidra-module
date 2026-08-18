@@ -43,7 +43,6 @@ import ghidra.util.task.TaskMonitor;
  */
 public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 
-	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String DOUBLE_RUNTIME_CONVENTION =
 		"__tasking_c166_double_runtime";
 	private static final Map<String, byte[]> RUNTIME_HELPERS = runtimeHelpers();
@@ -60,9 +59,7 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return program.getLanguageID().getIdAsString().startsWith("C166:") &&
-			COMPILER_ID.equals(
-				program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override

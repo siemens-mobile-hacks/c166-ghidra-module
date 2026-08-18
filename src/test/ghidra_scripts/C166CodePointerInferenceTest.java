@@ -33,9 +33,9 @@ import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
-import ghidrainfineon.C166CodePointerAnalyzer;
-import ghidrainfineon.C166FarPointerAnalyzer;
-import ghidrainfineon.C166PointerReturnAnalyzer;
+import ghidrainfineon.C166CodePointerPhase;
+import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166PointerReturnPhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
 public class C166CodePointerInferenceTest extends GhidraScript {
@@ -440,7 +440,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"far indirect dispatcher did not receive its call-fixup");
 		check(dispatcher.getParameterCount() == 0,
 			"far indirect dispatcher retained a stale analysis signature");
-		C166CodePointerAnalyzer analyzer = new C166CodePointerAnalyzer();
+		C166CodePointerPhase analyzer = new C166CodePointerPhase();
 		check(analyzer.added(currentProgram, twoCallbacksCaller.getBody(), monitor,
 			new MessageLog()), "incremental code-pointer analysis failed");
 		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
@@ -452,7 +452,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 
 		AddressSet pagedBodies = new AddressSet(mixed.getBody());
 		pagedBodies.add(dataWins.getBody());
-		check(new C166FarPointerAnalyzer().added(currentProgram, pagedBodies, monitor,
+		check(new C166FarPointerPhase().added(currentProgram, pagedBodies, monitor,
 			new MessageLog()), "semantic far-data analysis failed");
 		checkDataPointer(dataWins, "r13+r12");
 
@@ -475,7 +475,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		// A later full far-data One Shot must not use the recovered callback type
 		// itself as data evidence.  This is the real GUI ordering which previously
 		// changed FUN_9b0678(fpointer, ...) back to void *.
-		check(new C166FarPointerAnalyzer().added(currentProgram,
+		check(new C166FarPointerPhase().added(currentProgram,
 			currentProgram.getMemory(), monitor, new MessageLog()),
 			"far-data analysis after code-pointer inference failed");
 		checkWordSignature(rectangleScalar, SourceType.ANALYSIS, "r12", "r13");
@@ -591,9 +591,12 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"code-pointer inference is not idempotent\nBEFORE:\n" + snapshot +
 				"\nAFTER:\n" + secondSnapshot);
 
-		C166PointerReturnAnalyzer returnAnalyzer = new C166PointerReturnAnalyzer();
+		C166PointerReturnPhase returnAnalyzer = new C166PointerReturnPhase();
+		MessageLog returnLog = new MessageLog();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
-			new MessageLog()), "far-pointer return inference failed");
+			returnLog), "far-pointer return inference failed");
+		check(!returnLog.hasMessages(),
+			"far-pointer return diagnostics leaked into the Analysis Log: " + returnLog);
 		checkDataPointerReturn(dataReturn);
 		checkDataPointerReturn(directPagedReturn);
 		check(Undefined.isUndefined(scalarReturn.getReturnType()),
@@ -602,8 +605,12 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"conflicting data/code return was inferred as a data pointer");
 		String returnSnapshot = snapshot(dataReturn, directPagedReturn, scalarReturn,
 			conflictingReturn);
+		MessageLog repeatedReturnLog = new MessageLog();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
-			new MessageLog()), "second far-pointer return inference failed");
+			repeatedReturnLog), "second far-pointer return inference failed");
+		check(!repeatedReturnLog.hasMessages(),
+			"repeated return diagnostics leaked into the Analysis Log: " +
+				repeatedReturnLog);
 		check(returnSnapshot.equals(snapshot(dataReturn, directPagedReturn, scalarReturn,
 			conflictingReturn)), "far-pointer return inference is not idempotent");
 

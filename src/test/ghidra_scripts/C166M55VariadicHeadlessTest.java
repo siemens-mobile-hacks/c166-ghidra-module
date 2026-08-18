@@ -30,8 +30,8 @@ import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolType;
-import ghidrainfineon.C166FarPointerAnalyzer;
-import ghidrainfineon.C166VariadicCallAnalyzer;
+import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166VariadicCallPhase;
 
 public class C166M55VariadicHeadlessTest extends GhidraScript {
 
@@ -71,7 +71,7 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 			createAsciiString(toAddr(0x5c5972));
 		}
 
-		C166FarPointerAnalyzer farPointerAnalyzer = new C166FarPointerAnalyzer();
+		C166FarPointerPhase farPointerAnalyzer = new C166FarPointerPhase();
 		check(farPointerAnalyzer.added(currentProgram, new AddressSet(caller.getBody()), monitor,
 			new MessageLog()), "M55 caller parameter analysis failed");
 		check(snprintf.hasVarArgs() && snprintf.getParameterCount() == 3,
@@ -85,7 +85,7 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 			!(callerParameters[2].getDataType() instanceof Pointer),
 			"M55 FUN_747f44 scalar flags/mode were joined as a pointer");
 
-		C166VariadicCallAnalyzer analyzer = new C166VariadicCallAnalyzer();
+		C166VariadicCallPhase analyzer = new C166VariadicCallPhase();
 		check(analyzer.added(currentProgram, new AddressSet(snprintf.getBody()), monitor,
 			new MessageLog()), "M55 variadic analysis failed");
 

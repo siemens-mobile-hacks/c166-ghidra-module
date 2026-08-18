@@ -12,7 +12,7 @@ import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Parameter;
-import ghidrainfineon.C166FarPointerAnalyzer;
+import ghidrainfineon.C166FarPointerPhase;
 
 public class C166M55FarPointerMigrationHeadlessTest extends GhidraScript {
 	@Override
@@ -35,7 +35,7 @@ public class C166M55FarPointerMigrationHeadlessTest extends GhidraScript {
 		}
 
 		MessageLog log = new MessageLog();
-		check(new C166FarPointerAnalyzer().added(currentProgram, scope, monitor, log),
+		check(new C166FarPointerPhase().added(currentProgram, scope, monitor, log),
 			"focused far-pointer analysis failed: " + log);
 
 		for (Parameter parameter : staleTarget.getParameters()) {

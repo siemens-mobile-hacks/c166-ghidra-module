@@ -16,16 +16,18 @@ import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.plugin.core.analysis.OperandReferenceAnalyzer;
-import ghidra.app.services.AbstractAnalyzer;
-import ghidra.app.services.AnalysisPriority;
-import ghidra.app.services.AnalyzerType;
 import ghidra.app.services.ConsoleService;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.program.database.function.OverlappingFunctionException;
+import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressOutOfBoundsException;
+import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.AddressSetView;
-import ghidra.program.model.data.DataType;
+import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.data.AbstractIntegerDataType;
+import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.DataUtilities;
 import ghidra.program.model.data.DataUtilities.ClearDataMode;
 import ghidra.program.model.data.FunctionDefinition;
@@ -34,41 +36,38 @@ import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.VoidDataType;
-import ghidra.program.model.lang.Register;
-import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.lang.OperandType;
+import ghidra.program.model.lang.Register;
+import ghidra.program.model.listing.CodeUnit;
+import ghidra.program.model.listing.CommentType;
+import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Function.FunctionUpdateType;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
-import ghidra.program.model.listing.CodeUnit;
-import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.ParameterImpl;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.listing.Variable;
 import ghidra.program.model.listing.VariableStorage;
-import ghidra.program.model.pcode.PcodeOp;
-import ghidra.program.model.pcode.PcodeOpAST;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.HighVariable;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.PcodeOpAST;
 import ghidra.program.model.pcode.Varnode;
-import ghidra.program.model.address.Address;
-import ghidra.program.model.address.AddressOutOfBoundsException;
-import ghidra.program.model.address.AddressSpace;
-import ghidra.program.model.block.BasicBlockModel;
+import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.symbol.RefType;
-import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
+import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
-import ghidra.program.model.scalar.Scalar;
+import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
-import ghidra.program.model.util.CodeUnitInsertionException;
 import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
@@ -92,9 +91,8 @@ import ghidra.util.task.TaskMonitor;
  * must name mapped program memory.  No function names or firmware-specific
  * addresses are used as evidence.
  */
-public class C166FarPointerAnalyzer extends AbstractAnalyzer {
+public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 
-	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String CALLING_CONVENTION = "__tasking_c166_classic";
 	private static final String GENERIC_FUNCTION_PATH = "/c166/function";
 	private static final String LEGACY_GENERIC_FUNCTION_PATH = "/__c166_far_function";
@@ -106,20 +104,13 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
 	private static final int MIN_CONSTANT_CALL_SITES = 2;
 
-	public C166FarPointerAnalyzer() {
-		super("C166 TASKING Far Pointer Inference",
-			"Joins PAGE:OFFSET parameter words proven by paged-memory data flow.",
-			AnalyzerType.FUNCTION_ANALYZER);
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
+	public C166FarPointerPhase() {
+		super("C166 TASKING Far Pointer Inference");
 	}
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return program.getLanguageID().getIdAsString().startsWith("C166:") &&
-			COMPILER_ID.equals(
-				program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override
@@ -163,6 +154,12 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		finally {
 			decompiler.dispose();
 		}
+		// Do not mutate the listing while candidate HighFunctions are still being
+		// recovered.  Clearing a false instruction/data conflict invalidates the
+		// decompiler's view and can hide otherwise independent PAGE:OFFSET pairs
+		// later in the same analysis batch.
+		stats.globalPointersCreated +=
+			defineGlobalFarPointers(program, stats.globalPointerStarts);
 		scheduleReferenceAnalysis(program, stats.referenceSources);
 
 		report(program, (fullScan ? "Full" : "Incremental") + " scan: inspected " +
@@ -272,8 +269,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				stats.repairedPointers++;
 			}
 			Inference inference = inferPairs(program, function, result.getHighFunction());
-			stats.globalPointersCreated += defineGlobalFarPointers(program,
-				inference.globalPointerStarts());
+			stats.globalPointerStarts.addAll(inference.globalPointerStarts());
 			if (inference.ambiguous()) {
 				stats.ambiguousFunctions.add(function);
 				return false;
@@ -382,6 +378,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		private final Set<Function> inspected = new HashSet<>();
 		private final Set<Function> ambiguousFunctions = new HashSet<>();
 		private final Set<Function> failedFunctions = new HashSet<>();
+		private final Set<Address> globalPointerStarts = new HashSet<>();
 		private final AddressSet referenceSources = new AddressSet();
 		private int processedCandidates;
 		private int decompilations;
@@ -562,7 +559,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			int pairStart, boolean consumed)
 			throws DuplicateNameException, InvalidInputException {
 		if (function.getSignatureSource() != SourceType.ANALYSIS ||
-			C166CodePointerAnalyzer.hasSemanticCodePointerEvidence(program, function,
+			C166CodePointerPhase.hasSemanticCodePointerEvidence(program, function,
 				pairStart)) {
 			return 0;
 		}
@@ -1815,6 +1812,10 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 				scoreForwardedPointers(program, operation, scores, pointerTypes,
 					globalPointerStarts);
 			}
+			Address directGlobal = directPagedGlobalPairStart(program, function, operation);
+			if (directGlobal != null) {
+				globalPointerStarts.add(directGlobal);
+			}
 			Varnode page;
 			Varnode offset;
 			boolean directPagedAccess =
@@ -1860,6 +1861,98 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		return new Inference(selection.starts(), liveSlots, pointerTypes,
 			globalPointerStarts, directPagedPairs,
 			selection.ambiguous() && selection.score() != 0);
+	}
+
+	/**
+	 * Recover a global PAGE:OFFSET pair from the architectural EXTP/DPP setup when
+	 * the decompiler represents the following access as a plain LOAD/STORE in a
+	 * context-selected space.  This form carries no SEGMENTOP page input, so the
+	 * listing is the authoritative source for the page word.
+	 */
+	private Address directPagedGlobalPairStart(Program program, Function function,
+			PcodeOpAST operation) {
+		if ((operation.getOpcode() != PcodeOp.LOAD &&
+			operation.getOpcode() != PcodeOp.STORE) || operation.getNumInputs() < 2) {
+			return null;
+		}
+		Address accessAddress = operation.getSeqnum().getTarget();
+		ProgramContext context = program.getProgramContext();
+		if (!isContextOne(context, "ExtpEn", accessAddress)) {
+			return null;
+		}
+		Address lowAddress = traceGlobalWordAddress(program, operation.getInput(1), 0,
+			new HashSet<>());
+		if (lowAddress == null) {
+			return null;
+		}
+
+		Instruction setup = program.getListing().getInstructionBefore(accessAddress);
+		for (int scanned = 0; setup != null && scanned < 4;
+				scanned++, setup = program.getListing().getInstructionBefore(setup.getAddress())) {
+			if (!function.getBody().contains(setup.getAddress()) ||
+				setup.getFlowType().isCall() || setup.getFlowType().isJump()) {
+				return null;
+			}
+			Register pageSource = dynamicPageSource(setup);
+			if (pageSource == null) {
+				continue;
+			}
+			Address highAddress = traceRegisterToGlobalWord(program, function, setup,
+				pageSource);
+			if (highAddress == null ||
+				!highAddress.getAddressSpace().equals(lowAddress.getAddressSpace())) {
+				return null;
+			}
+			try {
+				return highAddress.equals(lowAddress.add(2)) ? lowAddress : null;
+			}
+			catch (AddressOutOfBoundsException e) {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	private Address traceRegisterToGlobalWord(Program program, Function function,
+			Instruction setup, Register source) {
+		Register traced = source;
+		Instruction instruction = program.getListing().getInstructionBefore(setup.getAddress());
+		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
+				scanned++, instruction =
+					program.getListing().getInstructionBefore(instruction.getAddress())) {
+			if (!function.getBody().contains(instruction.getAddress()) ||
+				instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				return null;
+			}
+			if (!writesRegister(instruction, traced)) {
+				continue;
+			}
+			if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
+				instruction.getNumOperands() < 2 ||
+				OperandType.isIndirect(instruction.getOperandType(1))) {
+				return null;
+			}
+			Address global = null;
+			for (Reference reference : instruction.getReferencesFrom()) {
+				if (!reference.getReferenceType().isRead() ||
+					!reference.getToAddress().isMemoryAddress()) {
+					continue;
+				}
+				if (global != null && !global.equals(reference.getToAddress())) {
+					return null;
+				}
+				global = reference.getToAddress();
+			}
+			if (global != null) {
+				return global;
+			}
+			Register previous = operandRegister(instruction, 1);
+			if (previous == null) {
+				return null;
+			}
+			traced = previous;
+		}
+		return null;
 	}
 
 	/**
@@ -2284,11 +2377,56 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 						return traceGlobalWordAddress(program, definition.getInput(0), depth + 1,
 							visited);
 					}
+					if (definition.getOpcode() == PcodeOp.INT_ADD &&
+						isScaledArrayIndex(definition.getInput(0))) {
+						return traceGlobalWordAddress(program, definition.getInput(1), depth + 1,
+							visited);
+					}
+					if (definition.getOpcode() == PcodeOp.INT_ADD &&
+						isScaledArrayIndex(definition.getInput(1))) {
+						return traceGlobalWordAddress(program, definition.getInput(0), depth + 1,
+							visited);
+					}
 				}
 				return null;
 			default:
 				return null;
 		}
+	}
+
+	private boolean isScaledArrayIndex(Varnode value) {
+		PcodeOp definition = value == null ? null : value.getDef();
+		if (definition == null || definition.getNumInputs() != 2 ||
+			value.getSize() != 2) {
+			return false;
+		}
+		long stride;
+		if (definition.getOpcode() == PcodeOp.INT_MULT) {
+			Varnode first = definition.getInput(0);
+			Varnode second = definition.getInput(1);
+			Varnode constant = first.isConstant() ? first : second;
+			Varnode index = first.isConstant() ? second : first;
+			if (!constant.isConstant() || index.isConstant() || index.getSize() != 2) {
+				return false;
+			}
+			stride = constant.getOffset();
+		}
+		else if (definition.getOpcode() == PcodeOp.INT_LEFT) {
+			if (!definition.getInput(1).isConstant() ||
+				definition.getInput(0).isConstant() ||
+				definition.getInput(0).getSize() != 2) {
+				return false;
+			}
+			long shift = definition.getInput(1).getOffset();
+			if (shift >= 63) {
+				return false;
+			}
+			stride = 1L << shift;
+		}
+		else {
+			return false;
+		}
+		return stride >= 2 && stride <= 0x1000;
 	}
 
 	private Address resolveGlobalLoadAddress(Program program, Varnode pointer) {
@@ -2307,16 +2445,49 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 			DataType pointer = new PointerDataType(VoidDataType.dataType,
 				program.getDataTypeManager());
+			int transaction = program.startTransaction(
+				"Recover C166 global far pointer");
+			boolean commit = false;
 			try {
+				clearAnalysisOwnedCode(program, new AddressSet(start, start.add(3)));
 				DataUtilities.createData(program, start, pointer, pointer.getLength(), false,
 					ClearDataMode.CLEAR_ALL_CONFLICT_DATA);
+				commit = true;
 				created++;
 			}
-			catch (CodeUnitInsertionException | RuntimeException e) {
+			catch (CodeUnitInsertionException | OverlappingFunctionException |
+				RuntimeException e) {
 				// A conflicting instruction or user-defined object is not analysis-owned.
+			}
+			finally {
+				program.endTransaction(transaction, commit);
 			}
 		}
 		return created;
+	}
+
+	private void clearAnalysisOwnedCode(Program program, AddressSet range)
+			throws OverlappingFunctionException {
+		InstructionIterator instructions =
+			program.getListing().getInstructions(range, true);
+		if (!instructions.hasNext()) {
+			return;
+		}
+
+		List<Function> functions = new ArrayList<>();
+		Iterator<Function> overlapping =
+			program.getFunctionManager().getFunctionsOverlapping(range);
+		overlapping.forEachRemaining(functions::add);
+		for (Function function : functions) {
+			if (range.contains(function.getEntryPoint())) {
+				program.getFunctionManager().removeFunction(function.getEntryPoint());
+				continue;
+			}
+			AddressSet remainder = new AddressSet(function.getBody());
+			remainder.delete(range);
+			function.setBody(remainder);
+		}
+		program.getListing().clearCodeUnits(range.getMinAddress(), range.getMaxAddress(), false);
 	}
 
 	private boolean mayReplaceGlobalWords(Program program, Address start) {
@@ -2327,9 +2498,23 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 		catch (AddressOutOfBoundsException e) {
 			return false;
 		}
-		if (!program.getMemory().contains(start) || !program.getMemory().contains(end) ||
-			program.getListing().getInstructions(new AddressSet(start, end), true).hasNext()) {
+		if (!program.getMemory().contains(start) || !program.getMemory().contains(end)) {
 			return false;
+		}
+		AddressSet range = new AddressSet(start, end);
+		InstructionIterator instructions = program.getListing().getInstructions(range, true);
+		if (instructions.hasNext()) {
+			do {
+				Instruction instruction = instructions.next();
+				if (!range.contains(instruction.getMinAddress()) ||
+					!range.contains(instruction.getMaxAddress())) {
+					return false;
+				}
+			}
+			while (instructions.hasNext());
+			if (!mayReplaceAnalysisCode(program, range)) {
+				return false;
+			}
 		}
 		Data existing = program.getListing().getDefinedDataAt(start);
 		if (existing != null && existing.getDataType() instanceof Pointer &&
@@ -2350,6 +2535,56 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 			}
 		}
 		return true;
+	}
+
+	private boolean mayReplaceAnalysisCode(Program program, AddressSet range) {
+		Address start = range.getMinAddress();
+		Address end = range.getMaxAddress();
+		ghidra.program.model.mem.MemoryBlock block = program.getMemory().getBlock(start);
+		if (block == null || !block.isWrite() || !block.contains(end)) {
+			return false;
+		}
+		for (Address address = start; address.compareTo(end) <= 0; address = address.next()) {
+			if (address == null || program.getSymbolTable().isExternalEntryPoint(address)) {
+				return false;
+			}
+			for (Symbol symbol : program.getSymbolTable().getSymbols(address)) {
+				SourceType source = symbol.getSource();
+				if (source != SourceType.DEFAULT && source != SourceType.ANALYSIS) {
+					return false;
+				}
+			}
+			ReferenceIterator references =
+				program.getReferenceManager().getReferencesTo(address);
+			while (references.hasNext()) {
+				SourceType source = references.next().getSource();
+				if (source != SourceType.DEFAULT && source != SourceType.ANALYSIS) {
+					return false;
+				}
+			}
+			Function function = program.getFunctionManager().getFunctionContaining(address);
+			if (function != null && function.getSymbol().getSource() != SourceType.DEFAULT &&
+				function.getSymbol().getSource() != SourceType.ANALYSIS) {
+				return false;
+			}
+			CodeUnit unit = program.getListing().getCodeUnitContaining(address);
+			if (unit != null && hasUserComment(unit)) {
+				return false;
+			}
+			if (address.equals(end)) {
+				break;
+			}
+		}
+		return true;
+	}
+
+	private boolean hasUserComment(CodeUnit unit) {
+		for (CommentType type : CommentType.values()) {
+			if (unit.getComment(type) != null) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private Integer scorePairSources(Program program, Varnode page, Varnode offset,
@@ -2743,7 +2978,7 @@ public class C166FarPointerAnalyzer extends AbstractAnalyzer {
 						(inferred != null && pointerDataType(inferred) != null &&
 							!isFunctionPointer(inferred));
 					boolean provenCode =
-						C166CodePointerAnalyzer.hasSemanticCodePointerEvidence(program,
+						C166CodePointerPhase.hasSemanticCodePointerEvidence(program,
 							function, existingStart);
 					overlaps = !(function.getSignatureSource() == SourceType.ANALYSIS &&
 						isGenericFunctionPointer(parameter.getFormalDataType()) && provenData &&

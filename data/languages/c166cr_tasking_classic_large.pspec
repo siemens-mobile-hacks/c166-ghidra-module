@@ -7,10 +7,21 @@
     <properties>
         <property key="addressesDoNotAppearDirectlyInCode" value="true"/>
         <property key="pcodeInjectLibraryClass" value="ghidrainfineon.PcodeInject"/>
+        <property key="c166.abi" value="tasking-classic-large"/>
     </properties>
 
     <programcounter register="IP"/>
     <data_space space="ram"/>
+
+    <!-- C166 reset mapping: the four 16 KiB windows initially map 1:1. -->
+    <context_data>
+        <tracked_set space="ram">
+            <set name="DPP0" val="0"/>
+            <set name="DPP1" val="1"/>
+            <set name="DPP2" val="2"/>
+            <set name="DPP3" val="3"/>
+        </tracked_set>
+    </context_data>
 
     <!-- TASKING Classic large-model data pointer: four-byte PAGE:OFFSET. -->
     <!-- This processor-spec variant is selected only by the Classic language ID. -->

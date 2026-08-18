@@ -77,11 +77,10 @@ public class C166AddressAnalyzer extends ConstantPropagationAnalyzer {
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		String processor = program.getLanguage().getProcessor().toString();
-		if (!SUPPORTED_PROCESSORS.contains(processor)) {
+		if (!C166ArchitectureProfile.isTaskingClassicLarge(program)) {
 			return false;
 		}
-
+		String processor = program.getLanguage().getProcessor().toString();
 		this.processorName = processor;
 		if (!super.canAnalyze(program)) {
 			return false;
@@ -153,25 +152,6 @@ public class C166AddressAnalyzer extends ConstantPropagationAnalyzer {
 			AddressFactory factory = program.getAddressFactory();
 			AddressSpace dataSpace = factory.getAddressSpace("ram");
 			this.ramSpace = dataSpace != null ? dataSpace : factory.getDefaultAddressSpace();
-		}
-
-		@Override
-		public boolean evaluateDestination(VarnodeContext context, Instruction instr) {
-			ProgramContext progCtx = program.getProgramContext();
-			for (int i = 0; i < 4; i++) {
-				Register dpp = dppRegisters[i];
-				if (dpp == null) continue;
-				BigInteger val = context.getValue(dpp, false);
-				if (val != null) {
-					try {
-						progCtx.setValue(dpp, instr.getAddress(),
-							instr.getAddress(), val);
-					} catch (ContextChangeException e) {
-						// ignore - can't set context in delay slot / flow override areas
-					}
-				}
-			}
-			return false;
 		}
 
 		/**

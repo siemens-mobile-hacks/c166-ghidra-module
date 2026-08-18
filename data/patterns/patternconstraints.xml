@@ -1,9 +1,9 @@
 <patternconstraints>
-  <language id="C166:LE:16:*">
+  <language id="C166:LE:16:tasking-classic-large">
     <patternfile>C166_patterns.xml</patternfile>
   </language>
 
-  <language id="C166:CS:LE:16:*">
+  <language id="C166:CS:LE:16:tasking-classic-large">
     <patternfile>C166_patterns.xml</patternfile>
   </language>
 </patternconstraints>

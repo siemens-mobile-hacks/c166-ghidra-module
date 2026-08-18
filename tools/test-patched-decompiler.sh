@@ -70,3 +70,43 @@ if (( headless_status != 0 )) ||
 	printf 'Patched decompiler regression test failed.\n' >&2
 	exit 1
 fi
+
+non_c166_log="${test_root}/non-c166-headless.log"
+set +e
+HOME="${test_home}" XDG_CONFIG_HOME="${config_dir}" "${headless}" \
+	"${test_root}" NonC166AutoStructureControlTest \
+	-import "${project_dir}/extension.properties" \
+	-processor x86:LE:64:default \
+	-cspec gcc \
+	-noanalysis \
+	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
+	-postScript NonC166AutoStructureControlTest.java \
+	-deleteProject 2>&1 | tee "${non_c166_log}"
+non_c166_status=${PIPESTATUS[0]}
+set -e
+
+if (( non_c166_status != 0 )) ||
+	grep -Eq 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${non_c166_log}"; then
+	printf 'x86 auto-structure control failed.\n' >&2
+	exit 1
+fi
+
+arm_log="${test_root}/arm-headless.log"
+set +e
+HOME="${test_home}" XDG_CONFIG_HOME="${config_dir}" "${headless}" \
+	"${test_root}" NonC166ArmAutoStructureControlTest \
+	-import "${project_dir}/extension.properties" \
+	-processor ARM:LE:32:v8 \
+	-cspec default \
+	-noanalysis \
+	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
+	-postScript NonC166AutoStructureControlTest.java \
+	-deleteProject 2>&1 | tee "${arm_log}"
+arm_status=${PIPESTATUS[0]}
+set -e
+
+if (( arm_status != 0 )) ||
+	grep -Eq 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${arm_log}"; then
+	printf 'ARM auto-structure control failed.\n' >&2
+	exit 1
+fi

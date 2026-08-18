@@ -4,6 +4,9 @@
 
 A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** microcontroller binaries. Features advanced support for C166's segmented memory model including DPP (Data Page Pointer) address translation and switch table analysis.
 
+This repository is a fork maintained specifically to support the **TASKING
+Classic ABI**, with a focus on its **Large Memory Model**.
+
 > [!IMPORTANT]
 > Use this module with [ghidra-patched](https://github.com/siemens-mobile-hacks/ghidra-patched/releases).
 > Stock Ghidra does not preserve resolved TASKING large-model far pointers correctly, causing broken addresses, strings, symbols, and decompiler navigation.
@@ -16,6 +19,15 @@ A **Ghidra** extension for disassembling and decompiling **Infineon C166/C167** 
   constant propagation no longer invents unrelated `Ram00fe00` globals.
 - Adds conservative TASKING function-start patterns for broader automatic code discovery.
 - Adds a TASKING C166 Classic 7.5 large-model ABI with true four-byte C pointers.
+- Supports only TASKING Classic Large and selects all ABI-specific behavior
+  through the exact `c166.abi=tasking-classic-large` processor-spec property.
+- Runs data-pointer, function-pointer, scalar, return, and variadic type
+  inference under one analyzer with a fixed evidence order; specialized phases
+  are ordinary non-analyzer classes and cannot appear as independent Auto
+  Analysis entries.
+- Forms direct, register-offset, and switch-table data addresses through one
+  DPP/EXTP/EXTS p-code emitter, preserving DPP writes as live register dataflow
+  instead of reusing persisted analyzer context.
 - Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
 - Joins constant far code-pointer arguments as four-byte function pointers
   when their `SEGMENT:OFFSET` encoding names an executable function entry,
@@ -111,10 +123,9 @@ The previous extension is saved under `ExtensionBackups`.
 
 ## Usage Tips
 
-Automatic analysis limits Call Graph, TASKING Far Pointer, and TASKING
-Variadic processing to newly changed code. To rescan the whole program, clear
-the current selection and run the corresponding action under
-`Analysis` → `One Shot`.
+Automatic analysis limits Call Graph and TASKING Type Inference processing to
+newly changed code. To rescan the whole program, clear the current selection
+and run the corresponding action under `Analysis` → `One Shot`.
 
 ### Switch Tables Not Detected?
 1. Place cursor on `jmpi` instruction
@@ -125,12 +136,6 @@ the current selection and run the corresponding action under
 1. Place cursor on instruction with memory operand
 2. Press `Ctrl+Shift+D` to create DPP-resolved reference
 3. Script prompts for DPP value if unknown
-
-### Setting DPP Values
-For best results, set DPP register values in Ghidra:
-1. Select address range
-2. `Right-click` → `Set Register Values`
-3. Set `DPP0`-`DPP3` to appropriate page values
 
 ## Compiler and Calling Conventions
 
@@ -149,8 +154,6 @@ ABI source: [TASKING C166/ST10 Classic v7.5 manuals](https://www.tasking.com/sup
 | Language / compiler ID | Convention | Word parameters | 32-bit / far-pointer storage | Default C pointer |
 |------------------------|------------|-----------------|------------------------------|-------------------|
 | `C166:LE:16:tasking-classic-large` / `tasking-classic-large` | `__tasking_c166_classic` | R12, R13, R14, R15 | Any consecutive register pair, then adjacent stack words | 4 bytes |
-| `C166:LE:16:default` / `tasking` | `__stdcall` | R12, R13, R14, R15 | Legacy/incomplete model | 3 bytes |
-| `C166:LE:16:default` / `tasking` | `__keil_c166` | R8, R9, R10, R11, R12 | R9/R8 or R11/R10 | 3 bytes |
 
 In Ghidra join notation the most significant register is printed first. Thus
 `R14/R13` means that TASKING's low word is in R13 and its high word is in R14.
@@ -165,10 +168,9 @@ arguments are stack-passed. `double` and aggregate results use caller-provided
 user-stack storage; the callee returns its near pointer in R4 without receiving
 a hidden input parameter.
 
-TASKING **VX** uses a different ABI and is not currently supported by this
-module. Do not use `tasking-classic-large` for VX-generated binaries. Keil C166
-is also a separate ABI; use the legacy `tasking` compiler spec and select
-`__keil_c166` for those functions.
+TASKING **VX**, Keil C166, and other Classic memory models use different ABIs
+and are not supported by this module. Do not import them as
+`tasking-classic-large`.
 
 TASKING Classic's **huge** memory model is also distinct and is not modeled by
 this language. Large-model default pointers are `_far` `PAGE:OFFSET` values
@@ -185,7 +187,7 @@ target is defined as string data in a read-only memory block. This is driven by
 the pointer type and segmented-address model, not by function names, firmware
 addresses, or string contents.
 
-The **C166 TASKING Far Pointer Inference** analyzer joins an argument pair only
+The far-data phase of **C166 TASKING Type Inference** joins an argument pair only
 when decompiler data flow proves that its high word supplies PAGE and its low
 word supplies OFFSET to a DPP0/EXTP paged access. It supports all documented
 positions R12/R13, R13/R14, and R14/R15, plus adjacent stack words after the
@@ -208,7 +210,7 @@ canonical `segmentop` and no synthetic call registers. Its auxiliary
 call-site overrides and are not calling conventions users need to select.
 
 Ghidra may initially recover a typed variadic call as individual 16-bit words.
-The **C166 TASKING Variadic Calls** analyzer creates conservative call-site
+The variadic phase of **C166 TASKING Type Inference** creates conservative call-site
 prototype overrides when the declared fixed parameters consume R12-R15; this
 repairs calls such as `sprintf(dst, "%d", value)` and uses the same far-pointer
 types recovered for its fixed parameters. A fixed parameter which spills after

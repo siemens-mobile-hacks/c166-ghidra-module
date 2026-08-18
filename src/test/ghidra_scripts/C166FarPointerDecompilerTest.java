@@ -8,6 +8,7 @@ import ghidra.app.decompiler.ClangVariableToken;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompileProcessFactory;
+import ghidra.app.decompiler.util.FillOutStructureHelper;
 import ghidra.app.plugin.core.analysis.OperandReferenceAnalyzer;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.util.importer.MessageLog;
@@ -24,6 +25,7 @@ import ghidra.program.model.data.ParameterDefinitionImpl;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.ShortDataType;
+import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.UnsignedIntegerDataType;
 import ghidra.program.model.data.UnsignedShortDataType;
@@ -39,14 +41,16 @@ import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.DataTypeSymbol;
 import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolType;
-import ghidrainfineon.C166FarPointerAnalyzer;
-import ghidrainfineon.C166TaskingDataTypeAnalyzer;
-import ghidrainfineon.C166VariadicCallAnalyzer;
+import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166TaskingDataTypePhase;
+import ghidrainfineon.C166VariadicCallPhase;
 
 public class C166FarPointerDecompilerTest extends GhidraScript {
 
@@ -94,9 +98,11 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			"%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x%0.2x");
 		data(0x12000, 0x100, true);      // writable sprintf destination
 		createLabel(toAddr(0x12000), "sprintf_buffer", true);
-		data(0x196e, 4, true);
-		createData(toAddr(0x196e), charPointer);
-		createLabel(toAddr(0x196e), "PTR_00196e", true);
+		// FUN_747f44 loads logical offsets 0x196e/0x1970 after setting
+		// DPP0=0x171, so the physical pointer object is at 0x5c596e.
+		data(0x5c596e, 4, true);
+		createData(toAddr(0x5c596e), charPointer);
+		createLabel(toAddr(0x5c596e), "PTR_5c596e", true);
 		data(0x37da6, 0x100, true);
 		createLabel(toAddr(0x37da6), "snprintf_buffer", true);
 		data(0x654e3b, 1, true);
@@ -104,6 +110,14 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		string(0x56735e, "fixed-stack-fixture");
 		string(0x5679ac, "third-stack-argument");
 		data(0x56978d, 0x10, false);       // page 0x15a, offset 0x178d
+		data(0x2cc, 4, true);
+		currentProgram.getMemory().setBytes(toAddr(0x2cc),
+			bytes(0x20, 0x54, 0x2c, 0x20)); // stale low-memory value -> false 0xb1420
+		data(0x2c2cc, 4, true);
+		currentProgram.getMemory().setBytes(toAddr(0x2c2cc),
+			bytes(0x00, 0x10, 0x02, 0x00)); // far pointer to "alpha"
+		createData(toAddr(0x2c2cc), charPointer);
+		createLabel(toAddr(0x2c2cc), "g_path", true);
 		data(0x5d4c04, 0x1000, true);
 		currentProgram.getMemory().getBlock(toAddr(0x5d4c04)).setExecute(true);
 		currentProgram.getMemory().setBytes(toAddr(0x5d4c04),
@@ -118,6 +132,18 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 
 		Function takes0 = callee(0x2100, "takes_pair_0", VoidDataType.dataType,
 			charPointer);
+		Function directDppGlobalCaller = caller(0x2d00,
+			"direct_dpp_global_pointer", bytes(
+				0xe6, 0x00, 0x0b, 0x00, // mov DPP0,#0xb
+				0xf2, 0xfc, 0xcc, 0x02, // mov R12,0x2cc -> [0x2c2cc]
+				0xf2, 0xfd, 0xce, 0x02, // mov R13,0x2ce -> [0x2c2ce]
+				0xda, 0x00, 0x00, 0x21, // calls takes_pair_0
+				0xdb, 0x00));
+		// Simulate an old analyzer run which persisted an incorrect DPP value at
+		// the load sites.  P-code must follow the architectural MOV above instead
+		// of folding this database cache into the instruction semantics.
+		currentProgram.getProgramContext().setValue(currentProgram.getRegister("DPP0"),
+			toAddr(0x2d04), toAddr(0x2d0b), java.math.BigInteger.ZERO);
 		Function takes1 = callee(0x2110, "takes_pair_1", VoidDataType.dataType,
 			word, charPointer);
 		Function takes2 = callee(0x2120, "takes_pair_2", VoidDataType.dataType,
@@ -179,7 +205,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0xd4, 0xd0, 0x02, 0x00,             // R13 = [SP+2]
 			0xdc, 0x4d, 0xa8, 0x5c, 0x00, 0x45,
 			0xdb, 0x00));
-		C166FarPointerAnalyzer farPointerAnalyzer = new C166FarPointerAnalyzer();
+		C166FarPointerPhase farPointerAnalyzer = new C166FarPointerPhase();
 		check(farPointerAnalyzer.added(currentProgram, exactTarget.getBody(), monitor,
 			new MessageLog()), "stack far-pointer analyzer failed");
 		checkThreePointerSignature(exactTarget);
@@ -191,6 +217,21 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				0xdc, 0x47,             // extp r7,#1
 				0xb9, 0x26,             // movb [r6],RL1
 				0xdb, 0x00));
+		callee(0x9b7372, "auto_structure_tail", VoidDataType.dataType);
+		Function autoStructureFarParameter = functionWithCode(0x2c00,
+			"m55_auto_structure_far_parameter", hexBytes(
+				"dc5dc4ec4000c4fc4200fa9b7273"));
+		List<Variable> autoStructureParameters = new ArrayList<>();
+		autoStructureParameters.add(new ParameterImpl("object",
+			new PointerDataType(VoidDataType.dataType,
+				currentProgram.getDataTypeManager()), currentProgram));
+		autoStructureParameters.add(new ParameterImpl("field_40", word, currentProgram));
+		autoStructureParameters.add(new ParameterImpl("field_42", word, currentProgram));
+		autoStructureFarParameter.setReturnType(VoidDataType.dataType,
+			SourceType.USER_DEFINED);
+		autoStructureFarParameter.updateFunction("__tasking_c166_classic", null,
+			autoStructureParameters, FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
+			SourceType.USER_DEFINED);
 
 		callers.add(caller(0x2200, "call_pair_0", bytes(
 			0xe6, 0xfc, 0x00, 0x10, // R12 = offset 0x1000
@@ -457,7 +498,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		callerBodies.add(strstrUndefinedTargetCaller.getBody());
 		callerBodies.add(strstrShortTargetCaller.getBody());
 		callerBodies.add(strcmpStringLiteralCaller.getBody());
-		C166TaskingDataTypeAnalyzer dataTypeAnalyzer = new C166TaskingDataTypeAnalyzer();
+		C166TaskingDataTypePhase dataTypeAnalyzer = new C166TaskingDataTypePhase();
 		check(dataTypeAnalyzer.added(currentProgram, callerBodies, monitor, new MessageLog()),
 			"TASKING data-type analyzer failed");
 		check(snprintf.getParameter(1).getFormalDataType().getLength() == 2 &&
@@ -497,7 +538,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			splitPointerOverride);
 		HighFunctionDBUtil.writeOverride(snprintfInferredParameterCaller, toAddr(0x2a44),
 			splitPointerOverride);
-		C166VariadicCallAnalyzer variadicAnalyzer = new C166VariadicCallAnalyzer();
+		C166VariadicCallPhase variadicAnalyzer = new C166VariadicCallPhase();
 		AddressSet snprintfOnly = new AddressSet(snprintf.getBody());
 		check(variadicAnalyzer.added(currentProgram, snprintfOnly, monitor, new MessageLog()),
 			"incremental variadic target analysis failed");
@@ -516,7 +557,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		}
 		check(snprintf747f44Arguments.length == 20,
 			"FUN_747f44 override expected 3 fixed and 17 optional arguments, got " +
-				snprintf747f44Arguments.length);
+				snprintf747f44Arguments.length + ": " + snprintf747f44Types);
 		check(snprintf747f44Arguments[0].getDataType() instanceof Pointer &&
 			snprintf747f44Arguments[0].getDataType().getLength() == 4 &&
 			snprintf747f44Arguments[1].getDataType().getLength() == 2 &&
@@ -606,6 +647,32 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		check(decompiler.openProgram(currentProgram),
 			"failed to initialize decompiler: " + decompiler.getLastMessage());
 		try {
+			String directDppCode = decompile(decompiler, directDppGlobalCaller);
+			check((directDppCode.contains("g_path") || directDppCode.contains("\"alpha\"")) &&
+				!directDppCode.contains("0xb1420") && !directDppCode.contains("DAT_0002cc"),
+				"direct DPP load used stale ProgramContext instead of live DPP0:\n" +
+					directDppCode);
+			DecompileResults autoStructureResults = decompiler.decompileFunction(
+				autoStructureFarParameter, 30, monitor);
+			check(autoStructureResults.decompileCompleted() &&
+				autoStructureResults.getHighFunction() != null,
+				"failed to decompile C166 far-pointer auto-structure fixture: " +
+					autoStructureResults.getErrorMessage());
+			HighSymbol autoStructureSymbol = autoStructureResults.getHighFunction()
+				.getLocalSymbolMap().getParamSymbol(0);
+			HighVariable autoStructureVariable = autoStructureSymbol == null ? null :
+				autoStructureSymbol.getHighVariable();
+			Structure autoStructure = new FillOutStructureHelper(currentProgram, monitor)
+				.processStructure(autoStructureVariable, autoStructureFarParameter,
+					true, false, null);
+			check(autoStructure != null && autoStructure.getLength() == 0x44 &&
+				autoStructure.getComponentAt(0x40) != null &&
+				autoStructure.getComponentAt(0x40).getLength() == 2 &&
+				autoStructure.getComponentAt(0x42) != null &&
+				autoStructure.getComponentAt(0x42).getLength() == 2,
+				"C166 far-pointer auto-structure did not recover word fields at " +
+					"offsets 0x40 and 0x42");
+
 			String extpCode = decompile(decompiler, extpRegisterConstant);
 			check(extpCode.contains("extp_register_target") &&
 				!extpCode.contains("0x1950e3b"),
@@ -810,8 +877,9 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 					compactSnprintf747f44.contains("(char*)0x5c5972")),
 				"FUN_747f44 fixed snprintf arguments were not reconstructed:\n" +
 					snprintf747f44Code);
-			check(snprintf747f44Code.indexOf("PTR_00196e") >= 0 &&
-				!snprintf747f44Code.contains("PTR_00196e._2_2_") &&
+			check(snprintf747f44Code.indexOf("PTR_5c596e") >= 0 &&
+				!snprintf747f44Code.contains("PTR_5c596e._2_2_") &&
+				!snprintf747f44Code.contains("pcRam5c596e") &&
 				!snprintf747f44Code.contains("0x1711972"),
 				"FUN_747f44 retained split far-pointer representation:\n" +
 					snprintf747f44Code);
@@ -823,7 +891,8 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		println("Patched far-pointer decompiler matrix passed: register and stack pairs, " +
 			"exact three-argument 0x256c1e fixture, strcmp@BFA966, sprintf@BFB37E, " +
 			"snprintf fixed-stack spill, unsafe-override recovery, and split pointer " +
-			"parameter recovery, clickable undefined target, return value, and a " +
+			"parameter recovery, C166 far-pointer auto-structure, clickable undefined " +
+			"target, return value, and a " +
 			"non-pointer control.");
 	}
 

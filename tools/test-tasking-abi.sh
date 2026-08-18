@@ -83,13 +83,14 @@ run_headless C166TaskingClassicAbiTest \
 	-postScript C166CodePointerInferenceTest.java \
 	-postScript C166FarPointerInferenceTest.java -deleteProject
 
-run_headless C166LegacyAbiTest \
-	'Legacy TASKING/Keil compiler spec compatibility tests passed' \
-	"${project_store}" C166LegacyAbiTest \
+run_headless C166DppAddressingTest \
+	'C166 direct and switch DPP dataflow regressions passed.' \
+	"${project_store}" C166DppAddressingTest \
 	-import "${project_dir}/extension.properties" \
-	-processor C166:LE:16:default -cspec tasking -noanalysis \
+	-processor C166:LE:16:tasking-classic-large \
+	-cspec tasking-classic-large -noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
-	-postScript C166TaskingClassicAbiTest.java -deleteProject
+	-postScript C166DppAddressingTest.java -deleteProject
 
 run_headless C167CsTaskingClassicAbiTest \
 	'TASKING far-pointer inference matrix passed' \

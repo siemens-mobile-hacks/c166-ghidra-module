@@ -20,6 +20,7 @@ import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.StructureDataType;
+import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.UnsignedShortDataType;
 import ghidra.program.model.data.VoidDataType;
@@ -32,7 +33,9 @@ import ghidra.program.model.listing.Variable;
 import ghidra.program.model.listing.VariableStorage;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.SourceType;
-import ghidrainfineon.C166FarPointerAnalyzer;
+import ghidrainfineon.C166CodePointerPhase;
+import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166TaskingTypeInferenceAnalyzer;
 
 public class C166FarPointerInferenceTest extends GhidraScript {
 
@@ -65,6 +68,31 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			0xf2, 0xfc, 0x00, 0x10, // R12 = [0x1000], offset
 			0xf2, 0xfd, 0x02, 0x10, // R13 = [0x1002], page
 			0xdc, 0x4d, 0xa8, 0x4c, 0xdb, 0x00));
+		Function indexedGlobalSink = fixture("indexed_global_sink", bytes(0xdb, 0x00));
+		setUserParameters(indexedGlobalSink, wordType(), charPointerType());
+		MemoryBlock indexedGlobalBlock = createMemoryBlock("indexed_global_far_words",
+			toAddr(0x1100), bytes(0x68, 0x69, 0x67, 0x68), false);
+		indexedGlobalBlock.setWrite(true);
+		indexedGlobalBlock.setExecute(true);
+		check(disassemble(toAddr(0x1100)), "failed to create analysis-owned false code");
+		Function falseGlobalCode = currentProgram.getFunctionManager().createFunction(
+			"false_global_code", toAddr(0x1100),
+			new AddressSet(toAddr(0x1100), toAddr(0x1103)), SourceType.ANALYSIS);
+		check(falseGlobalCode != null, "failed to create analysis-owned false function");
+		Function indexedGlobalPair = fixture("indexed_global_far_pointer",
+			indexedGlobalCall(0x1100, indexedGlobalSink));
+
+		MemoryBlock protectedGlobalBlock = createMemoryBlock("protected_global_far_words",
+			toAddr(0x1200), bytes(0x68, 0x69, 0x67, 0x68), false);
+		protectedGlobalBlock.setWrite(true);
+		protectedGlobalBlock.setExecute(true);
+		check(disassemble(toAddr(0x1200)), "failed to create protected false code");
+		Function protectedGlobalCode = currentProgram.getFunctionManager().createFunction(
+			"protected_global_code", toAddr(0x1200),
+			new AddressSet(toAddr(0x1200), toAddr(0x1203)), SourceType.USER_DEFINED);
+		check(protectedGlobalCode != null, "failed to create protected user function");
+		Function protectedIndexedGlobalPair = fixture("protected_indexed_global_far_pointer",
+			indexedGlobalCall(0x1200, indexedGlobalSink));
 
 		// Data flow may pass through temporaries and offset arithmetic.
 		Function copiedPair = fixture("copied_pair", bytes(
@@ -455,6 +483,24 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		check(globalPointer != null && globalPointer.getDataType() instanceof Pointer &&
 			globalPointer.getLength() == 4,
 			"adjacent global PAGE:OFFSET words were not joined as a far pointer");
+		checkNoParameters(indexedGlobalPair);
+		Data indexedGlobalPointer =
+			currentProgram.getListing().getDefinedDataAt(toAddr(0x1100));
+		check(indexedGlobalPointer != null &&
+			indexedGlobalPointer.getDataType() instanceof Pointer &&
+			indexedGlobalPointer.getLength() == 4,
+			"indexed global PAGE:OFFSET words were not joined as a far pointer");
+		check(currentProgram.getListing().getInstructionContaining(toAddr(0x1100)) == null &&
+			currentProgram.getListing().getInstructionContaining(toAddr(0x1102)) == null,
+			"analysis-owned false code survived global far-pointer recovery");
+		check(currentProgram.getFunctionManager().getFunctionContaining(toAddr(0x1100)) == null,
+			"analysis-owned false function survived global far-pointer recovery");
+		checkNoParameters(protectedIndexedGlobalPair);
+		check(currentProgram.getListing().getDefinedDataAt(toAddr(0x1200)) == null &&
+			currentProgram.getListing().getInstructionContaining(toAddr(0x1200)) != null &&
+			currentProgram.getFunctionManager().getFunctionAt(toAddr(0x1200)) ==
+				protectedGlobalCode,
+			"user-owned code was overwritten by global far-pointer recovery");
 		checkSignature(copiedPair, Set.of(0), "r13+r12");
 		checkSignature(adjustedOffset, Set.of(0), "r13+r12");
 		checkSignature(twoPairs, Set.of(0, 1), "r13+r12", "r15+r14");
@@ -528,7 +574,8 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkSignature(rectangleRealPointer, Set.of(0), "r13+r12");
 		checkCharPointer(rectangleConcretePointer, "r13+r12");
 		checkNoParameters(singleConstantStore);
-		checkNoParameters(codeSizedPageStore);
+		checkFunctionPointer(codeSizedPageStore, 0,
+			"exact function-entry constants were not classified as an fpointer");
 		checkNoParameters(unmappedConstantStore);
 		checkNoParameters(wrongOffset);
 		checkNoParameters(sameWord);
@@ -560,9 +607,17 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 
 		// A second run must not add, split, rename, or retype anything.
 		String beforeSecondRun = snapshotSignatures();
+		check(new C166CodePointerPhase().added(currentProgram, bodies, monitor,
+			new MessageLog()), "standalone code-pointer stability pass failed");
+		check(beforeSecondRun.equals(snapshotSignatures()),
+			"code-pointer phase rewrote the unified classification");
+		check(new C166FarPointerPhase().added(currentProgram, bodies, monitor,
+			new MessageLog()), "standalone far-pointer stability pass failed");
+		check(beforeSecondRun.equals(snapshotSignatures()),
+			"far-pointer phase rewrote the unified classification");
 		runAnalyzer();
 		check(beforeSecondRun.equals(snapshotSignatures()),
-			"far-pointer inference is not idempotent");
+			"unified TASKING type inference is not idempotent");
 
 		println("TASKING far-pointer inference matrix passed: " + fixtures.size() +
 			" fixture functions, including positive, negative, ambiguous and idempotence cases.");
@@ -582,9 +637,10 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 	}
 
 	private void runAnalyzer() throws Exception {
-		C166FarPointerAnalyzer analyzer = new C166FarPointerAnalyzer();
+		C166TaskingTypeInferenceAnalyzer analyzer =
+			new C166TaskingTypeInferenceAnalyzer();
 		check(analyzer.added(currentProgram, bodies, monitor, new MessageLog()),
-			"far-pointer analyzer failed");
+			"unified TASKING type inference failed");
 	}
 
 	private byte[] pagedRead(int highRegister, int lowRegister) {
@@ -594,6 +650,18 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 	private byte[] dppRead(int highRegister, int lowRegister) {
 		return bytes(0xf6, 0xf0 | highRegister, 0x00, 0xfe,
 			0xa8, 0x40 | lowRegister, 0xdb, 0x00);
+	}
+
+	private byte[] indexedGlobalCall(int address, Function target) {
+		return concat(bytes(
+			0xf0, 0xfc,                             // R15 = R12
+			0x5c, 0x2f,                             // shl R15,#2
+			0x00, 0xfc,                             // add R15,R12
+			0x5c, 0x1f,                             // shl R15,#1 (index * 10)
+			0xf2, 0xfd, address, address >> 8,       // R13 = [address], offset
+			0xf2, 0xfe, address + 2, (address + 2) >> 8, // R14 = [address+2], page
+			0x00, 0xdf),                            // add R13,R15
+			calls(target));
 	}
 
 	private byte[] calls(Function target) {
@@ -750,8 +818,12 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 	private void checkFunctionPointer(Function function, int parameterIndex,
 			String message) {
 		DataType type = function.getParameter(parameterIndex).getFormalDataType();
-		check(type instanceof Pointer &&
-			((Pointer) type).getDataType() instanceof FunctionDefinition,
+		DataType base = type;
+		while (base instanceof TypeDef typedef) {
+			base = typedef.getBaseDataType();
+		}
+		check(base instanceof Pointer &&
+			((Pointer) base).getDataType() instanceof FunctionDefinition,
 			message + ": got " + type.getDisplayName());
 	}
 
@@ -812,9 +884,9 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 	}
 
 	private void checkPointerTypeConflict(DataType first, DataType second) throws Exception {
-		C166FarPointerAnalyzer analyzer = new C166FarPointerAnalyzer();
+		C166FarPointerPhase analyzer = new C166FarPointerPhase();
 		Map<Integer, DataType> types = new HashMap<>();
-		var method = C166FarPointerAnalyzer.class.getDeclaredMethod("mergePointerType",
+		var method = C166FarPointerPhase.class.getDeclaredMethod("mergePointerType",
 			ghidra.program.model.listing.Program.class, Map.class, int.class, DataType.class);
 		method.setAccessible(true);
 		method.invoke(analyzer, currentProgram, types, 0, first);

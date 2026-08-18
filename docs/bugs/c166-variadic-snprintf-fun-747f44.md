@@ -26,7 +26,7 @@ The instructions immediately before the call establish:
 - stack words `0x171:0x1972` — the fixed format far pointer, resolving to
   physical address `0x5c5972`;
 - the following four stack bytes — the far-pointer vararg stored at
-  `PTR_00196e`;
+  the pointer object at physical `0x5c596e` (logical DPP0 offset `0x196e`);
 - sixteen promoted byte varargs after that.
 
 The post-call `add R0,#0x28` confirms 40 stack bytes: four for the fixed format
@@ -34,7 +34,7 @@ pointer, four for the pointer vararg, and `16 * 2` for the promoted bytes.
 
 ## Root cause
 
-`C166VariadicCallAnalyzer` can repair this exact call when it examines
+`C166VariadicCallPhase` can repair this exact call when it examines
 `FUN_747f44`. During incremental automatic analysis, however, it kept only
 callers whose own bodies intersected the changed address set. If the
 typed variadic target (`snprintf`) is the changed function, its callers are
@@ -81,15 +81,15 @@ The call must decompile in this argument order:
 
 ```c
 snprintf(destination, 0x2d, (char *)0x5c5972,
-         PTR_00196e, byte_0, byte_1, /* ... */, byte_15);
+         PTR_5c596e, byte_0, byte_1, /* ... */, byte_15);
 ```
 
 It must not contain raw `0x1711972`, split destination OFFSET/PAGE arguments,
-or a split `PTR_00196e` vararg.
+or a split `PTR_5c596e` vararg.
 
 ## Resolution
 
-Implemented in `C166VariadicCallAnalyzer`:
+Implemented in `C166VariadicCallPhase`:
 
 - an incrementally changed typed variadic callee now invalidates all of its
   direct callers;
@@ -124,8 +124,10 @@ real `M55_v91.bin` at base `0x200000` and verifies call `0x748042`.
 Verified whole-function output has signature
 `int FUN_747f44(char *, ushort flags, ushort mode)`, assigns `strlen` to the
 four-byte length object passed to `FUN_743766`, and has the destination first,
-`0x2d` second, the format at `0x5c5972` third, one `PTR_00196e` pointer vararg,
+`0x2d` second, the format at `0x5c5972` third, one `PTR_5c596e` pointer vararg,
 and sixteen promoted byte varargs. Both `tools/test-patched-decompiler.sh` and
-`tools/test-tasking-abi.sh` pass, including legacy C166 and C167CS controls.
+`tools/test-tasking-abi.sh` passes for both supported C167CR/C167CS TASKING
+Classic Large profiles; the patched-decompiler suite also keeps ARM and x86
+controls green.
 The same assertions also pass after a complete 28,165-function M55 headless
 analysis, and a second run leaves all 117 typed variadic overrides unchanged.

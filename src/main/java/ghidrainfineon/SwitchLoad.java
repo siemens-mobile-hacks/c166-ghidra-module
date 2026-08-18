@@ -18,18 +18,14 @@
  */
 package ghidrainfineon;
 
-import java.math.BigInteger;
-
 import ghidra.app.plugin.processors.sleigh.SleighLanguage;
-import ghidra.app.plugin.processors.sleigh.symbol.Symbol;
-import ghidra.app.plugin.processors.sleigh.symbol.UseropSymbol;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Program;
-import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.pcode.*;
+import ghidra.program.model.scalar.Scalar;
 
 /**
  * PCode injection for switch table loads.
@@ -44,18 +40,13 @@ import ghidra.program.model.pcode.*;
 public class SwitchLoad extends InjectPayloadCallother {
 	private final SleighLanguage language;
 	private final long uniqueBase;
-	private int segmentUseropIndex = -1;
+	private final C166PagedAddressEmitter addressEmitter;
 
 	public SwitchLoad(String name, SleighLanguage language, long uniqueBase) {
 		super(name);
 		this.language = language;
 		this.uniqueBase = uniqueBase;
-		
-		// Find the "segment" userop index
-		Symbol sym = language.getSymbolTable().findGlobalSymbol("segment");
-		if (sym instanceof UseropSymbol) {
-			segmentUseropIndex = ((UseropSymbol) sym).getIndex();
-		}
+		addressEmitter = new C166PagedAddressEmitter(language);
 	}
 
 	@Override
@@ -66,53 +57,29 @@ public class SwitchLoad extends InjectPayloadCallother {
 		
 		AddressSpace ramSpace = language.getDefaultSpace();
 		AddressSpace constSpace = language.getAddressFactory().getConstantSpace();
-		AddressSpace uniqueSpace = language.getAddressFactory().getUniqueSpace();
-		
+
 		// Check if next instruction is jmpi
 		boolean isSwitch = isFollowedByJmpi(program, currentAddr);
-		
-		if (isSwitch && segmentUseropIndex >= 0) {
-			// This is a switch table load - emit segment(dpp, ptr & 0x3FFF) then load
-			// The mask is needed because segmentop no longer masks (for indirect access support)
-			Long dppValue = getImmediateExtpPage(program, currentAddr);
-			if (dppValue == null && !hasAddressOverride(program, currentAddr)) {
-				dppValue = getDppForPointer(program, currentAddr, ptrInput);
-			}
 
-			// An unresolved EXTP-register/EXTS override or unknown DPP is not a
-			// license to read page zero.  Keeping the raw 16-bit load is less
-			// precise, but prevents arbitrary bytes from becoming switch targets.
-			if (dppValue == null) {
+		if (isSwitch) {
+			Integer dppIndex = getDppIndexForPointer(program, currentAddr, ptrInput);
+			if (dppIndex == null && !addressEmitter.hasOverride(program, currentAddr)) {
 				return emitRawLoad(currentAddr, ptrInput, output, ramSpace, constSpace);
 			}
-			
-			int seqnum = 0;
-			PcodeOp[] ops = new PcodeOp[3];
-			
+
 			// Use full 24-bit instruction address to create unique temp addresses
 			// Shift right by 1 (instructions are 2-byte aligned) to compress range
 			// Then multiply by 8 (enough for multiple varnodes) to avoid overlap
 			long uniqueOffset = uniqueBase + ((currentAddr.getOffset() & 0xFFFFFF) >> 1) * 8;
-			
-			// 1. maskedPtr = ptrInput & 0x3FFF (mask to 14-bit page offset)
-			Varnode maskConst = new Varnode(constSpace.getAddress(0x3FFF), 2);
-			Varnode maskedPtr = new Varnode(uniqueSpace.getAddress(uniqueOffset), 2);
-			Varnode[] andInputs = new Varnode[] { ptrInput, maskConst };
-			ops[0] = new PcodeOp(currentAddr, seqnum++, PcodeOp.INT_AND, andInputs, maskedPtr);
-			
-			// 2. addr = segment(dpp, maskedPtr)
-			Varnode useropId = new Varnode(constSpace.getAddress(segmentUseropIndex), 4);
-			Varnode dppConst = new Varnode(constSpace.getAddress(dppValue), 2);
-			Varnode addrTemp = new Varnode(uniqueSpace.getAddress(uniqueOffset + 2), 3);
-			
-			Varnode[] segInputs = new Varnode[] { useropId, dppConst, maskedPtr };
-			ops[1] = new PcodeOp(currentAddr, seqnum++, PcodeOp.CALLOTHER, segInputs, addrTemp);
-			
-			// 3. output = *addr (load 2 bytes from the computed address)
+			Varnode addrTemp = new Varnode(
+				language.getAddressFactory().getUniqueSpace().getAddress(uniqueOffset + 0x40), 3);
+			PcodeOp[] addressOps = addressEmitter.emitIndirect(program, currentAddr,
+				ptrInput, dppIndex == null ? 0 : dppIndex, addrTemp, uniqueOffset);
+			PcodeOp[] ops = new PcodeOp[addressOps.length + 1];
+			System.arraycopy(addressOps, 0, ops, 0, addressOps.length);
 			Varnode spaceId = new Varnode(constSpace.getAddress(ramSpace.getSpaceID()), 4);
-			Varnode[] loadInputs = new Varnode[] { spaceId, addrTemp };
-			ops[2] = new PcodeOp(currentAddr, seqnum++, PcodeOp.LOAD, loadInputs, output);
-			
+			ops[addressOps.length] = new PcodeOp(currentAddr, addressOps.length,
+				PcodeOp.LOAD, new Varnode[] { spaceId, addrTemp }, output);
 			return ops;
 		}
 
@@ -127,35 +94,6 @@ public class SwitchLoad extends InjectPayloadCallother {
 		};
 	}
 
-	/**
-	 * Resolve an immediate EXTP override at the table load.  EXTP replaces
-	 * the DPP page for every long/indirect access in its instruction range.
-	 */
-	private Long getImmediateExtpPage(Program program, Address addr) {
-		ProgramContext context = program.getProgramContext();
-		if (!isContextOne(context, "ExtpEn", addr)) {
-			return null;
-		}
-		if (isContextOne(context, "ExtpRegMode", addr)) {
-			return null;
-		}
-
-		Register extp = context.getRegister("Extp");
-		BigInteger value = extp == null ? null : context.getValue(extp, addr, false);
-		return value == null ? null : value.longValue() & 0x3ffL;
-	}
-
-	private boolean hasAddressOverride(Program program, Address addr) {
-		ProgramContext context = program.getProgramContext();
-		return isContextOne(context, "ExtpEn", addr) || isContextOne(context, "ExtsEn", addr);
-	}
-
-	private boolean isContextOne(ProgramContext context, String registerName, Address addr) {
-		Register register = context.getRegister(registerName);
-		BigInteger value = register == null ? null : context.getValue(register, addr, false);
-		return BigInteger.ONE.equals(value);
-	}
-	
 	/**
 	 * Check if the next instruction is jmpi
 	 */
@@ -183,7 +121,8 @@ public class SwitchLoad extends InjectPayloadCallother {
 	 * override is active. Uses the upper two bits of the table offset to select
 	 * DPP0..DPP3.
 	 */
-	private Long getDppForPointer(Program program, Address context, Varnode ptrInput) {
+	private Integer getDppIndexForPointer(Program program, Address context,
+			Varnode ptrInput) {
 		// For switch tables, we need to determine which DPP based on the pointer value
 		// The pointer typically comes from: add rX, #tableBase
 		// We look back to find the table base and determine DPP from that
@@ -198,25 +137,14 @@ public class SwitchLoad extends InjectPayloadCallother {
 			Instruction prev = currentInstr.getPrevious();
 			for (int i = 0; i < 10 && prev != null; i++) {
 				String mnemonic = prev.getMnemonicString().toLowerCase();
-				if (mnemonic.equals("add")) {
+				if (mnemonic.equals("add") && writes(prev, ptrInput)) {
 					// Try to get the immediate value (table base)
 					for (int opIdx = 0; opIdx < prev.getNumOperands(); opIdx++) {
 						if ((prev.getOperandType(opIdx) & OperandType.SCALAR) != 0) {
-							ghidra.program.model.scalar.Scalar scalar = prev.getScalar(opIdx);
+							Scalar scalar = operandScalar(prev, opIdx);
 							if (scalar != null) {
 								long tableBase = scalar.getUnsignedValue();
-								int dppIndex = (int) ((tableBase >> 14) & 3);
-								
-								// Get the DPP register value
-								Register dppReg = program.getRegister("DPP" + dppIndex);
-								if (dppReg != null) {
-									BigInteger dppValue = program.getProgramContext()
-										.getValue(dppReg, context, false);
-									if (dppValue != null) {
-										return dppValue.longValue() & 0x3FFL;
-									}
-								}
-								return null;
+								return (int) ((tableBase >> 14) & 3);
 							}
 						}
 					}
@@ -227,6 +155,29 @@ public class SwitchLoad extends InjectPayloadCallother {
 			// Fall through to default
 		}
 		
+		return null;
+	}
+
+	private boolean writes(Instruction instruction, Varnode registerVarnode) {
+		for (Object result : instruction.getResultObjects()) {
+			if (result instanceof Register register &&
+				register.getAddress().equals(registerVarnode.getAddress())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Scalar operandScalar(Instruction instruction, int operandIndex) {
+		Scalar scalar = instruction.getScalar(operandIndex);
+		if (scalar != null) {
+			return scalar;
+		}
+		for (Object object : instruction.getOpObjects(operandIndex)) {
+			if (object instanceof Scalar operand) {
+				return operand;
+			}
+		}
 		return null;
 	}
 }

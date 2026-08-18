@@ -12,9 +12,6 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
-import ghidra.app.services.AbstractAnalyzer;
-import ghidra.app.services.AnalysisPriority;
-import ghidra.app.services.AnalyzerType;
 import ghidra.app.services.ConsoleService;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
@@ -74,9 +71,8 @@ import ghidra.util.task.TaskMonitor;
  * they are ordinary arguments of the runtime target and have independent
  * types.
  */
-public class C166CodePointerAnalyzer extends AbstractAnalyzer {
+public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 
-	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String CALLING_CONVENTION = "__tasking_c166_classic";
 	private static final String GENERIC_FUNCTION_NAME = "function";
 	private static final String GENERIC_FUNCTION_PATH = "/c166/function";
@@ -90,21 +86,13 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 	private static final int FIRST_ARGUMENT_REGISTER = 12;
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
 
-	public C166CodePointerAnalyzer() {
-		super("C166 TASKING Code Pointer Inference",
-			"Joins SEGMENT:OFFSET arguments which resolve to executable function entries.",
-			AnalyzerType.FUNCTION_ANALYZER);
-		// Let paged-memory evidence establish true data pointers first.
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after().after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
+	public C166CodePointerPhase() {
+		super("C166 TASKING Code Pointer Inference");
 	}
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return program.getLanguageID().getIdAsString().startsWith("C166:") &&
-			COMPILER_ID.equals(
-				program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override
@@ -1349,7 +1337,8 @@ public class C166CodePointerAnalyzer extends AbstractAnalyzer {
 					if (start != null && conflict.getValue().contains(start) &&
 						parameter.getVariableStorage().size() == 4 &&
 						isGenericAnalysisPointerForScalarRepair(function,
-							parameter.getFormalDataType())) {
+							parameter.getFormalDataType()) &&
+						!hasDirectPagedDataUse(program, function, start)) {
 						if (packed.contains(start)) {
 							parameters.add(new ParameterImpl(existingName(parameter),
 								Undefined.getUndefinedDataType(4), program));

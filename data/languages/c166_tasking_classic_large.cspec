@@ -3,9 +3,8 @@
 <!--
     TASKING C166/ST10 Classic ABI, large memory model.
 
-    This compiler spec intentionally lives beside, rather than replacing,
-    c166.cspec.  Existing programs using compiler ID "tasking" retain their
-    original data organization and calling conventions.
+    This is the only compiler ABI supported by the module.  The processor
+    specification selects it explicitly through c166.abi.
 -->
 <compiler_spec>
     <stackpointer register="r0" space="ram" growth="negative"/>
@@ -460,7 +459,7 @@
     </prototype>
 
     <!--
-        Call-site-only models used by C166VariadicCallAnalyzer.  The override
+        Call-site-only models used by C166VariadicCallPhase.  The override
         signature is deliberately non-variadic to avoid Ghidra splitting locked
         compound parameters during vararg recovery.  At the first optional
         position these models exhaust the register bank and continue on stack,

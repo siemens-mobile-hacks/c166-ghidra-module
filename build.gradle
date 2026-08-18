@@ -60,7 +60,7 @@ dependencies {
 }
 
 buildExtension.doFirst {
-	delete 'data/languages/c166.sla', 'data/languages/c166_tasking_classic_large.sla'
+	delete 'data/languages/c166_tasking_classic_large.sla'
 }
 
 // Development-only files must not leak into the installable extension archive.

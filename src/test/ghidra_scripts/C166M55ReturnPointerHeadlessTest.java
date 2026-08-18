@@ -9,9 +9,9 @@ import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.listing.Function;
-import ghidrainfineon.C166CodePointerAnalyzer;
-import ghidrainfineon.C166FarPointerAnalyzer;
-import ghidrainfineon.C166PointerReturnAnalyzer;
+import ghidrainfineon.C166CodePointerPhase;
+import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166PointerReturnPhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
 public class C166M55ReturnPointerHeadlessTest extends GhidraScript {
@@ -39,17 +39,17 @@ public class C166M55ReturnPointerHeadlessTest extends GhidraScript {
 			check(new C166TaskingRuntimeAnalyzer().added(currentProgram, wholeProgram, monitor,
 				runtimeLog), "runtime analysis failed: " + runtimeLog);
 			MessageLog codeLog = new MessageLog();
-			check(new C166CodePointerAnalyzer().added(currentProgram, wholeProgram, monitor,
+			check(new C166CodePointerPhase().added(currentProgram, wholeProgram, monitor,
 				codeLog), "code-pointer analysis failed: " + codeLog);
 			MessageLog farLog = new MessageLog();
-			check(new C166FarPointerAnalyzer().added(currentProgram, wholeProgram, monitor,
+			check(new C166FarPointerPhase().added(currentProgram, wholeProgram, monitor,
 				farLog), "far-data-pointer analysis failed: " + farLog);
 			MessageLog repeatedCodeLog = new MessageLog();
-			check(new C166CodePointerAnalyzer().added(currentProgram, wholeProgram, monitor,
+			check(new C166CodePointerPhase().added(currentProgram, wholeProgram, monitor,
 				repeatedCodeLog),
 				"repeated code-pointer analysis failed: " + repeatedCodeLog);
 			MessageLog returnLog = new MessageLog();
-			check(new C166PointerReturnAnalyzer().added(currentProgram, wholeProgram, monitor,
+			check(new C166PointerReturnPhase().added(currentProgram, wholeProgram, monitor,
 				returnLog), "return-pointer analysis failed: " + returnLog);
 		}
 		else if (hiddenFunctionsMissing) {
@@ -58,13 +58,13 @@ public class C166M55ReturnPointerHeadlessTest extends GhidraScript {
 			hiddenScope.add(swTeamPopulate.getBody());
 			hiddenScope.add(swTeamFinish.getBody());
 			MessageLog farLog = new MessageLog();
-			check(new C166FarPointerAnalyzer().added(currentProgram, hiddenScope, monitor,
+			check(new C166FarPointerPhase().added(currentProgram, hiddenScope, monitor,
 				farLog), "focused hidden-function far analysis failed: " + farLog);
 			MessageLog codeLog = new MessageLog();
-			check(new C166CodePointerAnalyzer().added(currentProgram, hiddenScope, monitor,
+			check(new C166CodePointerPhase().added(currentProgram, hiddenScope, monitor,
 				codeLog), "focused hidden-function code analysis failed: " + codeLog);
 			MessageLog returnLog = new MessageLog();
-			check(new C166PointerReturnAnalyzer().added(currentProgram,
+			check(new C166PointerReturnPhase().added(currentProgram,
 				swTeamCaller.getBody(), monitor, returnLog),
 				"focused hidden-function return analysis failed: " + returnLog);
 		}

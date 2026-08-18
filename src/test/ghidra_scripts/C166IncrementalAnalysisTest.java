@@ -7,7 +7,7 @@ import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidrainfineon.C166CallTargetAnalyzer;
-import ghidrainfineon.C166FarPointerAnalyzer;
+import ghidrainfineon.C166FarPointerPhase;
 
 public class C166IncrementalAnalysisTest extends GhidraScript {
 
@@ -46,7 +46,7 @@ public class C166IncrementalAnalysisTest extends GhidraScript {
 
 		Function changedFar = fixture("incremental_changed_far", pagedRead(13, 12));
 		Function oldFar = fixture("incremental_old_far", pagedRead(13, 12));
-		C166FarPointerAnalyzer farPointers = new C166FarPointerAnalyzer();
+		C166FarPointerPhase farPointers = new C166FarPointerPhase();
 		check(farPointers.added(currentProgram, changedFar.getBody(), monitor,
 			new MessageLog()), "incremental far-pointer analysis failed");
 		check(changedFar.getParameterCount() == 1,

@@ -168,44 +168,44 @@ Table 1 Instruction Overview ordered by Hex-Code (lower half)
 |            | 0x    | 1x    | 2x    | 3x    | 4x   | 5x   | 6x   | 7x    |
 |------------|-------|-------|-------|-------|------|------|------|-------|
 | <b>x</b> 0 | ADD   | ADDC  | SUB   | SUBC  | CMP  | XOR  | AND  | OR    |
-| <b>x</b> 1 | ADDB  | ADDCB | SUBB  | SUBCB | СМРВ | XORB | ANDB | ORB   |
-| <b>x2</b>  | ADD   | ADDC  | SUB   | SUBC  | СМР  | XOR  | AND  | OR    |
-| х3         | ADDB  | ADDCB | SUBB  | SUBCB | СМРВ | XORB | ANDB | ORB   |
+| <b>x</b> 1 | ADDB  | ADDCB | SUBB  | SUBCB | CMPB | XORB | ANDB | ORB   |
+| <b>x2</b>  | ADD   | ADDC  | SUB   | SUBC  | CMP  | XOR  | AND  | OR    |
+| x3         | ADDB  | ADDCB | SUBB  | SUBCB | CMPB | XORB | ANDB | ORB   |
 | <b>x</b> 4 | ADD   | ADDC  | SUB   | SUBC  | l    | XOR  | AND  | OR    |
 | <b>x</b> 5 | ADDB  | ADDCB | SUBB  | SUBCB | l    | XORB | ANDB | ORB   |
-| <b>x</b> 6 | ADD   | ADDC  | SUB   | SUBC  | СМР  | XOR  | AND  | OR    |
-| <b>x7</b>  | ADDB  | ADDCB | SUBB  | SUBCB | СМРВ | XORB | ANDB | ORB   |
-| <b>x8</b>  | ADD   | ADDC  | SUB   | SUBC  | СМР  | XOR  | AND  | OR    |
-| <b>x9</b>  | ADDB  | ADDCB | SUBB  | SUBCB | СМРВ | XORB | ANDB | ORB   |
-| хA         | BFLDL | BFLDH | ВСМР  | BMOVN | BMOV | BOR  | BAND | BXOR  |
-| хВ         | MUL   | MULU  | PRIOR |       | DIV  | DIVU | DIVL | DIVLU |
-| хC         | ROL   | ROL   | ROR   | ROR   | SHL  | SHL  | SHR  | SHR   |
-| хD         | JMPR  | JMPR  | JMPR  | JMPR  | JMPR | JMPR | JMPR | JMPR  |
-| хE         | BCLR  | BCLR  | BCLR  | BCLR  | BCLR | BCLR | BCLR | BCLR  |
-| хF         | BSET  | BSET  | BSET  | BSET  | BSET | BSET | BSET | BSET  |
+| <b>x</b> 6 | ADD   | ADDC  | SUB   | SUBC  | CMP  | XOR  | AND  | OR    |
+| <b>x7</b>  | ADDB  | ADDCB | SUBB  | SUBCB | CMPB | XORB | ANDB | ORB   |
+| <b>x8</b>  | ADD   | ADDC  | SUB   | SUBC  | CMP  | XOR  | AND  | OR    |
+| <b>x9</b>  | ADDB  | ADDCB | SUBB  | SUBCB | CMPB | XORB | ANDB | ORB   |
+| xA         | BFLDL | BFLDH | BCMP  | BMOVN | BMOV | BOR  | BAND | BXOR  |
+| xB         | MUL   | MULU  | PRIOR |       | DIV  | DIVU | DIVL | DIVLU |
+| xC         | ROL   | ROL   | ROR   | ROR   | SHL  | SHL  | SHR  | SHR   |
+| xD         | JMPR  | JMPR  | JMPR  | JMPR  | JMPR | JMPR | JMPR | JMPR  |
+| xE         | BCLR  | BCLR  | BCLR  | BCLR  | BCLR | BCLR | BCLR | BCLR  |
+| xF         | BSET  | BSET  | BSET  | BSET  | BSET | BSET | BSET | BSET  |
 
 ![](_page_9_Picture_1.jpeg)
 
 Table 2 Instruction Overview ordered by Hex-Code (upper half)
 
-|            | 8x    | 9x    | Ax     | Вх    | Сх    | Dx                 | Ex    | Fx   |
+|            | 8x    | 9x    | Ax     | Bx    | Cx    | Dx                 | Ex    | Fx   |
 |------------|-------|-------|--------|-------|-------|--------------------|-------|------|
-| х0         | CMPI1 | CMPI2 | CMPD1  | CMPD2 | MOVBZ | MOVBS              | MOV   | MOV  |
+| x0         | CMPI1 | CMPI2 | CMPD1  | CMPD2 | MOVBZ | MOVBS              | MOV   | MOV  |
 | <b>x1</b>  | NEG   | CPL   | NEGB   | CPLB  | _     | ATOMIC<br>EXTR     | MOVB  | MOVB |
 | <b>x2</b>  | CMPI1 | CMPI2 | CMPD1  | CMPD2 | MOVBZ | MOVBS              | PCALL | MOV  |
-| х3         | 1     | _     | _      | _     | -     | _                  | -     | MOVB |
+| x3         | 1     | _     | _      | _     | -     | _                  | -     | MOVB |
 | <b>x</b> 4 | MOV   | MOV   | MOVB   | MOVB  | MOV   | MOV                | MOVB  | MOVB |
 | <b>x</b> 5 | ı     | _     | DISWDT | EINIT | MOVBZ | MOVBS              |       | _    |
 | <b>x6</b>  | CMPI1 | CMPI2 | CMPD1  | CMPD2 | SCXT  | SCXT               | MOV   | MOV  |
 | <b>x7</b>  | IDLE  | PWRDN | SRVWDT | SRST  | 1     | EXTP[R]<br>EXTS[R] | MOVB  | MOVB |
 | <b>x8</b>  | MOV   | MOV   | MOV    | MOV   | MOV   | MOV                | MOV   | _    |
 | <b>x9</b>  | MOVB  | MOVB  | MOVB   | MOVB  | MOVB  | MOVB               | MOVB  | _    |
-| хA         | JB    | JNB   | JBC    | JNBS  | CALLA | CALLS              | JMPA  | JMPS |
-| хВ         | _     | TRAP  | CALLI  | CALLR | RET   | RETS               | RETP  | RETI |
-| хC         | _     | JMPI  | ASHR   | ASHR  | NOP   | EXTP[R]<br>EXTS[R] | PUSH  | POP  |
-| хD         | JMPR  | JMPR  | JMPR   | JMPR  | JMPR  | JMPR               | JMPR  | JMPR |
-| хE         | BCLR  | BCLR  | BCLR   | BCLR  | BCLR  | BCLR               | BCLR  | BCLR |
-| хF         | BSET  | BSET  | BSET   | BSET  | BSET  | BSET               | BSET  | BSET |
+| xA         | JB    | JNB   | JBC    | JNBS  | CALLA | CALLS              | JMPA  | JMPS |
+| xB         | _     | TRAP  | CALLI  | CALLR | RET   | RETS               | RETP  | RETI |
+| xC         | _     | JMPI  | ASHR   | ASHR  | NOP   | EXTP[R]<br>EXTS[R] | PUSH  | POP  |
+| xD         | JMPR  | JMPR  | JMPR   | JMPR  | JMPR  | JMPR               | JMPR  | JMPR |
+| xE         | BCLR  | BCLR  | BCLR   | BCLR  | BCLR  | BCLR               | BCLR  | BCLR |
+| xF         | BSET  | BSET  | BSET   | BSET  | BSET  | BSET               | BSET  | BSET |
 
 ![](_page_10_Picture_1.jpeg)
 
@@ -522,7 +522,7 @@ Table 4Instruction Set Summary (cont'd)
 | BAND             | baddr, baddr      | AND direct bit with direct bit                                                            | 4     |
 | BOR              | baddr, baddr      | OR direct bit with direct bit                                                             | 4     |
 | BXOR             | baddr, baddr      | XOR direct bit with direct bit                                                            | 4     |
-| ВСМР             | baddr, baddr      | Compare direct bit to direct bit                                                          | 4     |
+| BCMP             | baddr, baddr      | Compare direct bit to direct bit                                                          | 4     |
 | BFLDH<br>#mask8, | bitoff,<br>#data8 | Bitwise modify masked high byte of bit-addressable direct word memory with immediate data | 4     |
 | BFLDL<br>#mask8, | bitoff,<br>#data8 | Bitwise modify masked low byte of bit-addressable direct word memory with immediate data  | 4     |
 | CMP              | Rw, Rw            | Compare direct word GPR to direct GPR                                                     | 2     |
@@ -530,13 +530,13 @@ Table 4Instruction Set Summary (cont'd)
 | CMP              | Rw, [Rw+]         | Compare indirect word memory to direct GPR and post-increment source pointer by 2         | 2     |
 | CMP              | Rw, #data3        | Compare immediate word data to direct GPR                                                 | 2     |
 | CMP              | reg, #data16      | Compare immediate word data to direct register                                            | 4     |
-| СМР              | reg, mem          | Compare direct word memory to direct register                                             | 4     |
-| СМРВ             | Rb, Rb            | Compare direct byte GPR to direct GPR                                                     | 2     |
-| СМРВ             | Rb, [Rw]          | Compare indirect byte memory to direct GPR                                                | 2     |
-| СМРВ             | Rb, [Rw+]         | Compare indirect byte memory to direct GPR and post-increment source pointer by 1         | 2     |
-| СМРВ             | Rb, #data3        | Compare immediate byte data to direct GPR                                                 | 2     |
-| СМРВ             | reg, #data8       | Compare immediate byte data to direct register                                            | 4     |
-| СМРВ             | reg, mem          | Compare direct byte memory to direct register                                             | 4     |
+| CMP              | reg, mem          | Compare direct word memory to direct register                                             | 4     |
+| CMPB             | Rb, Rb            | Compare direct byte GPR to direct GPR                                                     | 2     |
+| CMPB             | Rb, [Rw]          | Compare indirect byte memory to direct GPR                                                | 2     |
+| CMPB             | Rb, [Rw+]         | Compare indirect byte memory to direct GPR and post-increment source pointer by 1         | 2     |
+| CMPB             | Rb, #data3        | Compare immediate byte data to direct GPR                                                 | 2     |
+| CMPB             | reg, #data8       | Compare immediate byte data to direct register                                            | 4     |
+| CMPB             | reg, mem          | Compare direct byte memory to direct register                                             | 4     |
 
 ![](_page_20_Picture_1.jpeg)
 
@@ -762,7 +762,7 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 
 ![](_page_27_Picture_1.jpeg)
 
-| Нех | Bytes | Mnemonic           | Operands                                   | Нех | Bytes | Mnemonic            | Operands                                   |
+| Hex | Bytes | Mnemonic           | Operands                                   | Hex | Bytes | Mnemonic            | Operands                                   |
 |-----|-------|--------------------|--------------------------------------------|-----|-------|---------------------|--------------------------------------------|
 | 00  | 2     | ADD                | Rw, Rw                                     | 10  | 2     | ADDC                | Rw, Rw                                     |
 | 01  | 2     | ADDB               | Rb, Rb                                     | 11  | 2     | ADDCB               | Rb, Rb                                     |
@@ -783,7 +783,7 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 
 ![](_page_28_Picture_1.jpeg)
 
-| Нех | Bytes | Mnemonic           | Operands                                   | Нех | Bytes | Mnemonic            | Operands                                   |
+| Hex | Bytes | Mnemonic           | Operands                                   | Hex | Bytes | Mnemonic            | Operands                                   |
 |-----|-------|--------------------|--------------------------------------------|-----|-------|---------------------|--------------------------------------------|
 | 20  | 2     | SUB                | Rw, Rw                                     | 30  | 2     | SUBC                | Rw, Rw                                     |
 | 21  | 2     | SUBB               | Rb, Rb                                     | 31  | 2     | SUBCB               | Rb, Rb                                     |
@@ -795,25 +795,25 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 | 27  | 4     | SUBB               | reg, #data8                                | 37  | 4     | SUBCB               | reg, #data8                                |
 | 28  | 2     | SUB <sup>1)</sup>  | Rw, [Rw +] or<br>Rw, [Rw] or<br>Rw, #data3 | 38  | 2     | SUBC <sup>1)</sup>  | Rw, [Rw +] or<br>Rw, [Rw] or<br>Rw, #data3 |
 | 29  | 2     | SUBB <sup>1)</sup> | Rb, [Rw +] or<br>Rb, [Rw] or<br>Rb, #data3 | 39  | 2     | SUBCB <sup>1)</sup> | Rb, [Rw +] or<br>Rb, [Rw] or<br>Rb, #data3 |
-| 2A  | 4     | BCMP               | bitaddr, bitaddr                           | ЗА  | 4     | BMOVN               | bitaddr, bitaddr                           |
+| 2A  | 4     | BCMP               | bitaddr, bitaddr                           | 3A  | 4     | BMOVN               | bitaddr, bitaddr                           |
 | 2B  | 2     | PRIOR              | Rw, Rw                                     | 3B  | _     | _                   | _                                          |
-| 2C  | 2     | ROR                | Rw, Rw                                     | 3С  | 2     | ROR                 | Rw, #data4                                 |
+| 2C  | 2     | ROR                | Rw, Rw                                     | 3C  | 2     | ROR                 | Rw, #data4                                 |
 | 2D  | 2     | JMPR               | cc_EQ, rel or cc_Z, rel                    | 3D  | 2     | JMPR                | cc_NE, rel or cc_NZ, rel                   |
 | 2E  | 2     | BCLR               | bitoff.2                                   | 3E  | 2     | BCLR                | bitoff.3                                   |
 | 2F  | 2     | BSET               | bitoff.2                                   | 3F  | 2     | BSET                | bitoff.3                                   |
 
 ![](_page_29_Picture_1.jpeg)
 
-| Hex | Bytes | Mnemonic           | Operands                                   | Нех | Bytes | Mnemonic           | Operands                                   |
+| Hex | Bytes | Mnemonic           | Operands                                   | Hex | Bytes | Mnemonic           | Operands                                   |
 |-----|-------|--------------------|--------------------------------------------|-----|-------|--------------------|--------------------------------------------|
 | 40  | 2     | CMP                | Rw, Rw                                     | 50  | 2     | XOR                | Rw, Rw                                     |
-| 41  | 2     | СМРВ               | Rb, Rb                                     | 51  | 2     | XORB               | Rb, Rb                                     |
+| 41  | 2     | CMPB               | Rb, Rb                                     | 51  | 2     | XORB               | Rb, Rb                                     |
 | 42  | 4     | CMP                | reg, mem                                   | 52  | 4     | XOR                | reg, mem                                   |
-| 43  | 4     | СМРВ               | reg, mem                                   | 53  | 4     | XORB               | reg, mem                                   |
+| 43  | 4     | CMPB               | reg, mem                                   | 53  | 4     | XORB               | reg, mem                                   |
 | 44  | _     | _                  | _                                          | 54  | 4     | XOR                | mem, reg                                   |
 | 45  | _     | _                  | _                                          | 55  | 4     | XORB               | mem, reg                                   |
-| 46  | 4     | СМР                | reg, #data16                               | 56  | 4     | XOR                | reg, #data16                               |
-| 47  | 4     | СМРВ               | reg, #data8                                | 57  | 4     | XORB               | reg, #data8                                |
+| 46  | 4     | CMP                | reg, #data16                               | 56  | 4     | XOR                | reg, #data16                               |
+| 47  | 4     | CMPB               | reg, #data8                                | 57  | 4     | XORB               | reg, #data8                                |
 | 48  | 2     | CMP <sup>1)</sup>  | Rw, [Rw +] or<br>Rw, [Rw] or<br>Rw, #data3 | 58  | 2     | XOR <sup>1)</sup>  | Rw, [Rw +] or<br>Rw, [Rw] or<br>Rw, #data3 |
 | 49  | 2     | CMPB <sup>1)</sup> | Rb, [Rw +] or<br>Rb, [Rw] or<br>Rb, #data3 | 59  | 2     | XORB <sup>1)</sup> | Rb, [Rw +] or<br>Rb, [Rw] or<br>Rb, #data3 |
 | 4A  | 4     | BMOV               | bitaddr, bitaddr                           | 5A  | 4     | BOR                | bitaddr, bitaddr                           |
@@ -825,7 +825,7 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 
 ![](_page_30_Picture_1.jpeg)
 
-| Нех | Bytes | Mnemonic           | Operands                                   | Нех | Bytes | Mnemonic          | Operands                                   |
+| Hex | Bytes | Mnemonic           | Operands                                   | Hex | Bytes | Mnemonic          | Operands                                   |
 |-----|-------|--------------------|--------------------------------------------|-----|-------|-------------------|--------------------------------------------|
 | 60  | 2     | AND                | Rw, Rw                                     | 70  | 2     | OR                | Rw, Rw                                     |
 | 61  | 2     | ANDB               | Rb, Rb                                     | 71  | 2     | ORB               | Rb, Rb                                     |
@@ -846,7 +846,7 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 
 ![](_page_31_Picture_1.jpeg)
 
-| Hex | Bytes | Mnemonic | Operands                 | Нех | Bytes | Mnemonic | Operands                  |
+| Hex | Bytes | Mnemonic | Operands                 | Hex | Bytes | Mnemonic | Operands                  |
 |-----|-------|----------|--------------------------|-----|-------|----------|---------------------------|
 | 80  | 2     | CMPI1    | Rw, #data4               | 90  | 2     | CMPI2    | Rw, #data4                |
 | 81  | 2     | NEG      | Rw                       | 91  | 2     | CPL      | Rw                        |
@@ -867,28 +867,28 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 
 ![](_page_32_Picture_1.jpeg)
 
-| Hex        | Bytes | Mnemonic | Operands     | Нех | Bytes | Mnemonic | Operands     |
+| Hex        | Bytes | Mnemonic | Operands     | Hex | Bytes | Mnemonic | Operands     |
 |------------|-------|----------|--------------|-----|-------|----------|--------------|
-| A0         | 2     | CMPD1    | Rw, #data4   | ВО  | 2     | CMPD2    | Rw, #data4   |
+| A0         | 2     | CMPD1    | Rw, #data4   | BO  | 2     | CMPD2    | Rw, #data4   |
 | A1         | 2     | NEGB     | Rb           | B1  | 2     | CPLB     | Rb           |
 | A2         | 4     | CMPD1    | Rw, mem      | B2  | 4     | CMPD2    | Rw, mem      |
-| A3         | _     | _        | _            | ВЗ  | _     | _        | _            |
+| A3         | _     | _        | _            | B3  | _     | _        | _            |
 | A4         | 4     | MOVB     | [Rw], mem    | B4  | 4     | MOVB     | mem, [Rw]    |
 | <b>A</b> 5 | 4     | DISWDT   | _            | B5  | 4     | EINIT    | _            |
 | A6         | 4     | CMPD1    | Rw, #data16  | B6  | 4     | CMPD2    | Rw, #data16  |
 | A7         | 4     | SRVWDT   | _            | B7  | 4     | SRST     | _            |
 | A8         | 2     | MOV      | Rw, [Rw]     | B8  | 2     | MOV      | [Rw], Rw     |
 | A9         | 2     | MOVB     | Rb, [Rw]     | B9  | 2     | MOVB     | [Rw], Rb     |
-| AA         | 4     | JBC      | bitaddr, rel | ВА  | 4     | JNBS     | bitaddr, rel |
+| AA         | 4     | JBC      | bitaddr, rel | BA  | 4     | JNBS     | bitaddr, rel |
 | AB         | 2     | CALLI    | cc, [Rw]     | BB  | 2     | CALLR    | rel          |
-| AC         | 2     | ASHR     | Rw, Rw       | ВС  | 2     | ASHR     | Rw, #data4   |
+| AC         | 2     | ASHR     | Rw, Rw       | BC  | 2     | ASHR     | Rw, #data4   |
 | AD         | 2     | JMPR     | cc_SGT, rel  | BD  | 2     | JMPR     | cc_SLE, rel  |
 | AE         | 2     | BCLR     | bitoff.10    | BE  | 2     | BCLR     | bitoff.11    |
 | AF         | 2     | BSET     | bitoff.10    | BF  | 2     | BSET     | bitoff.11    |
 
 ![](_page_33_Picture_1.jpeg)
 
-| Нех | Bytes | Mnemonic | Operands            | Нех | Bytes | Mnemonic                                         | Operands                         |
+| Hex | Bytes | Mnemonic | Operands            | Hex | Bytes | Mnemonic                                         | Operands                         |
 |-----|-------|----------|---------------------|-----|-------|--------------------------------------------------|----------------------------------|
 | C0  | 2     | MOVBZ    | Rw, Rb              | D0  | 2     | MOVBS                                            | Rw, Rb                           |
 | C1  | _     | _        | _                   | D1  | 2     | ATOMIC <sup>2)</sup><br>or EXTR <sup>2)</sup>    | #irang2                          |
@@ -901,7 +901,7 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 | C8  | 2     | MOV      | [Rw], [Rw]          | D8  | 2     | MOV                                              | [Rw+], [Rw]                      |
 | C9  | 2     | MOVB     | [Rw], [Rw]          | D9  | 2     | MOVB                                             | [Rw+], [Rw]                      |
 | CA  | 4     | CALLA    | cc, addr            | DA  | 4     | CALLS                                            | seg, caddr                       |
-| СВ  | 2     | RET      | _                   | DB  | 2     | RETS                                             | _                                |
+| CB  | 2     | RET      | _                   | DB  | 2     | RETS                                             | _                                |
 | CC  | 2     | NOP      | _                   | DC  | 2     | EXTP(R) <sup>2)</sup> ,<br>EXTS(R) <sup>2)</sup> | Rw, #irang2                      |
 | CD  | 2     | JMPR     | cc_SLT, rel         | DD  | 2     | JMPR                                             | cc_SGE, rel                      |
 | CE  | 2     | BCLR     | bitoff.12           | DE  | 2     | BCLR                                             | bitoff.13                        |
@@ -909,7 +909,7 @@ Note: The 8XC166(W) devices also do not recognize ATOMIC and EXTended instructio
 
 ![](_page_34_Picture_1.jpeg)
 
-| Нех        | Bytes | Mnemonic | Operands            | Нех | Bytes | Mnemonic | Operands              |
+| Hex        | Bytes | Mnemonic | Operands            | Hex | Bytes | Mnemonic | Operands              |
 |------------|-------|----------|---------------------|-----|-------|----------|-----------------------|
 | E0         | 2     | MOV      | Rw, #data4          | FO  | 2     | MOV      | Rw, Rw                |
 | E1         | 2     | MOVB     | Rb, #data4          | F1  | 2     | MOVB     | Rb, Rb                |
@@ -943,7 +943,7 @@ The next pages explain the elements of an instruction description (see example),
 | [Data Types | BIT   B           | BIT   BYTE   WORD   DOUBLEWORD] |            |          |               |            |  |
 | Description | Verbal            | descrip                         | tion of t  | he instr | <i>uction</i> | 's effect. |  |
 | [Note       | Additio           | Additional hints.]              |            |          |               |            |  |
-| Condition   | E                 | Z                               | V          | С        | N             |            |  |
+| Condition   | E                 | Z                               | V          | C        | N             |            |  |
 | Flags       | ?                 | ?                               | ?          | ?        | ?             |            |  |
 |             | E Effe            | ect of th                       | nis instru | uction o | n flag i      | E.         |  |
 |             | <b>Z</b> Effe     | ect of th                       | is instru  | uction o | n flag 🏻      | <i>Z</i> . |  |
@@ -1285,7 +1285,7 @@ sum is then stored in op1.
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | * | * |
 
@@ -1325,7 +1325,7 @@ sum is then stored in op1.
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | * | * |
 
@@ -1365,7 +1365,7 @@ Performs a 2's complement binary addition of the source operand specified by op2
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | S | * | * | * |
 
@@ -1405,7 +1405,7 @@ Performs a 2's complement binary addition of the source operand specified by op2
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | S | * | * | * |
 
@@ -1442,7 +1442,7 @@ op2 and the destination operand specified by op1. The result is
 
 then stored in op1.
 
-| Е | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -1478,7 +1478,7 @@ op2 and the destination operand specified by op1. The result is
 
 then stored in op1.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -1653,9 +1653,9 @@ peripheral and system control.
 
 **Condition Flags** 
 
-| E | Z              | V | С | N |
+| E | Z              | V | C | N |
 |---|----------------|---|---|---|
-| 0 | $\overline{B}$ | 0 | 0 | В |
+| 0 | $\overline{B}$ | 0 | 0 | B |
 
 E Always cleared.
 
@@ -1691,7 +1691,7 @@ instructions.
 
 **Condition Flags** 
 
-| Е | Z   | V  | С   | N   |
+| E | Z   | V  | C   | N   |
 |---|-----|----|-----|-----|
 | 0 | NOR | OR | AND | XOR |
 
@@ -1739,7 +1739,7 @@ If the target operand (op1) features bit-protection only the bits marked by a '1
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | 0 | 0 | * |
 
@@ -1787,7 +1787,7 @@ If the target operand (op1) features bit-protection only the bits marked by a '1
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | 0 | 0 | * |
 
@@ -1821,9 +1821,9 @@ examined and the flags are updated accordingly.
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
-| 0 | B | 0 | 0 | В |
+| 0 | B | 0 | 0 | B |
 
 **E** Always cleared.
 
@@ -1855,9 +1855,9 @@ specified by op2 into the destination operand specified by op1. The source bit i
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
-| 0 | B | 0 | 0 | В |
+| 0 | B | 0 | 0 | B |
 
 E Always cleared.
 
@@ -1923,7 +1923,7 @@ peripheral and system control.
 
 | E | Z | V | C | N |
 |---|---|---|---|---|
-| 0 | B | 0 | 0 | В |
+| 0 | B | 0 | 0 | B |
 
 E Always cleared.
 
@@ -1955,7 +1955,7 @@ operand op1. The XORed result is then stored in op1.
 
 Condition Flags
 
-| E | Z   | V  | С   | N   |
+| E | Z   | V  | C   | N   |
 |---|-----|----|-----|-----|
 | 0 | NOR | OR | AND | XOR |
 
@@ -2001,7 +2001,7 @@ The condition codes for op1 are defined in Table 5.
 
 ### Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | - | _ | - |
 
@@ -2059,7 +2059,7 @@ The condition codes for op1 are defined in Table 5.
 
 ### Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | - | - | - |
 
@@ -2107,7 +2107,7 @@ A branch is taken to the location specified by the instruction pointer, IP, plus
 
 Condition Flags
 
-| Е | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | _ | - | - | - |
 
@@ -2161,7 +2161,7 @@ A branch is taken to the absolute location specified by op2 within the segment s
 
 Condition Flags
 
-| Е | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | 1 | - | - |
 
@@ -2204,7 +2204,7 @@ The source operand specified by op1 is compared to the source operand specified 
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -2241,7 +2241,7 @@ The source operand specified by op1 is compared to the source operand specified 
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -2287,7 +2287,7 @@ CMPD1 op1, op2
 
 This instruction is used to enhance the performance and flexibility of loops. The source operand specified by op1 is compared to the source operand specified by op2 by performing a 2's complement binary subtraction of op2 from op1. Operand op1 may specify ONLY GPR registers. Once the subtraction has completed, the operand op1 is decremented by one. Using the set flags, a branch instruction can then be used in conjunction with this instruction to form common high level language FOR loops of any range.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -2319,7 +2319,7 @@ Data Types WORD
 
 of loops. The source operand specified by op1 is compared to the source operand specified by op2 by performing a 2's complement binary subtraction of op2 from op1. Operand op1 may specify ONLY GPR registers. Once the subtraction has completed, the operand op1 is decremented by two. Using the set flags, a branch instruction can then be used in conjunction with this instruction to form common high level language FOR loops of any range.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -2329,7 +2329,7 @@ of loops. The source operand specified by op1 is compared to the source operand 
 - **C** Set if a borrow is generated. Cleared otherwise.
 - **N** Set if the most significant bit of the result is set. Cleared otherwise.
 
-| Addressing | Mnemoni | С                         | Format      | Bytes |
+| Addressing | Mnemoni | C                         | Format      | Bytes |
 |------------|---------|---------------------------|-------------|-------|
 | Modes      | CMPD2   | Rw <sub>n</sub> , #data4  | B0 #n       | 2     |
 |            | CMPD2   | Rw <sub>n</sub> , #data16 | B6 Fn ## ## | 4     |
@@ -2363,7 +2363,7 @@ This instruction is used to enhance the performance and flexibility of loops. Th
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -2411,7 +2411,7 @@ This instruction is used to enhance the performance and flexibility of loops. Th
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -2448,7 +2448,7 @@ op1. The result is stored back into op1.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -2484,7 +2484,7 @@ Performs a 1's complement of the source operand specified by op1. The result is 
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -2520,7 +2520,7 @@ implemented as a protected instruction.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 1 | - | - | 1 | - |
 
@@ -2638,7 +2638,7 @@ Please see additional description on Page 40.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | S | 0 | * |
 
@@ -2680,7 +2680,7 @@ Please see additional description on Page 40.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | S | 0 | * |
 
@@ -2720,7 +2720,7 @@ implemented as a protected instruction.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | _ | _ | _ | - |
 
@@ -2828,7 +2828,7 @@ The EXTP instruction is not available in the SAB 8XC166(W) devices.
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | - | - | - |
 
@@ -2910,7 +2910,7 @@ devices.
 
 **Condition** Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | _ | - | - | - |
 
@@ -3057,7 +3057,7 @@ devices.
 |------------------|
 | Flags            |
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | - | - | - |
 
@@ -3150,7 +3150,7 @@ executed.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | - | _ | _ |
 
@@ -3202,9 +3202,9 @@ If the bit specified by op1 is set, program execution continues at the location 
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
-| 0 | B | 0 | 0 | В |
+| 0 | B | 0 | 0 | B |
 
 E Always cleared.
 
@@ -3266,7 +3266,7 @@ The condition codes for op1 are defined in Table 5.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | - | - | - |
 
@@ -3322,7 +3322,7 @@ Note The condition codes for op1 are defined in Table 5.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | - | - | - |
 
@@ -3372,7 +3372,7 @@ The condition codes for op1 are defined in Table 5.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | - | _ | - |
 
@@ -3404,7 +3404,7 @@ within the segment specified by op1.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | - | - | - |
 
@@ -3500,9 +3500,9 @@ If the bit specified by op1 is clear, program execution continues at the locatio
 
 # Condition Flags
 
-| Е | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
-| 0 | B | 0 | 0 | В |
+| 0 | B | 0 | 0 | B |
 
 **E** Always cleared.
 
@@ -3546,7 +3546,7 @@ location specified by the destination operand op1. The contents of the moved dat
 
 accordingly.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | - | - | * |
 
@@ -3644,7 +3644,7 @@ condition codes are updated accordingly.
 
 ## Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | - | _ | * |
 
@@ -3729,7 +3729,7 @@ Please see additional description on Page 40.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | S | 0 | * |
 
@@ -3771,7 +3771,7 @@ Please see additional description on Page 40.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | S | 0 | * |
 
@@ -3803,7 +3803,7 @@ by op1. The result is then stored in op1.
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -3831,7 +3831,7 @@ by op1. The result is then stored in op1.
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -3857,7 +3857,7 @@ operation causes no change in the status of the flags.
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | _ | - | - |
 
@@ -3889,7 +3889,7 @@ op2 and the destination operand specified by op1. The result is
 
 then stored in op1.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -3925,7 +3925,7 @@ op2 and the destination operand specified by op1. The result is
 
 then stored in op1.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -4015,7 +4015,7 @@ Pops one word from the system stack specified by the Stack Pointer into the oper
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | - | - | * |
 
@@ -4067,7 +4067,7 @@ and the zero flag is set. Otherwise the zero flag is cleared.
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | 0 | 0 | 0 |
 
@@ -4112,7 +4112,7 @@ Moves the word specified by operand op1 to the location in the internal system s
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | - | - | * |
 
@@ -4160,7 +4160,7 @@ implemented as a protected instruction.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | _ | _ | - |
 
@@ -4242,7 +4242,7 @@ Returns from an interrupt routine. The PSW, IP, and CSP are popped off the syste
 
 **Condition Flags** 
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | S | S | S | S | S |
 
@@ -4322,7 +4322,7 @@ instruction following the CALLS instruction in the calling routine.
 
 **Condition Flags** 
 
-| Е | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | - | - | - |
 
@@ -4458,7 +4458,7 @@ push and load operation. The contents of the register specified by the first ope
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | - | - | - | - | - |
 
@@ -4510,7 +4510,7 @@ Shifts the destination word operand op1 left by as many times as specified by th
 
 # Condition Flags
 
-| Е | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | 0 | S | * |
 
@@ -4567,7 +4567,7 @@ $$(count) \leftarrow (count) - 1$$
 
 Shifts the destination word operand op1 right by as many times as specified by the source operand op2. The most significant bits of the result are filled with zeros accordingly. Since the bits shifted out effectively represent the remainder, the Overflow flag is used instead as a Rounding flag. This flag together with the Carry flag helps the user to determine whether the remainder bits lost were greater than, less than or equal to one half an LSB. Only shift values between 0 and 15 are allowed. When using a GPR as the count control, only the least significant 4 bits are used.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | * | S | S | * |
 
@@ -4604,7 +4604,7 @@ implemented as a protected instruction.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | 0 | 0 | 0 | 0 | 0 |
 
@@ -4642,7 +4642,7 @@ implemented as a protected instruction.
 
 Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | _ | - | - | - | - |
 
@@ -4674,7 +4674,7 @@ Performs a 2's complement binary subtraction of the source operand specified by 
 
 # Condition Flags
 
-| <u>E</u> | Z | V | С | N |
+| <u>E</u> | Z | V | C | N |
 |----------|---|---|---|---|
 | *        | * | * | S | * |
 
@@ -4712,7 +4712,7 @@ Performs a 2's complement binary subtraction of the source operand specified by 
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | * | S | * |
 
@@ -4758,7 +4758,7 @@ Performs a 2's complement binary subtraction of the source operand specified by 
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | S | * | S | * |
 
@@ -4798,7 +4798,7 @@ Performs a 2's complement binary subtraction of the source operand specified by 
 
 # Condition Flags
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | S | * | S | * |
 
@@ -4876,7 +4876,7 @@ specified by op2 and the destination operand specified by op1. The
 
 result is then stored in op1.
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -4916,7 +4916,7 @@ result is then stored in op1.
 
 # **Condition Flags**
 
-| E | Z | V | С | N |
+| E | Z | V | C | N |
 |---|---|---|---|---|
 | * | * | 0 | 0 | * |
 
@@ -5454,7 +5454,7 @@ This section lists a number of keywords which refer to specific details of the C
 | branch target 8, 139             |                               |
 | data 8                           | F                             |
 | Arithmetic instructions 10       | Flags 35                      |
-| В                                | Format of instructions 31     |
+| B                                | Format of instructions 31     |
 | Bit manipulation instructions 15 |                               |
 | Branch                           | Indirect addressing 135       |
 | condition codes 9, 38            | Instruction                   |

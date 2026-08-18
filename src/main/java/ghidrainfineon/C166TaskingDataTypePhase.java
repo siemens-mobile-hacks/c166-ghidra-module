@@ -5,9 +5,6 @@ import java.util.Iterator;
 import java.util.List;
 
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
-import ghidra.app.services.AbstractAnalyzer;
-import ghidra.app.services.AnalysisPriority;
-import ghidra.app.services.AnalyzerType;
 import ghidra.app.services.ConsoleService;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
@@ -28,27 +25,19 @@ import ghidra.util.task.TaskMonitor;
  * Normalizes implementation-defined C library types for the documented
  * TASKING C166 Classic data model.
  */
-public class C166TaskingDataTypeAnalyzer extends AbstractAnalyzer {
+public class C166TaskingDataTypePhase extends C166TaskingTypeInferencePhase {
 
-	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String SIZE_T_PATH = "/stddef.h/size_t";
 	private static final String STDDEF_CATEGORY = "/stddef.h";
 	private static final String SIZE_T_CONFLICT_PREFIX = "size_t.conflict";
 
-	public C166TaskingDataTypeAnalyzer() {
-		super("C166 TASKING Data Types",
-			"Normalizes TASKING Classic implementation-defined C library types.",
-			AnalyzerType.BYTE_ANALYZER);
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION);
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
+	public C166TaskingDataTypePhase() {
+		super("C166 TASKING Data Types");
 	}
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return program.getLanguageID().getIdAsString().startsWith("C166:") &&
-			COMPILER_ID.equals(
-				program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override

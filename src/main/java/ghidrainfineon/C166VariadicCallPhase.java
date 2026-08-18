@@ -12,12 +12,10 @@ import java.util.Set;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
-import ghidra.app.services.AbstractAnalyzer;
-import ghidra.app.services.AnalysisPriority;
-import ghidra.app.services.AnalyzerType;
 import ghidra.app.services.ConsoleService;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.data.DataType;
@@ -30,6 +28,7 @@ import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.lang.Register;
+import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
@@ -65,29 +64,21 @@ import ghidra.util.task.TaskMonitor;
  * and decompiler-recovered call inputs.  It has no knowledge of library names,
  * firmware addresses, format strings, or string contents.
  */
-public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
+public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 
-	private static final String COMPILER_ID = "tasking-classic-large";
 	private static final String CALLING_CONVENTION = "__tasking_c166_classic";
 	private static final String VARARG_CONVENTION_PREFIX =
 		"__tasking_c166_classic_vararg_";
 	private static final String GENERATED_SIGNATURE_NAME = "c166_variadic_call";
 	private static final int DECOMPILE_TIMEOUT_SECONDS = 30;
 
-	public C166VariadicCallAnalyzer() {
-		super("C166 TASKING Variadic Calls",
-			"Preserves fixed compound parameters at TASKING Classic variadic call sites.",
-			AnalyzerType.FUNCTION_ANALYZER);
-		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after());
-		setDefaultEnablement(true);
-		setSupportsOneTimeAnalysis();
+	public C166VariadicCallPhase() {
+		super("C166 TASKING Variadic Calls");
 	}
 
 	@Override
 	public boolean canAnalyze(Program program) {
-		return program.getLanguageID().getIdAsString().startsWith("C166:") &&
-			COMPILER_ID.equals(
-				program.getCompilerSpec().getCompilerSpecID().getIdAsString());
+		return C166ArchitectureProfile.isTaskingClassicLarge(program);
 	}
 
 	@Override
@@ -110,6 +101,7 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		int failedFunctions = 0;
 		int fallbackOverrides = 0;
 		Set<Function> refinementCallers = new LinkedHashSet<>();
+		BasicBlockModel basicBlocks = new BasicBlockModel(program);
 
 		DecompInterface decompiler = new DecompInterface();
 		decompiler.toggleCCode(false);
@@ -130,7 +122,7 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 				if (!result.decompileCompleted() || result.getHighFunction() == null) {
 					failedFunctions++;
 					fallbackOverrides += addCleanupFallbackOverrides(program, caller,
-						variadicTargets, log);
+						variadicTargets, basicBlocks, monitor, log);
 					continue;
 				}
 				Set<Address> removedOverrideSites = repairInvalidPrototypeOverrides(program,
@@ -141,7 +133,7 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 					if (!result.decompileCompleted() || result.getHighFunction() == null) {
 						failedFunctions++;
 						int recovered = addCleanupFallbackOverrides(program, caller,
-							variadicTargets, log);
+							variadicTargets, basicBlocks, monitor, log);
 						fallbackOverrides += recovered;
 						replacedOverrides += Math.min(recovered, removedOverrideSites.size());
 						continue;
@@ -186,7 +178,9 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 							// Raw variadic recovery may shuffle fixed compound trials ahead of
 							// real optional inputs. First align the CALL with a word override;
 							// typed optional recovery is safe on the refinement pass below.
-							override = buildFallbackOverride(program, target, optionalWords);
+							override = buildFallbackOverride(program, target,
+								recoveredSetupOptionalTypes(program, caller, callInstruction,
+									target, optionalWords, basicBlocks, monitor));
 							fallbackOverrides++;
 							refinementCallers.add(caller);
 						}
@@ -409,6 +403,56 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		return createOverride(program, target, parameters);
 	}
 
+	private List<DataType> recoveredSetupOptionalTypes(Program program, Function caller,
+			Instruction call, Function target, int optionalWordCount, BasicBlockModel blocks,
+			TaskMonitor monitor) throws CancelledException {
+		C166TaskingCallArguments.CallWords words =
+			C166TaskingCallArguments.recover(program, caller, call, blocks, monitor);
+		int slot = 4 + fixedStackWords(target);
+		List<DataType> result = new ArrayList<>();
+		for (int consumed = 0; consumed < optionalWordCount;) {
+			C166TaskingCallArguments.WordValue low = words.words().get(slot + consumed);
+			C166TaskingCallArguments.WordValue high =
+				words.words().get(slot + consumed + 1);
+			DataType pointer = loadedPointerType(program, low, high);
+			if (pointer != null && consumed + 1 < optionalWordCount) {
+				result.add(pointer);
+				consumed += 2;
+			}
+			else {
+				result.add(Undefined.getUndefinedDataType(2));
+				consumed++;
+			}
+		}
+		return result;
+	}
+
+	private int fixedStackWords(Function target) {
+		int words = 0;
+		for (Parameter parameter : target.getParameters()) {
+			VariableStorage storage = parameter.getVariableStorage();
+			if (!storage.hasStackStorage() || storage.getStackOffset() < 0) {
+				continue;
+			}
+			int end = storage.getStackOffset() + storage.size();
+			words = Math.max(words, (end + 1) / 2);
+		}
+		return words;
+	}
+
+	private DataType loadedPointerType(Program program,
+			C166TaskingCallArguments.WordValue low,
+			C166TaskingCallArguments.WordValue high) {
+		if (low == null || high == null || low.loadAddress() == null ||
+			high.loadAddress() == null ||
+			!high.loadAddress().equals(low.loadAddress().add(2))) {
+			return null;
+		}
+		Data data = program.getListing().getDefinedDataAt(low.loadAddress());
+		return data != null && data.getLength() == 4 && isPointer(data.getDataType())
+			? currentFormalType(program, data.getDataType()) : null;
+	}
+
 	private List<DataType> recoveredOptionalTypes(Program program, PcodeOp call,
 			int optionalWordCount, int firstOptionalInput) {
 		int remainingBytes = optionalWordCount * 2;
@@ -491,6 +535,10 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 		if (low.getSize() != 2 || high.getSize() != 2) {
 			return null;
 		}
+		DataType loadedPointer = adjacentLoadedPointerType(program, low, high);
+		if (loadedPointer != null) {
+			return loadedPointer;
+		}
 		PieceOrigin lowOrigin = pieceOrigin(low, 0, 0, new HashSet<>());
 		PieceOrigin highOrigin = pieceOrigin(high, 0, 0, new HashSet<>());
 		if (lowOrigin != null && highOrigin != null &&
@@ -530,6 +578,104 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 			pointer = pointerEvidence(high, 0, new HashSet<>());
 		}
 		return pointer == null ? null : currentFormalType(program, pointer);
+	}
+
+	/**
+	 * Recover a typed far pointer loaded as two direct 16-bit words.
+	 *
+	 * <p>The C166 p-code keeps DPP as a live architectural register.  That is
+	 * required for code which changes DPP inside a function, but it also means
+	 * an operand-reference side effect is no longer guaranteed to carry the
+	 * type of a static four-byte object into both word trials of an old variadic
+	 * override.  The semantic evidence is the object itself: adjacent LOADs at
+	 * offsets 0 and 2 of one defined four-byte pointer.</p>
+	 */
+	private DataType adjacentLoadedPointerType(Program program, Varnode low, Varnode high) {
+		Long lowAddress = loadedAddress(low, 0, new HashSet<>());
+		Long highAddress = loadedAddress(high, 0, new HashSet<>());
+		if (lowAddress == null || highAddress == null || highAddress != lowAddress + 2) {
+			return null;
+		}
+		Data data = program.getListing().getDefinedDataAt(toAddress(program, lowAddress));
+		if (data == null || data.getLength() != 4 || !isPointer(data.getDataType())) {
+			return null;
+		}
+		return currentFormalType(program, data.getDataType());
+	}
+
+	private Address toAddress(Program program, long offset) {
+		return program.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
+	}
+
+	private Long loadedAddress(Varnode node, int depth, Set<Varnode> visited) {
+		if (node == null || depth > 24 || !visited.add(node)) {
+			return null;
+		}
+		PcodeOp definition = node.getDef();
+		if (definition == null) {
+			return null;
+		}
+		switch (definition.getOpcode()) {
+			case PcodeOp.LOAD:
+				return definition.getNumInputs() < 2 ? null :
+					constantValue(definition.getInput(1), depth + 1, new HashSet<>());
+			case PcodeOp.COPY:
+			case PcodeOp.CAST:
+			case PcodeOp.INT_ZEXT:
+			case PcodeOp.INT_SEXT:
+			case PcodeOp.SUBPIECE:
+			case PcodeOp.INDIRECT:
+				return loadedAddress(definition.getInput(0), depth + 1, visited);
+			default:
+				return null;
+		}
+	}
+
+	private Long constantValue(Varnode node, int depth, Set<Varnode> visited) {
+		if (node == null || depth > 24 || !visited.add(node)) {
+			return null;
+		}
+		if (node.isConstant() || node.isAddress()) {
+			return node.getOffset();
+		}
+		PcodeOp definition = node.getDef();
+		if (definition == null) {
+			return null;
+		}
+		Long left;
+		Long right;
+		switch (definition.getOpcode()) {
+			case PcodeOp.COPY:
+			case PcodeOp.CAST:
+			case PcodeOp.INT_ZEXT:
+			case PcodeOp.INT_SEXT:
+				return constantValue(definition.getInput(0), depth + 1, visited);
+			case PcodeOp.SEGMENTOP:
+				if (definition.getNumInputs() < 3) {
+					return null;
+				}
+				left = constantValue(definition.getInput(1), depth + 1, new HashSet<>());
+				right = constantValue(definition.getInput(2), depth + 1, new HashSet<>());
+				return left == null || right == null ? null :
+					((left & 0x3ffL) << 14) | (right & 0x3fffL);
+			case PcodeOp.INT_ADD:
+			case PcodeOp.INT_OR:
+			case PcodeOp.INT_AND:
+			case PcodeOp.INT_LEFT:
+				left = constantValue(definition.getInput(0), depth + 1, new HashSet<>());
+				right = constantValue(definition.getInput(1), depth + 1, new HashSet<>());
+				if (left == null || right == null) {
+					return null;
+				}
+				return switch (definition.getOpcode()) {
+					case PcodeOp.INT_ADD -> left + right;
+					case PcodeOp.INT_OR -> left | right;
+					case PcodeOp.INT_AND -> left & right;
+					default -> left << right;
+				};
+			default:
+				return null;
+		}
 	}
 
 	private boolean sameHighValue(Varnode left, Varnode right) {
@@ -929,7 +1075,8 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 	}
 
 	private int addCleanupFallbackOverrides(Program program, Function caller,
-			Map<Address, Function> variadicTargets, MessageLog log) {
+			Map<Address, Function> variadicTargets, BasicBlockModel blocks,
+			TaskMonitor monitor, MessageLog log) throws CancelledException {
 		Listing listing = program.getListing();
 		int added = 0;
 		for (Instruction instruction : listing.getInstructions(caller.getBody(), true)) {
@@ -953,7 +1100,8 @@ public class C166VariadicCallAnalyzer extends AbstractAnalyzer {
 				continue;
 			}
 			FunctionDefinitionDataType override = buildFallbackOverride(program, target,
-				optionalWords);
+				recoveredSetupOptionalTypes(program, caller, instruction, target,
+					optionalWords, blocks, monitor));
 			if (override == null) {
 				continue;
 			}

@@ -39,7 +39,8 @@ structure return values.
 Patches in `ghidra-patched` must not change the behavior of unrelated
 architectures.  A Ghidra core fix must either preserve a general existing API
 contract in an architecture-neutral way and include regression coverage, or be
-strictly gated to the C166 language and `tasking-classic-large` compiler spec.
+strictly gated by the exact `c166.abi=tasking-classic-large` processor-spec
+property.
 Before accepting a core patch, verify that non-C166 compiler specs retain their
 existing parameter, return-storage, and decompiler behavior.
 
@@ -59,6 +60,11 @@ is explicitly requested, apply this sequence to both `c166-ghidra-module` and
    verification for complex decompiler or analysis fixes.
 4. Commit the reviewed changes, push the branch, create the next version tag,
    and push that tag.
+
+## Documentation language
+
+Write and maintain all repository documentation in English, including README
+content, design notes, bug reports, plans, test reports, and agent guidance.
 
 ---
 
@@ -99,25 +105,29 @@ The C166 is a **16-bit microcontroller** with a **24-bit address space**. The ke
 GhidraInfineon/
 ├── data/
 │   ├── languages/
-│   │   ├── c166.slaspec       # Main SLEIGH entry point
 │   │   ├── c166.sinc          # SLEIGH instruction definitions
 │   │   ├── c166_tasking_classic_large.slaspec # TASKING Classic language entry point
-│   │   ├── c166.cspec         # Compiler specification (calling conventions, callotherfixup)
 │   │   ├── c166_tasking_classic_large.cspec # TASKING Classic 7.5 large ABI
 │   │   ├── c166.ldefs         # Language definitions
-│   │   ├── c166cr.pspec       # Processor spec for C167CR (includes segmentop)
-│   │   ├── c167cs.pspec       # Processor spec for C167CS (includes segmentop)
-│   │   └── c166.sla           # Compiled SLEIGH (auto-generated, delete to rebuild)
+│   │   ├── c166cr_tasking_classic_large.pspec # C167CR profile and segmentop
+│   │   ├── c167cs_tasking_classic_large.pspec # C167CS profile and segmentop
+│   │   └── c166_tasking_classic_large.sla # Compiled SLEIGH (auto-generated)
 │   └── patterns/
 │       ├── patternconstraints.xml # Associates patterns with both C166 languages
 │       └── C166_patterns.xml      # Conservative TASKING function starts
 ├── src/main/java/ghidrainfineon/
 │   ├── C166AddressAnalyzer.java   # DPP-aware address resolution analyzer
 │   ├── C166CallTargetAnalyzer.java # Incrementally extends the static call graph
-│   ├── C166CodePointerAnalyzer.java # Infers SEGMENT:OFFSET code-pointer arguments
-│   ├── C166FarPointerAnalyzer.java # Infers PAGE:OFFSET parameters from data flow
+│   ├── C166ArchitectureProfile.java # Exact pspec-selected ABI gate
+│   ├── C166TaskingTypeInferenceAnalyzer.java # Sole automatic type-inference owner
+│   ├── C166TaskingTypeInferencePhase.java # Non-discoverable phase contract
+│   ├── C166TaskingDataTypePhase.java # Internal ABI data-type phase
+│   ├── C166CodePointerPhase.java # Internal code/scalar phase
+│   ├── C166FarPointerPhase.java # Internal PAGE:OFFSET data phase
+│   ├── C166PointerReturnPhase.java # Internal return-type phase
 │   ├── C166TaskingRuntimeAnalyzer.java # Models known TASKING double helpers
-│   ├── C166VariadicCallAnalyzer.java # Repairs typed variadic call sites
+│   ├── C166VariadicCallPhase.java # Internal variadic phase
+│   ├── C166PagedAddressEmitter.java # Shared DPP/EXTP/EXTS p-code emitter
 │   ├── PcodeInject.java           # PCode injection library registration
 │   ├── GetPagedOffset.java        # Injector for static address paging
 │   ├── SwitchLoad.java            # Injector for switch table loads
@@ -134,10 +144,9 @@ GhidraInfineon/
 | File | Purpose |
 |------|---------|
 | **c166.sinc** | Defines all C166 instructions, registers, and pcodeops. This is where `GetPagedOffset`, `segment`, and `c166_switch_load` are defined. |
-| **c166_tasking_classic_large.slaspec** | Compiles the shared instructions under the distinct TASKING Classic large-model language ID; legacy languages use `c166.slaspec`. |
+| **c166_tasking_classic_large.slaspec** | Compiles the shared instructions for the only supported ABI, TASKING Classic large. |
 | **c166_tasking_classic_large.cspec** | Defines the TASKING Classic 7.5 large-model data organization and ABI. |
-| **c166.cspec** | Defines `callotherfixup` entries that map pcodeops to Java injectors. The `dynamic="true"` attribute enables runtime PCode injection. |
-| **c166cr.pspec / c167cs.pspec** | Defines `segmentop` which tells the decompiler how to interpret `segment()` PCode for address calculation. |
+| **c166cr_tasking_classic_large.pspec / c167cs_tasking_classic_large.pspec** | Select the exact `c166.abi` profile and define `segmentop`. |
 | **PcodeInject.java** | Registers custom PCode injectors (`GetPagedOffset`, `SwitchLoad`) with Ghidra's language system. |
 
 ---
@@ -191,7 +200,7 @@ jmpi [rX]  →  target = (current_IP & 0xFF0000) | rX_value
    define pcodeop c166_switch_load;
    ```
 
-2. **Compiler Spec** (`c166.cspec`) maps pcodeops to injectors:
+2. **Compiler Spec** (`c166_tasking_classic_large.cspec`) maps pcodeops to injectors:
    ```xml
    <callotherfixup targetop="c166_switch_load">
        <pcode dynamic="true">
@@ -201,7 +210,7 @@ jmpi [rX]  →  target = (current_IP & 0xFF0000) | rX_value
    </callotherfixup>
    ```
 
-3. **Processor Spec** (`c166cr.pspec`) registers the inject library:
+3. **Processor Spec** (`c166cr_tasking_classic_large.pspec`) registers the inject library:
    ```xml
    <property key="pcodeInjectLibraryClass" value="ghidrainfineon.PcodeInject"/>
    ```
@@ -281,6 +290,22 @@ This tells the decompiler: "At this address, there's a switch with these targets
 ---
 
 ## Analyzers
+
+### C166TaskingTypeInferenceAnalyzer
+
+This is the only type-inference analyzer exposed to Auto Analysis. It owns the
+ordered normalization and classification of scalar, far-data, function-pointer,
+return, and variadic types. Specialized implementations must remain ordinary
+`C166TaskingTypeInferencePhase` classes, never `Analyzer` extension points, so
+Ghidra cannot expose, enable, or schedule them independently. Any new inference
+must preserve the signature snapshot across a second complete pass and across
+standalone code/data phase probes.
+
+### C166ArchitectureProfile
+
+Every TASKING-specific analyzer must gate exclusively on the pspec property
+`c166.abi=tasking-classic-large`. Do not recreate architecture checks from
+processor names, language-ID prefixes, compiler IDs, userops, or pointer sizes.
 
 ### C166AddressAnalyzer
 
@@ -512,12 +537,11 @@ Switches compiled with unusual optimization may not match the expected pattern. 
 
 ### 4. Far Pointers
 
-The legacy language keeps its original 3-byte pointer model.  TASKING C166
-Classic 7.5 large-model programs must use the separate
-`tasking-classic-large` language/compiler spec, which models C pointers as
-4-byte `_far` `PAGE:OFFSET` values.  The huge model instead defaults to 4-byte
-`_huge` `SEGMENT:OFFSET` pointers and is not supported by this language.
-Aggregate returns and generic far-pointer arithmetic remain incomplete.
+Only TASKING C166 Classic 7.5 large-model programs are supported. The
+`tasking-classic-large` language/compiler spec models C pointers as 4-byte
+`_far` `PAGE:OFFSET` values. The huge model instead defaults to 4-byte `_huge`
+`SEGMENT:OFFSET` pointers and is not supported. Aggregate returns and generic
+far-pointer arithmetic remain incomplete.
 
 ---
 
@@ -546,9 +570,9 @@ Aggregate returns and generic far-pointer arithmetic remain incomplete.
 | Task | Files |
 |------|-------|
 | Add new instruction | `c166.sinc` |
-| Add PCode injection | `c166.sinc`, `c166.cspec`, `PcodeInject.java`, new Java class |
-| Change address translation | `C166AddressAnalyzer.java` |
-| Add SFR symbol | `c166cr.pspec` or `c167cs.pspec` |
+| Add PCode injection | `c166.sinc`, `c166_tasking_classic_large.cspec`, `PcodeInject.java`, new Java class |
+| Change address translation | `C166PagedAddressEmitter.java`, the relevant injector, and `C166AddressAnalyzer.java` |
+| Add SFR symbol | `c166cr_tasking_classic_large.pspec` or `c167cs_tasking_classic_large.pspec` |
 
 ---
 
