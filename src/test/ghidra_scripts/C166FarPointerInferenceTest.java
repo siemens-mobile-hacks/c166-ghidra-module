@@ -193,7 +193,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		setUserParameters(typedWordPointerTarget, wordPointer);
 		Function wordPointerWrapper = fixture("word_pointer_wrapper",
 			calls(typedWordPointerTarget));
-		// M55 FUN_747f44 shape: a stale generic R15:R14 pointer is only an
+		// firmware FUN_747f44 shape: a stale generic R15:R14 pointer is only an
 		// artifact of an earlier analysis pass.  The wrapper forwards R14 and
 		// R15 to two independently typed uint16_t parameters of sys_open.
 		Function typedScalarForwardTarget = fixture("typed_scalar_forward_target",
@@ -202,7 +202,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		Function staleMixedForwarder = fixture("repair_forwarded_scalar_pair_pointer",
 			calls(typedScalarForwardTarget));
 		setAnalysisPointerAndPointer(staleMixedForwarder, "path", "flags_and_mode");
-		// M55 FUN_37d574 shape: an existing word-wise ANALYSIS signature forwards
+		// firmware FUN_37d574 shape: an existing word-wise ANALYSIS signature forwards
 		// two late stack words into a typed four-byte callee parameter.  The callee
 		// storage, not a speculative HighFunction pointer type, proves the join.
 		Function lateStackPointerTarget = fixture("late_stack_pointer_target",
@@ -268,7 +268,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("constant_callsite_caller_b",
 			constantPairCall(constantSeedStore, 0x316a, 0x158));
 		// A stale generic code pointer cannot survive repeated PAGE values above
-		// the 8-bit C166 code-segment limit.  This is the M55 FUN_c393da failure
+		// the 8-bit C166 code-segment limit.  This is the firmware FUN_c393da failure
 		// mode which otherwise makes the decompiler map raw 0x1950e3b.
 		Function staleGenericCodePointer = fixture(
 			"repair_impossible_generic_code_pointer", bytes(0xdb, 0x00));
@@ -299,7 +299,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("typed_variadic_caller_b",
 			constantPairCallAtSlot2(typedVariadicTarget, 0x316a, 0x158));
 
-		// M55 FUN_99b53a shape: R12 is tested as a boolean while R13 is an
+		// firmware FUN_99b53a shape: R12 is tested as a boolean while R13 is an
 		// independent LGP id.  The adjacent constants (1, 0x2c3) happen to decode
 		// to mapped address 0xb0c001, but scalar use in the callee must defeat the
 		// constant-only seed.  Cover both a fresh signature and repair of a stale
@@ -324,7 +324,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("scalar_pair_stale_caller_b",
 			constantPairCall(staleScalarPair, 0x0001, 0x02c3));
 
-		// M55 FUN_c3ca42 shape: an old generic pointer survives because the wrapper
+		// firmware FUN_c3ca42 shape: an old generic pointer survives because the wrapper
 		// forwards it before either word is tested.  A complete call-site rectangle
 		// proves that both words vary independently: (0x39,0xae/0xaf) and
 		// (0x3b,0xae/0xaf).  The scalar fact also follows a literal entry call into
@@ -360,7 +360,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("fresh_rectangle_caller_3b_af",
 			constantPairCall(freshRectangleScalarPair, 0x003b, 0x00af));
 
-		// M55 FUN_c3ca4a shape: both scalar words are spilled before a call, then
+		// firmware FUN_c3ca4a shape: both scalar words are spilled before a call, then
 		// an unrelated returned R5:R4 pointer is dereferenced.  That EXTP must not
 		// suppress the scalar rectangle for R13:R12.
 		Function unrelatedPointerProducer = fixture(
@@ -452,7 +452,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		Function analysisDword = fixture("analysis_dword_preserved", pagedRead(13, 12));
 		setAnalysisDword(analysisDword, "candidate");
 		// A manually rerun far-data pass must never demote a code pointer inferred
-		// by the later-priority code analyzer.  Real M55 wrappers can produce
+		// by the later-priority code analyzer.  Real firmware wrappers can produce
 		// apparent paged evidence while forwarding allocator callbacks.
 		Function codePointerWithPagedEvidence = fixture(
 			"code_pointer_survives_paged_evidence", pagedRead(13, 12));

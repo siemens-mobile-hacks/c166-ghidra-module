@@ -188,6 +188,8 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			packedScalarPairs);
 		Map<Function, Set<Integer>> scalarPairs = unionScalarPairs(independentScalarPairs,
 			packedScalarPairs);
+		int recoveredStackParameters = recoverMissingFixedStackParameters(program,
+			callWordsByTarget, log);
 		Map<Function, Set<Integer>> supportedEvidenceByTarget =
 			mutableSetMap(semanticEvidenceByTarget);
 		Map<Function, Set<Integer>> forwardingEvidenceByTarget =
@@ -249,9 +251,106 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			" independent-word, " +
 			packedScalarPairs.values().stream().mapToInt(Set::size).sum() +
 			" packed), repaired " + repairedPointers +
-			" stale generic pointer(s), " + ambiguousFunctions.size() +
+			" stale generic pointer(s), recovered " + recoveredStackParameters +
+			" missing fixed stack word(s), " + ambiguousFunctions.size() +
 			" ambiguous.");
 		return true;
+	}
+
+	/**
+	 * Caller cleanup is exact ABI evidence for fixed user-stack arguments.  If
+	 * every observed call to a non-variadic ANALYSIS/DEFAULT function cleans the
+	 * same number of words, all four register slots are already occupied, and
+	 * every corresponding push was recovered, append only the missing stack
+	 * words.  This repairs parameters prepared before a nested call without
+	 * guessing from register liveness or from one decompiler result.
+	 */
+	private int recoverMissingFixedStackParameters(Program program,
+			Map<Function, List<C166TaskingCallArguments.CallWords>> callsByTarget,
+			MessageLog log) {
+		int recovered = 0;
+		for (Map.Entry<Function, List<C166TaskingCallArguments.CallWords>> entry :
+				callsByTarget.entrySet()) {
+			Function function = entry.getKey();
+			List<C166TaskingCallArguments.CallWords> calls = entry.getValue();
+			if (calls.isEmpty() || function.hasVarArgs() || !mayUpdate(function) ||
+				!usesTaskingConvention(function) || !registerParameterBankOccupied(function)) {
+				continue;
+			}
+			int expectedWords = calls.get(0).stackArgumentWords();
+			if (expectedWords == 0 || calls.stream().anyMatch(call ->
+				!call.registerBankOccupied() ||
+				call.stackArgumentWords() != expectedWords ||
+				!hasCompleteStackWords(call, expectedWords))) {
+				continue;
+			}
+			int existingWords = fixedStackWords(function);
+			if (expectedWords <= existingWords) {
+				continue;
+			}
+			try {
+				List<Variable> parameters = new ArrayList<>();
+				for (Parameter parameter : function.getParameters()) {
+					parameters.add(new ParameterImpl(existingName(parameter),
+						parameter.getFormalDataType(), program));
+				}
+				for (int word = existingWords; word < expectedWords; word++) {
+					parameters.add(new ParameterImpl(null,
+						Undefined.getUndefinedDataType(2), program));
+				}
+				function.updateFunction(CALLING_CONVENTION, null, parameters,
+					FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
+					SourceType.ANALYSIS);
+				recovered += expectedWords - existingWords;
+			}
+			catch (DuplicateNameException | InvalidInputException e) {
+				log.appendException(e);
+			}
+		}
+		return recovered;
+	}
+
+	private boolean hasCompleteStackWords(C166TaskingCallArguments.CallWords call,
+			int expectedWords) {
+		for (int word = 0; word < expectedWords; word++) {
+			C166TaskingCallArguments.WordValue value = call.words().get(4 + word);
+			if (value == null || !value.defined()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean registerParameterBankOccupied(Function function) {
+		boolean[] occupied = new boolean[4];
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (start == null || start >= 4) {
+				continue;
+			}
+			int words = (parameter.getVariableStorage().size() + 1) / 2;
+			for (int word = 0; word < words && start + word < occupied.length; word++) {
+				occupied[start + word] = true;
+			}
+		}
+		for (boolean word : occupied) {
+			if (!word) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private int fixedStackWords(Function function) {
+		int words = 0;
+		for (Parameter parameter : function.getParameters()) {
+			VariableStorage storage = parameter.getVariableStorage();
+			if (storage.hasStackStorage() && storage.getStackOffset() >= 0) {
+				words = Math.max(words,
+					(storage.getStackOffset() + storage.size() + 1) / 2);
+			}
+		}
+		return words;
 	}
 
 	/**

@@ -1,4 +1,4 @@
-// Real M55 regression for TASKING Large far-data-pointer returns in R5:R4.
+// Real firmware regression for TASKING Large far-data-pointer returns in R5:R4.
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
@@ -14,12 +14,12 @@ import ghidrainfineon.C166FarPointerPhase;
 import ghidrainfineon.C166PointerReturnPhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
-public class C166M55ReturnPointerHeadlessTest extends GhidraScript {
+public class C166ReturnPointerHeadlessTest extends GhidraScript {
 	@Override
 	protected void run() throws Exception {
 		check("tasking-classic-large".equals(
 			currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString()),
-			"M55 test is not using TASKING Classic large");
+			"firmware test is not using TASKING Classic large");
 		boolean hiddenFunctionsMissing = getFunctionAt(toAddr(0x2590ce)) == null ||
 			getFunctionAt(toAddr(0x259214)) == null ||
 			getFunctionAt(toAddr(0x25911a)) == null ||
@@ -84,7 +84,7 @@ public class C166M55ReturnPointerHeadlessTest extends GhidraScript {
 		check(!swTeamCode.contains("(void *)FUN_2590ce") &&
 			!swTeamCode.contains("(void *)func_0x2590ce"),
 			"FUN_259214 still casts the split FUN_2590ce return:\n" + swTeamCode);
-		println("M55 TASKING far-pointer return regression passed.");
+		println("firmware TASKING far-pointer return regression passed.");
 	}
 
 	private void checkAllocatorWrapperSignature() {
@@ -169,14 +169,14 @@ public class C166M55ReturnPointerHeadlessTest extends GhidraScript {
 			return function;
 		}
 		check(getFunctionContaining(toAddr(address)) == null,
-			"M55 fixture entry is inside another function at " + Long.toHexString(address));
+			"firmware fixture entry is inside another function at " + Long.toHexString(address));
 		if (getInstructionAt(toAddr(address)) == null) {
 			check(disassemble(toAddr(address)),
-				"failed to disassemble M55 fixture at " + Long.toHexString(address));
+				"failed to disassemble firmware fixture at " + Long.toHexString(address));
 		}
 		function = createFunction(toAddr(address), "FUN_" + Long.toHexString(address));
 		check(function != null,
-			"failed to create M55 fixture at " + Long.toHexString(address));
+			"failed to create firmware fixture at " + Long.toHexString(address));
 		return function;
 	}
 

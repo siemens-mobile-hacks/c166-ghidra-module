@@ -443,7 +443,17 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 	private DataType loadedPointerType(Program program,
 			C166TaskingCallArguments.WordValue low,
 			C166TaskingCallArguments.WordValue high) {
-		if (low == null || high == null || low.loadAddress() == null ||
+		if (low == null || high == null) {
+			return null;
+		}
+		if (low.parameterOrdinal() != null &&
+			low.parameterOrdinal().equals(high.parameterOrdinal()) &&
+			low.byteOffset() == 0 && high.byteOffset() == 2 &&
+			low.originType() != null && isPointer(low.originType()) &&
+			low.originType().getLength() == 4) {
+			return currentFormalType(program, low.originType());
+		}
+		if (low.loadAddress() == null ||
 			high.loadAddress() == null ||
 			!high.loadAddress().equals(low.loadAddress().add(2))) {
 			return null;
@@ -819,6 +829,7 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 			HighFunction highFunction, Map<Address, Function> variadicTargets,
 			TaskMonitor monitor, MessageLog log) throws CancelledException {
 		Set<Address> removed = new HashSet<>();
+		BasicBlockModel blocks = new BasicBlockModel(program);
 		Iterator<PcodeOpAST> operations = highFunction.getPcodeOps();
 		while (operations.hasNext()) {
 			monitor.checkCancelled();
@@ -839,19 +850,31 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 				needsPointerRefinement(program, target, operation, existing);
 			boolean normalizeScalars = valid &&
 				needsScalarNormalization(target, operation, existing);
-			if (existing == null || valid && !refinePointer && !normalizeScalars) {
+			List<DataType> setupTypes = null;
+			boolean refineSetup = false;
+			Integer optionalWords = optionalWordsAfterFixedStack(
+				program.getListing(), call, target);
+			if (valid && optionalWords != null &&
+				existing.getDataType() instanceof FunctionDefinition definition) {
+				setupTypes = recoveredSetupOptionalTypes(program, caller, call, target,
+					optionalWords, blocks, monitor);
+				refineSetup = needsSetupRefinement(target, definition, setupTypes);
+			}
+			if (existing == null ||
+				valid && !refineSetup && !refinePointer && !normalizeScalars) {
 				continue;
 			}
 
 			FunctionDefinitionDataType replacement = null;
-			if (normalizeScalars &&
+			if (refineSetup) {
+				replacement = buildFallbackOverride(program, target, setupTypes);
+			}
+			else if (normalizeScalars &&
 				existing.getDataType() instanceof FunctionDefinition definition) {
 				replacement = buildFallbackOverride(program, target,
 					normalizedOptionalTypes(program, target, operation, definition));
 			}
 			else if (refinePointer) {
-				Integer optionalWords = optionalWordsAfterFixedStack(
-					program.getListing(), call, target);
 				if (optionalWords != null) {
 					replacement = buildFallbackOverride(program, target,
 						recoveredOptionalTypes(program, operation, optionalWords,
@@ -876,6 +899,34 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 			}
 		}
 		return removed;
+	}
+
+	/**
+	 * A raw decompiler CALL may coalesce several optional stack words into one
+	 * undefined compound input.  Cleanup makes the byte count valid, so the old
+	 * override would otherwise survive forever.  Replace it only when listing
+	 * data flow proves at least one typed pointer origin and its pointer/scalar
+	 * grouping differs from the saved override.
+	 */
+	private boolean needsSetupRefinement(Function target,
+			FunctionDefinition definition, List<DataType> setupTypes) {
+		if (setupTypes == null || setupTypes.stream().noneMatch(this::isPointer)) {
+			return false;
+		}
+		ParameterDefinition[] arguments = definition.getArguments();
+		int fixed = target.getParameterCount();
+		if (arguments.length - fixed != setupTypes.size()) {
+			return true;
+		}
+		for (int i = 0; i < setupTypes.size(); i++) {
+			DataType saved = arguments[fixed + i].getDataType();
+			DataType recovered = setupTypes.get(i);
+			if (saved.getLength() != recovered.getLength() ||
+				isPointer(saved) != isPointer(recovered)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private boolean needsScalarNormalization(Function target, PcodeOp call,

@@ -103,7 +103,7 @@ public class C166FullFlashDecompilerAudit extends GhidraScript {
 		}
 
 		StringBuilder report = new StringBuilder();
-		report.append("# Raw M55 fullflash decompiler audit inventory\n\n");
+		report.append("# Raw firmware fullflash decompiler audit inventory\n\n");
 		report.append("Generated from a clean Ghidra project; this is evidence for manual triage, not the final report.\n\n");
 		report.append("- Program: `").append(currentProgram.getName()).append("`\n");
 		report.append("- Language: `").append(currentProgram.getLanguageID()).append("`\n");

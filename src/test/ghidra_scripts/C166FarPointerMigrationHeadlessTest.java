@@ -1,4 +1,4 @@
-// Focused real-program regression for stale far-pointer inference in M55_v91.bin.
+// Focused real-program regression for stale far-pointer inference in real firmware program.
 import java.util.Set;
 
 import ghidra.app.decompiler.DecompInterface;
@@ -14,12 +14,12 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Parameter;
 import ghidrainfineon.C166FarPointerPhase;
 
-public class C166M55FarPointerMigrationHeadlessTest extends GhidraScript {
+public class C166FarPointerMigrationHeadlessTest extends GhidraScript {
 	@Override
 	protected void run() throws Exception {
 		check("tasking-classic-large".equals(
 			currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString()),
-			"M55 test is not using TASKING Classic large");
+			"firmware test is not using TASKING Classic large");
 
 		Function staleTarget = requiredFunction(0xc393da);
 		Function scalarWrapper = requiredFunction(0xc3ca42);
@@ -73,7 +73,7 @@ public class C166M55FarPointerMigrationHeadlessTest extends GhidraScript {
 		finally {
 			decompiler.dispose();
 		}
-		println("M55 stale far-pointer migration regression passed.");
+		println("firmware stale far-pointer migration regression passed.");
 	}
 
 	private String decompile(DecompInterface decompiler, Function function) {

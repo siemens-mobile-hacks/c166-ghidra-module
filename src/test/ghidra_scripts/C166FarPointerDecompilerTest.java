@@ -219,7 +219,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				0xdb, 0x00));
 		callee(0x9b7372, "auto_structure_tail", VoidDataType.dataType);
 		Function autoStructureFarParameter = functionWithCode(0x2c00,
-			"m55_auto_structure_far_parameter", hexBytes(
+			"firmware_auto_structure_far_parameter", hexBytes(
 				"dc5dc4ec4000c4fc4200fa9b7273"));
 		List<Variable> autoStructureParameters = new ArrayList<>();
 		autoStructureParameters.add(new ParameterImpl("object",
@@ -258,10 +258,10 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0xe6, 0xff, 0x03, 0x00,
 			0xda, 0xbf, 0x66, 0xa9, 0xdb, 0x00)));
 
-		// Exact mixed stack/constant strcmp setup from M55_v91 FUN_25d31c.
+		// Exact mixed stack/constant strcmp setup from real firmware fixture FUN_25d31c.
 		// This used to print the second argument as the raw concatenation
 		// 0x015a178d instead of its physical address 0x56978d.
-		Function liveStrcmpCaller = caller(0x25d490, "call_strcmp_m55_exact", bytes(
+		Function liveStrcmpCaller = caller(0x25d490, "call_strcmp_firmware_exact", bytes(
 			0xe0, 0x3c,                         // mov r12, #3
 			0x00, 0xc0,                         // add r12, r0
 			0x66, 0xfc, 0xff, 0x3f,             // and r12, #0x3fff
@@ -320,10 +320,10 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0x06, 0xf0, 0x04, 0x00, // add R0, #4
 			0xdb, 0x00)));
 
-		// Exact call setup from M55_v91 FUN_26cee4 at 0x26cf12.  Unlike the
+		// Exact call setup from real firmware fixture FUN_26cee4 at 0x26cf12.  Unlike the
 		// compact fixture above, the destination is a stack far pointer formed
 		// with the live DPP1 value.
-		callers.add(caller(0x2680, "call_sprintf_m55_exact", bytes(
+		callers.add(caller(0x2680, "call_sprintf_firmware_exact", bytes(
 			0x88, 0x90,                         // mov [-r0], r9
 			0x88, 0x60,                         // mov [-r0], r6
 			0xe6, 0xfc, 0x3a, 0x00,             // mov r12, #0x3a
@@ -336,7 +336,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0x06, 0xf0, 0x04, 0x00,             // add r0, #4
 			0xdb, 0x00)));
 
-		callers.add(caller(0x26cee4, "m55_FUN_26cee4_full", hexBytes(
+		callers.add(caller(0x26cee4, "firmware_FUN_26cee4_full", hexBytes(
 			"889088808870886088e026f09000f09df06ce008e007e00cb8c0c4c002004860" +
 			"eae0e0d0f2fdbea12d02da26f2d088908860e6fc3a0000c066fcff3ff2fd02fe" +
 			"e6fe1d05e6ff5e01dabf7eb30804d4c0900048c12d0248c23d0ada26b4ced4c0" +
@@ -384,12 +384,12 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0xda, 0x25, 0x12, 0x8e,
 			0xdb, 0x00)));
 
-		// Exact TASKING layout from M55_v91 FUN_91f82a at 0x91fa22:
+		// Exact TASKING layout from real firmware fixture FUN_91f82a at 0x91fa22:
 		// destination in R13:R12, 16-bit size in R14, then the fixed format
 		// pointer and one far-pointer vararg on the stack.  The failed register
 		// join for the format exhausts R15, so it must never appear as an extra
 		// argument.
-		Function snprintfExactCaller = caller(0x29a0, "call_snprintf_m55_exact", bytes(
+		Function snprintfExactCaller = caller(0x29a0, "call_snprintf_firmware_exact", bytes(
 			0xda, 0x00, 0x40, 0x21,             // returns_string() -> R5:R4
 			0xf0, 0x64,                         // mov R6, R4 (optional OFFSET)
 			0xf0, 0x75,                         // mov R7, R5 (optional PAGE)
@@ -431,7 +431,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		// Same stack layout, but with no manually assigned caller prototype.  A
 		// typed use first proves that R13:R12 is a char pointer, while an old
 		// word-wise snprintf override exposes it as separate OFFSET/PAGE inputs.
-		// This is the regression observed in M55_v91 FUN_91f82a.
+		// This is the regression observed in real firmware fixture FUN_91f82a.
 		Function snprintfInferredParameterCaller = caller(0x2a20,
 			"call_snprintf_inferred_pointer_parameter", bytes(
 				0xf0, 0x8c,                         // mov R8, R12 (saved OFFSET)
@@ -454,7 +454,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		// No pre-existing call-site override: the analyzer must first expose the
 		// two optional stack words from the post-call cleanup, then re-decompile
 		// and join their char *16 OFFSET evidence with PAGE into one 32-bit char *.
-		// This is the minimal standalone regression for M55_v91 FUN_91f82a.
+		// This is the minimal standalone regression for real firmware fixture FUN_91f82a.
 		Function snprintfFreshPointerCaller = caller(0x2a60,
 			"call_snprintf_fresh_pointer", bytes(
 				0xda, 0x00, 0x40, 0x21,             // returns_string() -> R5:R4
@@ -474,13 +474,64 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				0xdb, 0x00));
 		callers.add(snprintfFreshPointerCaller);
 
-		// Exact M55_v91 instruction sequence from FUN_747f44 at 0x747f94 through
+		// Preserve an incoming far pointer in R7:R6 across an intervening call,
+		// then push it next to one independent scalar.  A stale decompiler override
+		// may coalesce all three optional words into undefined6; listing recovery
+		// must rebuild them as pointer4 + scalar2.
+		Function sprintfPointerScalarCaller = caller(0x2e00,
+			"call_sprintf_saved_pointer_and_scalar", bytes(
+				0xf0, 0x6c,                         // R6 = input OFFSET
+				0xf0, 0x7d,                         // R7 = input PAGE
+				0xf0, 0x8e,                         // R8 = scalar id
+				0xda, 0x00, 0x00, 0x21,             // intervening call
+				0x88, 0x80,                         // push scalar (rightmost)
+				0x88, 0x70,                         // push pointer PAGE
+				0x88, 0x60,                         // push pointer OFFSET
+				0xe6, 0xfc, 0x00, 0x20,             // destination OFFSET
+				0xe6, 0xfd, 0x04, 0x00,             // destination PAGE
+				0xe6, 0xfe, 0x1d, 0x05,             // format OFFSET
+				0xe6, 0xff, 0x5e, 0x01,             // format PAGE
+				0xda, 0xbf, 0x7e, 0xb3,             // calls sprintf
+				0x06, 0xf0, 0x06, 0x00,             // pop three optional words
+				0xdb, 0x00));
+		sprintfPointerScalarCaller.updateFunction("__tasking_c166_classic", null,
+			List.of(
+				new ParameterImpl("input", charPointer, currentProgram),
+				new ParameterImpl("id", word, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
+			SourceType.USER_DEFINED);
+		callers.add(sprintfPointerScalarCaller);
+
+		// A textually unique save after a conditional branch does not dominate the
+		// call.  It must not be treated as the origin of an incoming pointer on the
+		// branch path which bypasses both MOV instructions.
+		Function conditionalSavedPointerCaller = caller(0x2f00,
+			"conditional_saved_pointer_is_ambiguous", bytes(
+				0x2d, 0x02,                         // branch directly to pushes
+				0xf0, 0x6c,                         // fall-through-only R6 = OFFSET
+				0xf0, 0x7d,                         // fall-through-only R7 = PAGE
+				0x88, 0x70,
+				0x88, 0x60,
+				0xe6, 0xfc, 0x00, 0x20,
+				0xe6, 0xfd, 0x04, 0x00,
+				0xe6, 0xfe, 0x1d, 0x05,
+				0xe6, 0xff, 0x5e, 0x01,
+				0xda, 0xbf, 0x7e, 0xb3,
+				0x06, 0xf0, 0x04, 0x00,
+				0xdb, 0x00));
+		conditionalSavedPointerCaller.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("input", charPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
+			SourceType.USER_DEFINED);
+		callers.add(conditionalSavedPointerCaller);
+
+		// Exact real firmware fixture instruction sequence from FUN_747f44 at 0x747f94 through
 		// the cleanup after snprintf@0x748042. It pushes sixteen promoted bytes,
 		// one typed global far-pointer vararg, and the fixed format far pointer.
 		// This caller is deliberately omitted from callerBodies below: changing
 		// only snprintf must still invalidate and rebuild every direct call site.
 		Function snprintf747f44Caller = caller(0x2aa0,
-			"m55_FUN_747f44_snprintf", hexBytes(
+			"firmware_FUN_747f44_snprintf", hexBytes(
 				"f4200f00c02c88c0f4401000c04d88d0f4601100c06e88e0" +
 				"f4801200c08f88f0f4a01300c0aa88a0f4201400c02b88b0" +
 				"f4201500c02c88c0f4201600c02c88c0f4201700c02c88c0" +
@@ -538,6 +589,32 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			splitPointerOverride);
 		HighFunctionDBUtil.writeOverride(snprintfInferredParameterCaller, toAddr(0x2a44),
 			splitPointerOverride);
+		FunctionDefinitionDataType coalescedSprintfOverride =
+			new FunctionDefinitionDataType("old_coalesced_sprintf_override",
+				currentProgram.getDataTypeManager());
+		coalescedSprintfOverride.setCallingConvention("__tasking_c166_classic_vararg_2");
+		coalescedSprintfOverride.setReturnType(
+			new ShortDataType(currentProgram.getDataTypeManager()));
+		coalescedSprintfOverride.setArguments(
+			new ParameterDefinitionImpl("s", charPointer, null),
+			new ParameterDefinitionImpl("format", charPointer, null),
+			new ParameterDefinitionImpl("coalesced_optional_words",
+				Undefined.getUndefinedDataType(6), null));
+		HighFunctionDBUtil.writeOverride(sprintfPointerScalarCaller, toAddr(0x2e20),
+			coalescedSprintfOverride);
+		FunctionDefinitionDataType ambiguousSavedPointerOverride =
+			new FunctionDefinitionDataType("ambiguous_saved_pointer_override",
+				currentProgram.getDataTypeManager());
+		ambiguousSavedPointerOverride.setCallingConvention("__tasking_c166_classic_vararg_2");
+		ambiguousSavedPointerOverride.setReturnType(
+			new ShortDataType(currentProgram.getDataTypeManager()));
+		ambiguousSavedPointerOverride.setArguments(
+			new ParameterDefinitionImpl("s", charPointer, null),
+			new ParameterDefinitionImpl("format", charPointer, null),
+			new ParameterDefinitionImpl("unknown_optional_words",
+				Undefined.getUndefinedDataType(4), null));
+		HighFunctionDBUtil.writeOverride(conditionalSavedPointerCaller, toAddr(0x2f1a),
+			ambiguousSavedPointerOverride);
 		C166VariadicCallPhase variadicAnalyzer = new C166VariadicCallPhase();
 		AddressSet snprintfOnly = new AddressSet(snprintf.getBody());
 		check(variadicAnalyzer.added(currentProgram, snprintfOnly, monitor, new MessageLog()),
@@ -638,6 +715,23 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		check(variadicAnalyzer.added(currentProgram, callerBodies, monitor, new MessageLog()),
 			"variadic call analyzer failed on its idempotence run");
 		check(sprintf.hasVarArgs(), "variadic analyzer removed sprintf varargs");
+		FunctionDefinition pointerScalarOverride = prototypeOverride(
+			sprintfPointerScalarCaller, toAddr(0x2e20));
+		check(pointerScalarOverride != null &&
+			pointerScalarOverride.getArguments().length == 4 &&
+			pointerScalarOverride.getArguments()[2].getDataType() instanceof Pointer &&
+			pointerScalarOverride.getArguments()[2].getDataType().getLength() == 4 &&
+			pointerScalarOverride.getArguments()[3].getDataType().getLength() == 2 &&
+			!(pointerScalarOverride.getArguments()[3].getDataType() instanceof Pointer),
+			"coalesced optional words were not rebuilt as pointer4 + scalar2");
+		FunctionDefinition ambiguousSavedOverride = prototypeOverride(
+			conditionalSavedPointerCaller, toAddr(0x2f1a));
+		check(ambiguousSavedOverride != null,
+			"conditional saved-pointer override disappeared");
+		for (int i = 2; i < ambiguousSavedOverride.getArguments().length; i++) {
+			check(!(ambiguousSavedOverride.getArguments()[i].getDataType() instanceof Pointer),
+				"non-dominating saved registers were inferred as a pointer");
+		}
 		check(!sprintf.getCallingConventionName().startsWith(
 			"__tasking_c166_classic_vararg_"),
 			"variadic analyzer assigned its call-site convention to sprintf");
@@ -703,10 +797,10 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			String liveStrcmpCode = decompile(decompiler, liveStrcmpCaller);
 			check(liveStrcmpCode.contains("0x56978d") ||
 				liveStrcmpCode.contains("UNK_56978d"),
-				"M55 strcmp far constant was not converted to physical address:\n" +
+				"firmware strcmp far constant was not converted to physical address:\n" +
 					liveStrcmpCode);
 			check(!liveStrcmpCode.contains("0x15a178d"),
-				"M55 strcmp retained raw PAGE:OFFSET concatenation:\n" + liveStrcmpCode);
+				"firmware strcmp retained raw PAGE:OFFSET concatenation:\n" + liveStrcmpCode);
 
 			String strstrUndefinedCode = decompile(decompiler, strstrUndefinedTargetCaller);
 			check(strstrUndefinedCode.contains("(char *)0x5d4c04"),
@@ -787,16 +881,16 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 
 			String sprintfExactCode = decompile(decompiler, callers.get(6));
 			check(sprintfExactCode.contains("\"A:\\\\Internet\\\\pm_%d_%d.dat\""),
-				"exact M55 sprintf format was not resolved as a string:\n" +
+				"exact firmware sprintf format was not resolved as a string:\n" +
 					sprintfExactCode);
 			checkNoRepresentationArtifacts(sprintfExactCode);
 
 			String sprintfFullCode = decompile(decompiler, callers.get(7));
 			check(sprintfFullCode.contains("\"A:\\\\Internet\\\\pm_%d_%d.dat\""),
-				"full M55 FUN_26cee4 format was not resolved as a string:\n" +
+				"full firmware FUN_26cee4 format was not resolved as a string:\n" +
 					sprintfFullCode);
 			check(sprintfFullCode.contains("\"A:\\\\Internet\\\\~pm_%d_%d.dat\""),
-				"full M55 FUN_26cee4 second format was not resolved as a string:\n" +
+				"full firmware FUN_26cee4 second format was not resolved as a string:\n" +
 					sprintfFullCode);
 			checkNoRepresentationArtifacts(sprintfFullCode);
 
@@ -828,13 +922,13 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				compactSnprintf.contains("snprintf(&snprintf_buffer,0xff,")) &&
 				(compactSnprintf.contains("\"file://%s\"") ||
 				compactSnprintf.contains("s_file____s_5d4c0a")),
-				"exact M55 snprintf fixed arguments were not reconstructed:\n" +
+				"exact firmware snprintf fixed arguments were not reconstructed:\n" +
 					snprintfExactCode);
 			check(!snprintfExactCode.contains("extraout_r15") &&
 				!compactSnprintf.contains("snprintf_buffer,0xd,") &&
 				!compactSnprintf.contains("0x3da6,0xd") &&
 				!snprintfExactCode.contains(">> 0x10"),
-				"exact M55 snprintf retained split register trials:\n" +
+				"exact firmware snprintf retained split register trials:\n" +
 					snprintfExactCode);
 			checkNoRepresentationArtifacts(snprintfExactCode);
 
@@ -869,6 +963,15 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				"inferred far-pointer parameter retained separate OFFSET/PAGE words:\n" +
 					snprintfInferredParameterCode);
 
+			String pointerScalarCode = decompile(decompiler, sprintfPointerScalarCaller);
+			String compactPointerScalar = pointerScalarCode.replaceAll("\\s+", "");
+			check(compactPointerScalar.contains("sprintf(") &&
+				compactPointerScalar.contains(",input,id)") &&
+				!pointerScalarCode.contains(">> 0x10") &&
+				!pointerScalarCode.contains("CONCAT"),
+				"saved far pointer and scalar were not reconstructed independently:\n" +
+					pointerScalarCode);
+
 			String snprintf747f44Code = decompile(decompiler, snprintf747f44Caller);
 			String compactSnprintf747f44 = snprintf747f44Code.replaceAll("\\s+", "");
 			check(compactSnprintf747f44.contains("snprintf(") &&
@@ -890,7 +993,8 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 
 		println("Patched far-pointer decompiler matrix passed: register and stack pairs, " +
 			"exact three-argument 0x256c1e fixture, strcmp@BFA966, sprintf@BFB37E, " +
-			"snprintf fixed-stack spill, unsafe-override recovery, and split pointer " +
+			"snprintf fixed-stack spill, unsafe-override recovery, mixed pointer/scalar " +
+			"override recovery, and split pointer " +
 			"parameter recovery, C166 far-pointer auto-structure, clickable undefined " +
 			"target, return value, and a " +
 			"non-pointer control.");

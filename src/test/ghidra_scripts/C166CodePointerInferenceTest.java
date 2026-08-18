@@ -21,6 +21,7 @@ import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.TypedefDataType;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.UnsignedShortDataType;
+import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
@@ -396,6 +397,48 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			bytes(0xf0, 0xc8, 0xf0, 0xd9, 0xf0, 0xea, 0xf0, 0xfb),
 			calls(stalePush), bytes(0xdb, 0x00)));
 
+		// An outer stack argument may be pushed before a complete nested call
+		// frame.  The nested cleanup must cancel only the nested push; the outer
+		// target's immediate cleanup then proves exactly one missing fixed word.
+		Function nestedSetupCall = fixture("nested_stack_setup_call", bytes(0xdb, 0x00));
+		Function nestedFixedStack = fixture("nested_call_fixed_stack_parameter",
+			bytes(0xdb, 0x00));
+		setAnalysisWords(nestedFixedStack, "word0", "word1", "word2", "word3");
+		Function nestedFixedStackCaller = fixture(
+			"nested_call_fixed_stack_parameter_caller", concat(
+				bytes(
+					0xe6, 0xf6, 0x2c, 0x05, // outer line word
+					0x88, 0x60,             // push outer word
+					0xe6, 0xf7, 0x99, 0x00, // nested word
+					0x88, 0x70),            // push nested word
+				calls(nestedSetupCall),
+				bytes(
+					0x06, 0xf0, 0x02, 0x00, // pop nested frame only
+					0xe6, 0xfc, 0x01, 0x00,
+					0xe6, 0xfd, 0x02, 0x00,
+					0xe6, 0xfe, 0x03, 0x00,
+					0xe6, 0xff, 0x04, 0x00),
+				calls(nestedFixedStack),
+				bytes(0x06, 0xf0, 0x02, 0x00, 0xdb, 0x00)));
+
+		// Exact cleanup alone is insufficient after an unknown R0 mutation.  The
+		// analyzer must leave the target at its original four register words.
+		Function unknownStackMutation = fixture("unknown_stack_mutation_target",
+			bytes(0xdb, 0x00));
+		setAnalysisWords(unknownStackMutation, "word0", "word1", "word2", "word3");
+		Function unknownStackMutationCaller = fixture(
+			"unknown_stack_mutation_target_caller", concat(
+				bytes(
+					0xe6, 0xf6, 0x2c, 0x05,
+					0x88, 0x60,
+					0xf0, 0x01,             // mov R0,R1: unknown stack reset
+					0xe6, 0xfc, 0x01, 0x00,
+					0xe6, 0xfd, 0x02, 0x00,
+					0xe6, 0xfe, 0x03, 0x00,
+					0xe6, 0xff, 0x04, 0x00),
+				calls(unknownStackMutation),
+				bytes(0x06, 0xf0, 0x02, 0x00, 0xdb, 0x00)));
+
 		// Table 3-15 returns a far pointer in R5:R4.  Two downstream data-pointer
 		// uses are sufficient evidence; an integer consumer is not, and an actual
 		// far-indirect use conflicts with data-pointer inference.
@@ -422,6 +465,41 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Function scalarReturn = fixture("scalar_r5_r4_return", bytes(0xdb, 0x00));
 		Function scalarReturnCaller = fixture("scalar_r5_r4_return_caller", concat(
 			calls(scalarReturn), calls(scalarReturnConsumer), bytes(0xdb, 0x00)));
+		Function scalar32ReturnConsumer = fixture("scalar32_return_consumer",
+			bytes(0xdb, 0x00));
+		setUserDword(scalar32ReturnConsumer, "value");
+		Function explicitScalar32Return = fixture("explicit_scalar32_r5_r4_return",
+			bytes(
+				0xe6, 0xf4, 0x01, 0x00, // R4 = low word
+				0xe6, 0xf5, 0x00, 0x00, // R5 = high word
+				0xdb, 0x00));
+		setAnalysisDataPointerReturn(explicitScalar32Return);
+		Function explicitScalar32ReturnCaller = fixture(
+			"explicit_scalar32_r5_r4_return_caller", concat(
+				calls(explicitScalar32Return), bytes(
+					0xf0, 0xc4,             // R12 = returned R4
+					0xf0, 0xd5),            // R13 = returned R5
+				calls(scalar32ReturnConsumer), bytes(0xdb, 0x00)));
+		Function explicitSingleUseDataReturn = fixture(
+			"explicit_single_use_data_pointer_return", bytes(
+				0xe6, 0xf4, 0x00, 0x10,
+				0xe6, 0xf5, 0x02, 0x00,
+				0xdb, 0x00));
+		explicitSingleUseDataReturn.setReturnType(Undefined.getUndefinedDataType(4),
+			SourceType.ANALYSIS);
+		Function explicitSingleUseDataReturnCaller = fixture(
+			"explicit_single_use_data_pointer_return_caller", concat(
+				calls(explicitSingleUseDataReturn), bytes(
+					0xf0, 0xc4, 0xf0, 0xd5),
+				calls(returnDataConsumer), bytes(0xdb, 0x00)));
+		Function explicitCodeReturn = fixture("explicit_function_pointer_return", bytes(
+			0xe6, 0xf4, 0x0e, 0x3d,
+			0xe6, 0xf5, 0x25, 0x00,
+			0xdb, 0x00));
+		setAnalysisDataPointerReturn(explicitCodeReturn);
+		Function explicitCodeReturnCaller = fixture(
+			"explicit_function_pointer_return_caller", concat(
+				calls(explicitCodeReturn), calls(dispatcher), bytes(0xdb, 0x00)));
 		Function conflictingReturn = fixture("conflicting_pointer_return", bytes(0xdb, 0x00));
 		Function conflictingReturnCaller = fixture("conflicting_pointer_return_caller",
 			concat(calls(conflictingReturn), bytes(
@@ -432,6 +510,39 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 				calls(returnDataConsumer), bytes(
 				0xf0, 0x48, 0xf0, 0x59),
 				calls(dispatcher), bytes(0xdb, 0x00)));
+
+		// Explicitly defining only R4 is negative producer evidence.  Even two
+		// typed four-byte consumers must not turn an unrelated caller extraout R5
+		// into a real long/far-pointer return.
+		Function partialScalarReturn = fixture("partial_r4_only_return", bytes(
+			0xe6, 0xf4, 0x34, 0x12,
+			0xdb, 0x00));
+		Function partialScalarReturnCaller = fixture("partial_r4_only_return_caller", concat(
+			calls(partialScalarReturn), bytes(
+				0xf0, 0x84, 0xf0, 0x95,
+				0xf0, 0xc8, 0xf0, 0xd9),
+			calls(scalar32ReturnConsumer), bytes(0xf0, 0xc8, 0xf0, 0xd9),
+			calls(scalar32ReturnConsumer), bytes(0xdb, 0x00)));
+
+		// Strong downstream evidence never owns USER_DEFINED or IMPORTED return
+		// declarations.  Preserve both signatures byte-for-byte under conflict.
+		Function userDefinedReturn = fixture("user_defined_return_is_preserved", bytes(
+			0xe6, 0xf4, 0x00, 0x10, 0xe6, 0xf5, 0x02, 0x00, 0xdb, 0x00));
+		userDefinedReturn.setCallingConvention("__tasking_c166_classic");
+		userDefinedReturn.setReturnType(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
+		Function userDefinedReturnCaller = fixture("user_defined_return_is_preserved_caller",
+			concat(calls(userDefinedReturn), bytes(0xf0, 0xc4, 0xf0, 0xd5),
+				calls(scalar32ReturnConsumer), bytes(0xdb, 0x00)));
+		Function importedReturn = fixture("imported_return_is_preserved", bytes(
+			0xe6, 0xf4, 0x00, 0x10, 0xe6, 0xf5, 0x02, 0x00, 0xdb, 0x00));
+		importedReturn.setCallingConvention("__tasking_c166_classic");
+		importedReturn.setReturnType(new UnsignedLongDataType(
+			currentProgram.getDataTypeManager()), SourceType.IMPORTED);
+		Function importedReturnCaller = fixture("imported_return_is_preserved_caller",
+			concat(calls(importedReturn), bytes(0xf0, 0xc4, 0xf0, 0xd5),
+				calls(returnDataConsumer), bytes(0xdb, 0x00)));
+		String protectedReturnSnapshot = snapshot(userDefinedReturn, importedReturn);
 
 		C166TaskingRuntimeAnalyzer runtimeAnalyzer = new C166TaskingRuntimeAnalyzer();
 		check(runtimeAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
@@ -521,6 +632,10 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		check(branchMerge.getParameterCount() == 0,
 			"path-dependent constants crossed a basic-block boundary");
 		checkWordSignature(stalePush, SourceType.ANALYSIS, "r12", "r13", "r14", "r15");
+		checkWordSignature(nestedFixedStack, SourceType.ANALYSIS,
+			"r12", "r13", "r14", "r15", "Stack[0x0]:2");
+		checkWordSignature(unknownStackMutation, SourceType.ANALYSIS,
+			"r12", "r13", "r14", "r15");
 		checkParamReference(twoCallbacksCaller.getEntryPoint().add(4),
 			mallocTarget.getEntryPoint(), true);
 		checkParamReference(twoCallbacksCaller.getEntryPoint().add(12),
@@ -574,7 +689,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			calleeSavedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
 			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
-			staleRectangleFunctionPointer, orphanStaleFunctionPointer);
+			nestedFixedStack, unknownStackMutation, staleRectangleFunctionPointer,
+			orphanStaleFunctionPointer);
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "second code-pointer analysis failed");
 		String secondSnapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
@@ -586,7 +702,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			calleeSavedIndirectTarget, analysisPointerIndirectTarget,
 			forwardingWrapper, secondLevelForwardingWrapper, stackForwardingWrapper,
 			branchMerge, stalePush, rectangleScalar, rectangleForwardingTarget,
-			staleRectangleFunctionPointer, orphanStaleFunctionPointer);
+			nestedFixedStack, unknownStackMutation, staleRectangleFunctionPointer,
+			orphanStaleFunctionPointer);
 		check(snapshot.equals(secondSnapshot),
 			"code-pointer inference is not idempotent\nBEFORE:\n" + snapshot +
 				"\nAFTER:\n" + secondSnapshot);
@@ -599,20 +716,32 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"far-pointer return diagnostics leaked into the Analysis Log: " + returnLog);
 		checkDataPointerReturn(dataReturn);
 		checkDataPointerReturn(directPagedReturn);
+		checkDataPointerReturn(explicitSingleUseDataReturn);
+		checkScalarReturn(explicitScalar32Return);
+		checkFunctionPointerReturn(explicitCodeReturn);
+		check(partialScalarReturn.getReturnType().getLength() != 4,
+			"partial R4-only producer was widened from caller extraout evidence");
+		check(protectedReturnSnapshot.equals(snapshot(userDefinedReturn, importedReturn)),
+			"USER_DEFINED or IMPORTED return signature changed");
 		check(Undefined.isUndefined(scalarReturn.getReturnType()),
 			"two-word scalar return was inferred as a pointer");
 		check(Undefined.isUndefined(conflictingReturn.getReturnType()),
 			"conflicting data/code return was inferred as a data pointer");
-		String returnSnapshot = snapshot(dataReturn, directPagedReturn, scalarReturn,
-			conflictingReturn);
+		String returnSnapshot = snapshot(dataReturn, directPagedReturn,
+			explicitSingleUseDataReturn, explicitScalar32Return, explicitCodeReturn,
+			partialScalarReturn, userDefinedReturn, importedReturn,
+			scalarReturn, conflictingReturn);
 		MessageLog repeatedReturnLog = new MessageLog();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			repeatedReturnLog), "second far-pointer return inference failed");
 		check(!repeatedReturnLog.hasMessages(),
 			"repeated return diagnostics leaked into the Analysis Log: " +
 				repeatedReturnLog);
-		check(returnSnapshot.equals(snapshot(dataReturn, directPagedReturn, scalarReturn,
-			conflictingReturn)), "far-pointer return inference is not idempotent");
+		check(returnSnapshot.equals(snapshot(dataReturn, directPagedReturn,
+			explicitSingleUseDataReturn, explicitScalar32Return, explicitCodeReturn,
+			partialScalarReturn, userDefinedReturn, importedReturn,
+			scalarReturn, conflictingReturn)),
+			"R5:R4 return classification is not idempotent");
 
 		// Keep references live so fixture creation cannot be optimized away by a
 		// future test refactor.
@@ -627,9 +756,15 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			semanticInterveningCall != null &&
 			stackForwardingInterveningCall != null &&
 			branchMergeCaller != null && stalePushCaller != null &&
+			nestedFixedStackCaller != null && unknownStackMutationCaller != null &&
 			packedForwardingCaller != null && packedNarrowingCaller != null &&
 			packedStackExactCaller != null &&
 			packedStackScalarCaller != null &&
+			explicitScalar32ReturnCaller != null &&
+			explicitSingleUseDataReturnCaller != null &&
+			explicitCodeReturnCaller != null &&
+			partialScalarReturnCaller != null && userDefinedReturnCaller != null &&
+			importedReturnCaller != null &&
 			rectangleCallers.size() == 4,
 			"missing caller fixture");
 		println("TASKING code-pointer inference matrix passed.");
@@ -715,6 +850,13 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		setWords(function, SourceType.USER_DEFINED, names);
 	}
 
+	private void setUserDword(Function function, String name) throws Exception {
+		Variable parameter = new ParameterImpl(name, Undefined.getUndefinedDataType(4),
+			currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(parameter),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+	}
+
 	private void setAnalysisPointer(Function function, String... names) throws Exception {
 		List<Variable> pointers = new ArrayList<>();
 		for (String name : names) {
@@ -724,6 +866,12 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		}
 		function.updateFunction("__tasking_c166_classic", null, pointers,
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisDataPointerReturn(Function function) throws Exception {
+		function.setCallingConvention("__tasking_c166_classic");
+		function.setReturnType(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), SourceType.ANALYSIS);
 	}
 
 	private void setUserDataPointer(Function function, String name) throws Exception {
@@ -921,6 +1069,27 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 				function.getReturnType().getDisplayName());
 		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
 			function.getName() + ": return storage is not R5:R4: " +
+				describe(function.getReturn().getVariableStorage()));
+	}
+
+	private void checkScalarReturn(Function function) {
+		check(function.getReturnType().getLength() == 4 &&
+			Undefined.isUndefined(function.getReturnType()) &&
+			!isFunctionPointer(function.getReturnType()),
+			function.getName() + ": return is not a four-byte scalar: " +
+				function.getReturnType().getDisplayName());
+		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
+			function.getName() + ": scalar return storage is not R5:R4: " +
+				describe(function.getReturn().getVariableStorage()));
+	}
+
+	private void checkFunctionPointerReturn(Function function) {
+		check(function.getReturnType().getLength() == 4 &&
+			isFunctionPointer(function.getReturnType()),
+			function.getName() + ": return is not a function pointer: " +
+				function.getReturnType().getDisplayName());
+		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
+			function.getName() + ": function-pointer return storage is not R5:R4: " +
 				describe(function.getReturn().getVariableStorage()));
 	}
 

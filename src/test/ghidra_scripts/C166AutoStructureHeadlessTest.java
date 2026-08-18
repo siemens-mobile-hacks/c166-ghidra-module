@@ -1,4 +1,4 @@
-// Run headlessly against the real M55_v91 program after full analysis.
+// Run headlessly against the real real firmware fixture program after full analysis.
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -39,7 +39,7 @@ import ghidra.program.model.symbol.SourceType;
 import ghidra.program.util.FunctionParameterFieldLocation;
 import ghidrainfineon.C166TaskingTypeInferenceAnalyzer;
 
-public class C166M55AutoStructureHeadlessTest extends GhidraScript {
+public class C166AutoStructureHeadlessTest extends GhidraScript {
 
 	private static final long PARAMETER_TARGET = 0x9b4e9cL;
 	private static final long INITIALIZER_TARGET = 0x34b230L;
@@ -52,13 +52,13 @@ public class C166M55AutoStructureHeadlessTest extends GhidraScript {
 	protected void run() throws Exception {
 		check("tasking-classic-large".equals(
 			currentProgram.getLanguage().getProperty("c166.abi")),
-			"M55 regression is not running with TASKING Classic Large");
+			"firmware regression is not running with TASKING Classic Large");
 		checkGlobalInitializerRecovery();
 		checkIndexedGlobalRecovery();
 
 		Function function =
 			currentProgram.getFunctionManager().getFunctionAt(toAddr(PARAMETER_TARGET));
-		check(function != null, "missing M55 FUN_9b4e9c");
+		check(function != null, "missing firmware FUN_9b4e9c");
 		check(function.getParameterCount() > 0 &&
 			function.getParameter(0).getFormalDataType() instanceof Pointer &&
 			function.getParameter(0).getFormalDataType().getLength() == 4,
@@ -66,7 +66,7 @@ public class C166M55AutoStructureHeadlessTest extends GhidraScript {
 
 		FillOutStructureHelper setup = new FillOutStructureHelper(currentProgram, monitor);
 		DecompInterface decompiler = setup.setUpDecompiler(new DecompileOptions());
-		check(decompiler != null, "failed to initialize M55 decompiler");
+		check(decompiler != null, "failed to initialize firmware decompiler");
 		try {
 			DecompileResults results = decompiler.decompileFunction(function, 120, monitor);
 			check(results.decompileCompleted() && results.getHighFunction() != null,
@@ -108,14 +108,14 @@ public class C166M55AutoStructureHeadlessTest extends GhidraScript {
 			commandStructure.getComponentAt(0x42) != null,
 			"FUN_9b4e9c GUI command structure lacks the expected fields");
 
-		println("M55 FUN_9b4e9c helper and GUI-command far-pointer auto-structure " +
+		println("firmware FUN_9b4e9c helper and GUI-command far-pointer auto-structure " +
 			"regressions passed.");
 	}
 
 	private void checkGlobalInitializerRecovery() throws Exception {
 		Function function = currentProgram.getFunctionManager()
 			.getFunctionAt(toAddr(INITIALIZER_TARGET));
-		check(function != null, "missing M55 FUN_34b230");
+		check(function != null, "missing firmware FUN_34b230");
 		DecompInterface decompiler = new DecompInterface();
 		decompiler.toggleCCode(true);
 		decompiler.toggleSyntaxTree(true);
@@ -136,14 +136,14 @@ public class C166M55AutoStructureHeadlessTest extends GhidraScript {
 		finally {
 			decompiler.dispose();
 		}
-		println("M55 FUN_34b230 live-DPP global initialization regression passed.");
+		println("firmware FUN_34b230 live-DPP global initialization regression passed.");
 	}
 
 	private void checkIndexedGlobalRecovery() throws Exception {
 		Address globalAddress = toAddr(INDEXED_GLOBAL);
 		Function function = currentProgram.getFunctionManager()
 			.getFunctionAt(toAddr(INDEXED_GLOBAL_TARGET));
-		check(function != null, "missing M55 FUN_34b662");
+		check(function != null, "missing firmware FUN_34b662");
 		Data initialData = currentProgram.getListing().getDefinedDataAt(globalAddress);
 		Structure initialStructure = pointedStructure(initialData);
 		boolean hadFalseCode =
@@ -168,7 +168,7 @@ public class C166M55AutoStructureHeadlessTest extends GhidraScript {
 		check(currentProgram.getFunctionManager().getFunctionContaining(globalAddress) == null,
 			"analysis-owned false function body still contains 0x2c2c8");
 		if (hadFalseCode) {
-			println("M55 fixture contained false code at 0x2c2c8; analyzer repaired it.");
+			println("firmware fixture contained false code at 0x2c2c8; analyzer repaired it.");
 		}
 		Address pathAddress = toAddr(PATH_GLOBAL);
 		DataType genericFarPointer = new PointerDataType(VoidDataType.dataType,
@@ -255,13 +255,13 @@ public class C166M55AutoStructureHeadlessTest extends GhidraScript {
 		checkExpectedIndexedStructure(commandStructure,
 			"FUN_34b662 GUI command structure");
 
-		println("M55 FUN_34b662 analyzer-owned false-code repair and indexed global " +
+		println("firmware FUN_34b662 analyzer-owned false-code repair and indexed global " +
 			"Auto Structure GUI-command regressions passed.");
 	}
 
 	private void defineSysOpen() throws Exception {
 		Function sysOpen = currentProgram.getFunctionManager().getFunctionAt(toAddr(SYS_OPEN));
-		check(sysOpen != null, "missing M55 sys_open");
+		check(sysOpen != null, "missing firmware sys_open");
 		DataType word = new UnsignedShortDataType(currentProgram.getDataTypeManager());
 		DataType charPointer = new PointerDataType(CharDataType.dataType,
 			currentProgram.getDataTypeManager());

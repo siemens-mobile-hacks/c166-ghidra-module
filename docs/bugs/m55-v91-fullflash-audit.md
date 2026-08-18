@@ -223,11 +223,11 @@ The following checks were run:
 
 ```text
 ./tools/test-tasking-abi.sh
-/opt/ghidra/support/analyzeHeadless ... C166M55CodePointerHeadlessTest.java
-/opt/ghidra/support/analyzeHeadless ... C166M55FarPointerMigrationHeadlessTest.java
-/opt/ghidra/support/analyzeHeadless ... C166M55ReturnPointerHeadlessTest.java
-/opt/ghidra/support/analyzeHeadless ... C166M55TaskingRuntimeHeadlessTest.java
-/opt/ghidra/support/analyzeHeadless ... C166M55VariadicHeadlessTest.java
+/opt/ghidra/support/analyzeHeadless ... C166CodePointerHeadlessTest.java
+/opt/ghidra/support/analyzeHeadless ... C166FarPointerMigrationHeadlessTest.java
+/opt/ghidra/support/analyzeHeadless ... C166ReturnPointerHeadlessTest.java
+/opt/ghidra/support/analyzeHeadless ... C166TaskingRuntimeHeadlessTest.java
+/opt/ghidra/support/analyzeHeadless ... C166VariadicHeadlessTest.java
 /opt/ghidra/support/analyzeHeadless ... C166FullFlashDecompilerAudit.java
 ./tools/test-patched-decompiler.sh
 ./install-local.sh

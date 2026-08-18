@@ -7,13 +7,18 @@ import java.util.Map;
 import java.util.Set;
 
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.lang.OperandType;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;
+import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.ProgramContext;
 import ghidra.program.model.scalar.Scalar;
@@ -39,8 +44,7 @@ final class C166TaskingCallArguments {
 	static CallWords recover(Program program, Function caller, Instruction call,
 			BasicBlockModel blocks, TaskMonitor monitor) throws CancelledException {
 		Map<Integer, WordValue> words = new HashMap<>();
-		CodeBlock setupBlock = blocks.getFirstCodeBlockContaining(call.getAddress(), monitor);
-		AddressSetView setupRegion = setupBlock == null ? caller.getBody() : setupBlock;
+		AddressSetView setupRegion = setupRegion(program, caller, call, blocks, monitor);
 		boolean registerBankOccupied = true;
 		for (int slot = 0; slot < 4; slot++) {
 			Register register = program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + slot));
@@ -50,10 +54,55 @@ final class C166TaskingCallArguments {
 			registerBankOccupied &= value.defined();
 		}
 		if (registerBankOccupied) {
-			recoverPushedWords(program, caller, setupRegion, call, words,
-				stackArgumentWords(program, call));
+			Integer stackWords = stackArgumentWords(program, call);
+			recoverPushedWords(program, caller, setupRegion, call, words, stackWords);
+			return new CallWords(Map.copyOf(words), true, stackWords);
 		}
-		return new CallWords(Map.copyOf(words), registerBankOccupied);
+		return new CallWords(Map.copyOf(words), false, stackArgumentWords(program, call));
+	}
+
+	/**
+	 * Ghidra may put a call instruction in its own basic block. TASKING may also
+	 * leave an outer argument live on R0 while an inner call computes a later
+	 * register argument. Extend the setup region through the unique linear
+	 * fall-through chain, including call-return edges, but never through a jump
+	 * or a predecessor merge.
+	 */
+	private static AddressSetView setupRegion(Program program, Function caller,
+			Instruction call, BasicBlockModel blocks, TaskMonitor monitor)
+			throws CancelledException {
+		CodeBlock block = blocks.getFirstCodeBlockContaining(call.getAddress(), monitor);
+		if (block == null) {
+			return caller.getBody();
+		}
+		AddressSet result = new AddressSet(block);
+		CodeBlock current = block;
+		for (int crossed = 0; crossed < 16; crossed++) {
+			Address first = current.getMinAddress();
+			Instruction predecessor = program.getListing().getInstructionBefore(first);
+			if (predecessor == null || !caller.getBody().contains(predecessor.getAddress()) ||
+				predecessor.getFlowType().isJump() ||
+				predecessor.getFlowType().isTerminal() ||
+				!first.equals(predecessor.getFallThrough())) {
+				break;
+			}
+			CodeBlock predecessorBlock =
+				blocks.getFirstCodeBlockContaining(predecessor.getAddress(), monitor);
+			if (predecessorBlock == null ||
+				predecessorBlock.equals(current) ||
+				!caller.getBody().contains(predecessorBlock.getMinAddress()) ||
+				current.getNumSources(monitor) != 1) {
+				break;
+			}
+			var sources = current.getSources(monitor);
+			if (!sources.hasNext() ||
+				!predecessorBlock.equals(sources.next().getSourceBlock())) {
+				break;
+			}
+			result.add(predecessorBlock);
+			current = predecessorBlock;
+		}
+		return result;
 	}
 
 	private static WordValue traceRegister(Program program, Function function,
@@ -74,7 +123,14 @@ final class C166TaskingCallArguments {
 				!setupRegion.contains(instruction.getAddress())) {
 				break;
 			}
-			if (instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+			if (instruction.getFlowType().isJump()) {
+				return uniqueSavedRegisterDefinition(program, function, before, register,
+					depth, visited);
+			}
+			if (instruction.getFlowType().isCall()) {
+				if (isTaskingCalleeSavedGeneralRegister(program, register)) {
+					continue;
+				}
 				return WordValue.UNKNOWN;
 			}
 			if (!writesRegister(instruction, register)) {
@@ -94,24 +150,27 @@ final class C166TaskingCallArguments {
 			if (scalar != null && OperandType.isScalar(sourceType) &&
 				!OperandType.isAddress(sourceType) && !OperandType.isIndirect(sourceType)) {
 				return new WordValue(true, scalar.getUnsignedValue() & 0xffff,
-					instruction.getAddress(), null);
+					instruction.getAddress(), null, null, -1, null);
 			}
 			if (scalar != null && OperandType.isAddress(sourceType)) {
 				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
 					instruction, scalar.getUnsignedValue(), depth + 1, visited);
-				return new WordValue(true, null, instruction.getAddress(), loadAddress);
+				return new WordValue(true, null, instruction.getAddress(), loadAddress,
+					null, -1, null);
 			}
 			Address directAddress = operandAddress(instruction, 1);
 			if (directAddress != null) {
 				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
 					instruction, directAddress.getOffset(), depth + 1, visited);
-				return new WordValue(true, null, instruction.getAddress(), loadAddress);
+				return new WordValue(true, null, instruction.getAddress(), loadAddress,
+					null, -1, null);
 			}
 			Scalar directScalar = operandScalar(instruction, 1);
 			if (directScalar != null) {
 				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
 					instruction, directScalar.getUnsignedValue(), depth + 1, visited);
-				return new WordValue(true, null, instruction.getAddress(), loadAddress);
+				return new WordValue(true, null, instruction.getAddress(), loadAddress,
+					null, -1, null);
 			}
 			Register source = operandRegister(instruction, 1);
 			if (source != null && !OperandType.isIndirect(sourceType)) {
@@ -122,7 +181,155 @@ final class C166TaskingCallArguments {
 			}
 			return WordValue.definedUnknown(instruction.getAddress());
 		}
+		WordValue incoming = incomingParameterWord(program, function, register);
+		return incoming.defined() ? incoming :
+			uniqueSavedRegisterDefinition(program, function, before, register, depth, visited);
+	}
+
+	/**
+	 * R6-R9 survive calls and are commonly assigned once in the prologue, then
+	 * used after a conditional region.  A basic-block-local scan cannot see that
+	 * origin.  Cross control flow only when the register has exactly one earlier
+	 * definition in the entire function; multiple reaching definitions remain
+	 * deliberately ambiguous.
+	 */
+	private static WordValue uniqueSavedRegisterDefinition(Program program,
+			Function function, Instruction before, Register register, int depth,
+			Set<String> visited) {
+		if (depth > 16 || !isTaskingCalleeSavedGeneralRegister(program, register)) {
+			return WordValue.UNKNOWN;
+		}
+		Instruction definition = null;
+		for (Instruction instruction :
+			program.getListing().getInstructions(function.getBody(), true)) {
+			if (instruction.getAddress().compareTo(before.getAddress()) >= 0) {
+				break;
+			}
+			if (!writesRegister(instruction, register)) {
+				continue;
+			}
+			if (definition != null) {
+				return WordValue.UNKNOWN;
+			}
+			definition = instruction;
+		}
+		if (definition == null ||
+			!isStraightLineEntryPrefix(program, function, definition) ||
+			!definition.getMnemonicString().equalsIgnoreCase("mov") ||
+			definition.getNumOperands() < 2 ||
+			OperandType.isIndirect(definition.getOperandType(0)) ||
+			OperandType.isIndirect(definition.getOperandType(1))) {
+			return WordValue.UNKNOWN;
+		}
+		Register source = operandRegister(definition, 1);
+		if (source == null) {
+			return WordValue.UNKNOWN;
+		}
+		WordValue value = traceRegister(program, function, function.getBody(),
+			definition, source, depth + 1, new HashSet<>(visited));
+		return value.defined() ? value : WordValue.UNKNOWN;
+	}
+
+	/**
+	 * A unique textual definition is still unsafe when it lives on only one arm
+	 * of a branch.  Trust the saved-register origin only when the definition is
+	 * reached from the function entry through fall-through and call-return edges
+	 * before the first jump.  TASKING parameter saves are emitted in precisely
+	 * this prologue region.
+	 */
+	private static boolean isStraightLineEntryPrefix(Program program, Function function,
+			Instruction definition) {
+		Instruction instruction =
+			program.getListing().getInstructionAt(function.getEntryPoint());
+		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
+				scanned++) {
+			if (!function.getBody().contains(instruction.getAddress())) {
+				return false;
+			}
+			if (instruction.getAddress().equals(definition.getAddress())) {
+				return true;
+			}
+			if (instruction.getFlowType().isJump() ||
+				instruction.getFlowType().isTerminal()) {
+				return false;
+			}
+			Address fallThrough = instruction.getFallThrough();
+			if (fallThrough == null) {
+				return false;
+			}
+			instruction = program.getListing().getInstructionAt(fallThrough);
+		}
+		return false;
+	}
+
+	private static WordValue incomingParameterWord(Program program, Function function,
+			Register register) {
+		if (register == null) {
+			return WordValue.UNKNOWN;
+		}
+		for (Parameter parameter : function.getParameters()) {
+			DataType type = parameter.getFormalDataType();
+			if (type == null || type.getLength() != 4 || !isPointer(type)) {
+				continue;
+			}
+			var storageRegisters = parameter.getVariableStorage().getRegisters();
+			if (storageRegisters == null || storageRegisters.size() != 2) {
+				continue;
+			}
+			Integer firstRegister = null;
+			for (Register storageRegister : storageRegisters) {
+				Integer number = generalRegisterNumber(program, storageRegister);
+				if (number == null) {
+					firstRegister = null;
+					break;
+				}
+				firstRegister = firstRegister == null ? number :
+					Math.min(firstRegister, number);
+			}
+			if (firstRegister == null) {
+				continue;
+			}
+			for (Register storageRegister : storageRegisters) {
+				if (overlaps(register, storageRegister)) {
+					Integer number = generalRegisterNumber(program, storageRegister);
+					return new WordValue(true, null, function.getEntryPoint(), null,
+						parameter.getOrdinal(), (number - firstRegister) * 2, type);
+				}
+			}
+		}
 		return WordValue.UNKNOWN;
+	}
+
+	private static boolean isPointer(DataType type) {
+		DataType current = type;
+		while (current instanceof TypeDef typeDef) {
+			current = typeDef.getBaseDataType();
+		}
+		return current instanceof Pointer;
+	}
+
+	private static boolean isTaskingCalleeSavedGeneralRegister(Program program,
+			Register register) {
+		for (int number = 6; number <= 9; number++) {
+			Register saved = program.getRegister("r" + number);
+			if (overlaps(saved, register)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static Integer generalRegisterNumber(Program program, Register register) {
+		if (register == null) {
+			return null;
+		}
+		for (int number = 0; number <= 15; number++) {
+			Register general = program.getRegister("r" + number);
+			if (overlaps(general, register)) {
+				return number;
+			}
+		}
+		return null;
 	}
 
 	private static Address resolveDirectDataAddress(Program program, Function function,
@@ -190,6 +397,7 @@ final class C166TaskingCallArguments {
 			Integer maximumWords) {
 		Instruction instruction = program.getListing().getInstructionBefore(call.getAddress());
 		int word = 0;
+		int nestedWords = 0;
 		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
 				scanned++, instruction =
 					program.getListing().getInstructionBefore(instruction.getAddress())) {
@@ -198,14 +406,23 @@ final class C166TaskingCallArguments {
 			}
 			if (!function.getBody().contains(instruction.getAddress()) ||
 				!setupRegion.contains(instruction.getAddress()) ||
-				instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				instruction.getFlowType().isJump()) {
 				break;
 			}
 			Register stackPointer = program.getRegister("r0");
+			Integer cleanupWords = stackCleanupWords(instruction);
+			if (cleanupWords != null) {
+				nestedWords += cleanupWords;
+				continue;
+			}
 			if (!isStackPush(instruction) && writesRegister(instruction, stackPointer)) {
 				break;
 			}
 			if (!isStackPush(instruction)) {
+				continue;
+			}
+			if (nestedWords != 0) {
+				nestedWords--;
 				continue;
 			}
 			Register source = operandRegister(instruction, 1);
@@ -215,6 +432,21 @@ final class C166TaskingCallArguments {
 			words.put(4 + word, value);
 			word++;
 		}
+	}
+
+	private static Integer stackCleanupWords(Instruction instruction) {
+		if (!instruction.getMnemonicString().equalsIgnoreCase("add") ||
+			instruction.getNumOperands() < 2) {
+			return null;
+		}
+		Register destination = operandRegister(instruction, 0);
+		Scalar bytes = instruction.getScalar(1);
+		if (destination == null || !destination.getName().equalsIgnoreCase("r0") ||
+			bytes == null || bytes.getUnsignedValue() == 0 ||
+			(bytes.getUnsignedValue() & 1) != 0 || bytes.getUnsignedValue() > 0x100) {
+			return null;
+		}
+		return (int)bytes.getUnsignedValue() / 2;
 	}
 
 	/**
@@ -288,14 +520,17 @@ final class C166TaskingCallArguments {
 		return null;
 	}
 
-	record WordValue(boolean defined, Long constant, Address source, Address loadAddress) {
-		private static final WordValue UNKNOWN = new WordValue(false, null, null, null);
+	record WordValue(boolean defined, Long constant, Address source, Address loadAddress,
+			Integer parameterOrdinal, int byteOffset, DataType originType) {
+		private static final WordValue UNKNOWN =
+			new WordValue(false, null, null, null, null, -1, null);
 
 		private static WordValue definedUnknown(Address source) {
-			return new WordValue(true, null, source, null);
+			return new WordValue(true, null, source, null, null, -1, null);
 		}
 	}
 
-	record CallWords(Map<Integer, WordValue> words, boolean registerBankOccupied) {
+	record CallWords(Map<Integer, WordValue> words, boolean registerBankOccupied,
+			int stackArgumentWords) {
 	}
 }

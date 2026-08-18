@@ -1,4 +1,4 @@
-// Representative real-program regression for M55_v91 FUN_747f44.
+// Representative real-program regression for real firmware fixture FUN_747f44.
 import java.util.ArrayList;
 import java.util.List;
 
@@ -33,7 +33,7 @@ import ghidra.program.model.symbol.SymbolType;
 import ghidrainfineon.C166FarPointerPhase;
 import ghidrainfineon.C166VariadicCallPhase;
 
-public class C166M55VariadicHeadlessTest extends GhidraScript {
+public class C166VariadicHeadlessTest extends GhidraScript {
 
 	private static final long CALLER = 0x747f44;
 	private static final long CALL = 0x748042;
@@ -46,7 +46,7 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 	protected void run() throws Exception {
 		check("tasking-classic-large".equals(
 			currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString()),
-			"M55 test is not using TASKING Classic large");
+			"firmware test is not using TASKING Classic large");
 		Function caller = ensureFunction(CALLER, "FUN_747f44");
 		Function snprintf = ensureFunction(SNPRINTF, "snprintf");
 		DataType charPointer = new PointerDataType(CharDataType.dataType,
@@ -73,9 +73,9 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 
 		C166FarPointerPhase farPointerAnalyzer = new C166FarPointerPhase();
 		check(farPointerAnalyzer.added(currentProgram, new AddressSet(caller.getBody()), monitor,
-			new MessageLog()), "M55 caller parameter analysis failed");
+			new MessageLog()), "firmware caller parameter analysis failed");
 		check(snprintf.hasVarArgs() && snprintf.getParameterCount() == 3,
-			"M55 far-pointer analysis changed snprintf's fixed variadic prefix");
+			"firmware far-pointer analysis changed snprintf's fixed variadic prefix");
 		Variable[] callerParameters = caller.getParameters();
 		check(callerParameters.length == 3 &&
 			isFarPointer(callerParameters[0].getDataType()) &&
@@ -83,25 +83,25 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 			callerParameters[2].getDataType().getLength() == 2 &&
 			!(callerParameters[1].getDataType() instanceof Pointer) &&
 			!(callerParameters[2].getDataType() instanceof Pointer),
-			"M55 FUN_747f44 scalar flags/mode were joined as a pointer");
+			"firmware FUN_747f44 scalar flags/mode were joined as a pointer");
 
 		C166VariadicCallPhase analyzer = new C166VariadicCallPhase();
 		check(analyzer.added(currentProgram, new AddressSet(snprintf.getBody()), monitor,
-			new MessageLog()), "M55 variadic analysis failed");
+			new MessageLog()), "firmware variadic analysis failed");
 
 		FunctionDefinition override = prototypeOverride(caller, toAddr(CALL));
-		check(override != null, "M55 snprintf call-site override is missing");
+		check(override != null, "firmware snprintf call-site override is missing");
 		ParameterDefinition[] arguments = override.getArguments();
 		check(arguments.length == 20,
-			"M55 snprintf expected 20 arguments, got " + arguments.length);
+			"firmware snprintf expected 20 arguments, got " + arguments.length);
 		check(isFarPointer(arguments[0].getDataType()) &&
 			arguments[1].getDataType().getLength() == 2 &&
 			isFarPointer(arguments[2].getDataType()) &&
 			isFarPointer(arguments[3].getDataType()),
-			"M55 snprintf fixed arguments or pointer vararg are split");
+			"firmware snprintf fixed arguments or pointer vararg are split");
 		for (int i = 4; i < arguments.length; i++) {
 			check(arguments[i].getDataType().getLength() == 2,
-				"M55 snprintf scalar vararg " + (i - 4) + " is not one word");
+				"firmware snprintf scalar vararg " + (i - 4) + " is not one word");
 		}
 
 		String code = decompile(caller);
@@ -109,17 +109,17 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 		check(compact.contains("snprintf(") && compact.contains(",0x2d,") &&
 			(compact.contains("\"%s\\\\%0.2x") || compact.contains("(char*)0x5c5972") ||
 				compact.contains("5c5972")),
-			"M55 snprintf fixed arguments are wrong:\n" + code);
+			"firmware snprintf fixed arguments are wrong:\n" + code);
 		check(code.contains("PTR_00196e") &&
 			!code.contains("PTR_00196e._2_2_") && !code.contains("0x1711972"),
-			"M55 snprintf retained split far pointers:\n" + code);
+			"firmware snprintf retained split far pointers:\n" + code);
 		check(code.contains(" = strlen(") &&
 			!code.matches("(?s).*\\n\\s*strlen\\([^;]+;.*"),
-			"M55 strlen result is not assigned to the length object:\n" + code);
+			"firmware strlen result is not assigned to the length object:\n" + code);
 		check(!code.contains("extraout_RH4") && !code.contains(">> 0x10") &&
 			code.contains("sys_open("),
-			"M55 FUN_747f44 retained a split status or scalar parameter:\n" + code);
-		println("M55 FUN_747f44 variadic snprintf regression passed.");
+			"firmware FUN_747f44 retained a split status or scalar parameter:\n" + code);
+		println("firmware FUN_747f44 variadic snprintf regression passed.");
 	}
 
 	private void defineFunction(Function function, DataType returnType,
@@ -151,7 +151,7 @@ public class C166M55VariadicHeadlessTest extends GhidraScript {
 	private void definePointerData(DataType pointerType) throws Exception {
 		Address address = toAddr(0x196e);
 		if (!currentProgram.getMemory().contains(address)) {
-			MemoryBlock block = createMemoryBlock("m55_pointer_196e", address,
+			MemoryBlock block = createMemoryBlock("firmware_pointer_196e", address,
 				new byte[4], false);
 			block.setWrite(true);
 		}

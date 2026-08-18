@@ -1,4 +1,4 @@
-// Representative real-program headless regression test for M55_v91.bin.
+// Representative real-program headless regression test for real firmware program.
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -14,12 +14,12 @@ import ghidra.program.model.listing.ParameterImpl;
 import ghidra.program.model.symbol.SourceType;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
-public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
+public class C166TaskingRuntimeHeadlessTest extends GhidraScript {
 	@Override
 	protected void run() throws Exception {
 		check("tasking-classic-large".equals(
 			currentProgram.getCompilerSpec().getCompilerSpecID().getIdAsString()),
-			"M55 test is not using TASKING Classic large");
+			"firmware test is not using TASKING Classic large");
 
 		for (long address : new long[] {
 			0xc483caL, 0xc483e8L, 0xc483feL, 0xc48416L, 0xc47df0L,
@@ -32,7 +32,7 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 		}
 		C166TaskingRuntimeAnalyzer analyzer = new C166TaskingRuntimeAnalyzer();
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
-			new MessageLog()), "TASKING runtime analysis failed on M55");
+			new MessageLog()), "TASKING runtime analysis failed on firmware");
 		checkFixup(0xc483caL, "c166_tasking_load8f");
 		checkFixup(0xc483e8L, "c166_tasking_store8f");
 		checkFixup(0xc483feL, "c166_tasking_load8n");
@@ -103,7 +103,7 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 				"integer runtime still poisons FUN_34212e data flow");
 			check(!formerlyFailingCode.isBlank(),
 				"FUN_217328 produced no decompiler output");
-			println("M55 TASKING double runtime data-flow test passed.");
+			println("firmware TASKING double runtime data-flow test passed.");
 		}
 		finally {
 			decompiler.dispose();
@@ -123,10 +123,10 @@ public class C166M55TaskingRuntimeHeadlessTest extends GhidraScript {
 		Function function = getFunctionAt(toAddr(address));
 		if (function == null) {
 			check(disassemble(toAddr(address)),
-				"failed to disassemble M55 function at " + Long.toHexString(address));
+				"failed to disassemble firmware function at " + Long.toHexString(address));
 			function = createFunction(toAddr(address), "FUN_" + Long.toHexString(address));
 		}
-		check(function != null, "missing M55 function at " + Long.toHexString(address));
+		check(function != null, "missing firmware function at " + Long.toHexString(address));
 		return function;
 	}
 

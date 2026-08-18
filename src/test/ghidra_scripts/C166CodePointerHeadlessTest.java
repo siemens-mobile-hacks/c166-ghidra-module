@@ -1,4 +1,4 @@
-// Headless diagnostic for the real M55_v91.bin Ghidra database.
+// Headless diagnostic for the real real firmware program Ghidra database.
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -33,7 +33,7 @@ import ghidrainfineon.C166CodePointerPhase;
 import ghidrainfineon.C166FarPointerPhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 
-public class C166M55CodePointerHeadlessTest extends GhidraScript {
+public class C166CodePointerHeadlessTest extends GhidraScript {
 
 	private static final long[] TARGETS = {
 		0x9b0678, 0x9bb936, 0x9bc42a, 0x29ffde, 0x25901a, 0x2590ce, 0x99b53a,
@@ -42,7 +42,7 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 	@Override
 	protected void run() throws Exception {
-		println("M55 HEADLESS language=" + currentProgram.getLanguageID() +
+		println("firmware HEADLESS language=" + currentProgram.getLanguageID() +
 			" compiler=" + currentProgram.getCompilerSpec().getCompilerSpecID());
 		ensureFunction(0x2590ce);
 		seedScalarRegressionState();
@@ -53,10 +53,10 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		AddressSet wholeProgram = new AddressSet(currentProgram.getMemory());
 		MessageLog runtimeLog = new MessageLog();
 		new C166TaskingRuntimeAnalyzer().added(currentProgram, wholeProgram, monitor, runtimeLog);
-		println("M55 HEADLESS runtime-log=" + runtimeLog);
+		println("firmware HEADLESS runtime-log=" + runtimeLog);
 		MessageLog codeLog = new MessageLog();
 		new C166CodePointerPhase().added(currentProgram, wholeProgram, monitor, codeLog);
-		println("M55 HEADLESS code-log=" + codeLog);
+		println("firmware HEADLESS code-log=" + codeLog);
 		dump("AFTER_CODE");
 		verifyScalarState("AFTER_CODE");
 		checkFunctionPointers(0x740b28, 0, 1);
@@ -66,22 +66,22 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 		MessageLog farLog = new MessageLog();
 		new C166FarPointerPhase().added(currentProgram, wholeProgram, monitor, farLog);
-		println("M55 HEADLESS far-log=" + farLog);
+		println("firmware HEADLESS far-log=" + farLog);
 		dump("AFTER_CODE_THEN_FAR");
 		verifyFinalState();
 		PointerCounts afterFarCounts = pointerCounts();
 		Set<String> afterFarPointers = codePointerSlots();
-		println("M55 HEADLESS pointer-counts before=" + beforeCounts +
+		println("firmware HEADLESS pointer-counts before=" + beforeCounts +
 			" after-code=" + afterCodeCounts + " after-far=" + afterFarCounts);
-		println("M55 HEADLESS code-pointers removed-by-code=" +
+		println("firmware HEADLESS code-pointers removed-by-code=" +
 			difference(beforeCodePointers, afterCodePointers));
-		println("M55 HEADLESS code-pointers added-by-code=" +
+		println("firmware HEADLESS code-pointers added-by-code=" +
 			difference(afterCodePointers, beforeCodePointers));
-		println("M55 HEADLESS code-pointers removed-by-far=" +
+		println("firmware HEADLESS code-pointers removed-by-far=" +
 			difference(afterCodePointers, afterFarPointers));
-		println("M55 HEADLESS code-pointers added-by-far=" +
+		println("firmware HEADLESS code-pointers added-by-far=" +
 			difference(afterFarPointers, afterCodePointers));
-		println("M55 real-program code-pointer regression passed.");
+		println("firmware real-program code-pointer regression passed.");
 	}
 
 	private Set<String> codePointerSlots() {
@@ -200,11 +200,11 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 	private void verifyFinalState() throws Exception {
 		Function dispatcher = getFunctionAt(toAddr(0xa26154));
-		check(dispatcher != null, "missing M55 far-indirect dispatcher");
+		check(dispatcher != null, "missing firmware far-indirect dispatcher");
 		check("call_far_indirect".equals(dispatcher.getCallFixup()),
-			"M55 far-indirect dispatcher did not receive its call-fixup");
+			"firmware far-indirect dispatcher did not receive its call-fixup");
 		check(dispatcher.getParameterCount() == 0,
-			"M55 far-indirect dispatcher retained an inferred C signature");
+			"firmware far-indirect dispatcher retained an inferred C signature");
 		checkFunctionPointers(0x9b0678, 0, 1);
 		checkFunctionPointers(0x9bb936, 0, 1);
 		checkFunctionPointers(0x9bc42a, 2, 3);
@@ -419,18 +419,18 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 		for (long offset : TARGETS) {
 			Function function = getFunctionAt(toAddr(offset));
 			if (function == null) {
-				println("M55 HEADLESS " + phase + " missing function at " +
+				println("firmware HEADLESS " + phase + " missing function at " +
 					Long.toHexString(offset));
 				continue;
 			}
-			println("M55 HEADLESS " + phase + " function=" + function.getName() +
+			println("firmware HEADLESS " + phase + " function=" + function.getName() +
 				" signatureSource=" + function.getSignatureSource() +
 				" callingConvention=" + function.getCallingConventionName() +
 				" signature=" + function.getSignature());
 			for (int i = 0; i < function.getParameterCount(); i++) {
 				Parameter parameter = function.getParameter(i);
 				DataType type = parameter.getFormalDataType();
-				println("M55 HEADLESS " + phase + " parameter=" + i +
+				println("firmware HEADLESS " + phase + " parameter=" + i +
 					" source=" + parameter.getSource() + " storage=" +
 					parameter.getVariableStorage() + " type=" + type.getDisplayName() +
 					" class=" + type.getClass().getName());
@@ -439,26 +439,26 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 
 		Function caller = getFunctionAt(toAddr(0x242066));
 		if (caller == null) {
-			println("M55 HEADLESS " + phase + " missing FUN_242066");
+			println("firmware HEADLESS " + phase + " missing FUN_242066");
 			return;
 		}
 		String c = decompile(caller, phase);
-		println("M55 HEADLESS " + phase + " FUN_242066_BEGIN");
+		println("firmware HEADLESS " + phase + " FUN_242066_BEGIN");
 		println(c);
-		println("M55 HEADLESS " + phase + " FUN_242066_END");
+		println("firmware HEADLESS " + phase + " FUN_242066_END");
 
 		Function scalarCaller = getFunctionAt(toAddr(0x6f2ea6));
 		if (scalarCaller != null) {
-			println("M55 HEADLESS " + phase + " FUN_6f2ea6_BEGIN");
+			println("firmware HEADLESS " + phase + " FUN_6f2ea6_BEGIN");
 			println(decompile(scalarCaller, phase));
-			println("M55 HEADLESS " + phase + " FUN_6f2ea6_END");
+			println("firmware HEADLESS " + phase + " FUN_6f2ea6_END");
 		}
 
 		Function resultCaller = getFunctionContaining(toAddr(0xc394dc));
 		if (resultCaller != null) {
-			println("M55 HEADLESS " + phase + " AT_SayResult_BEGIN");
+			println("firmware HEADLESS " + phase + " AT_SayResult_BEGIN");
 			println(decompile(resultCaller, phase));
-			println("M55 HEADLESS " + phase + " AT_SayResult_END");
+			println("firmware HEADLESS " + phase + " AT_SayResult_END");
 		}
 	}
 
@@ -468,12 +468,12 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			decompiler.toggleCCode(true);
 			decompiler.toggleSyntaxTree(true);
 			if (!decompiler.openProgram(currentProgram)) {
-				throw new AssertionError("M55 HEADLESS " + phase +
+				throw new AssertionError("firmware HEADLESS " + phase +
 					" decompiler-open-failed=" + decompiler.getLastMessage());
 			}
 			DecompileResults results = decompiler.decompileFunction(function, 120, monitor);
 			if (!results.decompileCompleted()) {
-				throw new AssertionError("M55 HEADLESS " + phase + " decompile-failed=" +
+				throw new AssertionError("firmware HEADLESS " + phase + " decompile-failed=" +
 					results.getErrorMessage());
 			}
 			return results.getDecompiledFunction().getC();
@@ -489,14 +489,14 @@ public class C166M55CodePointerHeadlessTest extends GhidraScript {
 			return function;
 		}
 		check(getFunctionContaining(toAddr(address)) == null,
-			"M55 fixture entry is inside another function at " + Long.toHexString(address));
+			"firmware fixture entry is inside another function at " + Long.toHexString(address));
 		if (getInstructionAt(toAddr(address)) == null) {
 			check(disassemble(toAddr(address)),
-				"failed to disassemble M55 fixture at " + Long.toHexString(address));
+				"failed to disassemble firmware fixture at " + Long.toHexString(address));
 		}
 		function = createFunction(toAddr(address), "FUN_" + Long.toHexString(address));
 		check(function != null,
-			"failed to create M55 fixture at " + Long.toHexString(address));
+			"failed to create firmware fixture at " + Long.toHexString(address));
 		return function;
 	}
 

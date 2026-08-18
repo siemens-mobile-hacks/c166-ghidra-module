@@ -36,8 +36,9 @@ Classic ABI**, with a focus on its **Large Memory Model**.
 - Distinguishes TASKING packed 32-bit scalar pairs from far callbacks, keeps
   semantic callback evidence stable across analyzer passes, and avoids changing
   callback target signatures indirectly through thunks.
-- Infers far data-pointer returns in the documented R5/R4 pair from proven
-  downstream pointer use without confusing scalar or callback returns.
+- Classifies values returned in the documented R5/R4 pair as far data
+  pointers, far function pointers, or four-byte scalars from explicit producer
+  writes and proven downstream use, while preserving user/imported signatures.
 - Recognizes TASKING far-indirect dispatchers, applies their call fixup, and
   removes stale analyzer-owned C parameters from the dispatcher itself.
 - Models TASKING Classic Large `double` and aggregate results as caller-stack
@@ -47,10 +48,12 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   connected in decompiler data flow.
 - Models R0 as the TASKING user stack without a fictitious return-address
   record, preserving initialized locals whose far address is passed to a call.
+- Recovers fixed user-stack parameters prepared across balanced nested calls
+  from exact caller cleanup without crossing ambiguous stack or control flow.
 - Repairs typed TASKING variadic call sites incrementally, including fixed far
-  pointers spilled to the user stack, far-pointer arguments in the `...`
-  portion, and stale pointer-shaped pairs of promoted scalar varargs, while
-  preserving the declared fixed variadic prefix.
+  pointers spilled to the user stack, far-pointer arguments preserved through
+  R6-R9 in the `...` portion, and stale pointer-shaped pairs of promoted scalar
+  varargs, while preserving the declared fixed variadic prefix.
 - Provides `install-local.sh` for atomic local extension updates with backups.
 
 ## Features

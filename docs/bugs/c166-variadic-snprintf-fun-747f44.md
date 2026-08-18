@@ -118,7 +118,7 @@ the `strlen` result before its address is passed onward; no Ghidra core change
 is required.
 
 The exact `FUN_747f44` instruction sequence is covered by the synthetic
-decompiler suite. `C166M55VariadicHeadlessTest.java` additionally imports the
+decompiler suite. `C166VariadicHeadlessTest.java` additionally imports the
 real `M55_v91.bin` at base `0x200000` and verifies call `0x748042`.
 
 Verified whole-function output has signature
