@@ -173,6 +173,89 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 		savedFarPointerField.setReturnType(word, SourceType.USER_DEFINED);
 		savedFarPointerField.updateFunction("__tasking_c166_classic", null, List.of(),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		DataType wordPointer = new PointerDataType(word,
+			currentProgram.getDataTypeManager());
+		DataType wordPointerPointer = new PointerDataType(wordPointer,
+			currentProgram.getDataTypeManager());
+		Function nestedFarPointerLoad = functionWithCode(0x3420,
+			"nested_far_pointer_loaded_from_memory", bytes(
+				0x08, 0xc4,                         // R12 += 4
+				0xdc, 0x5d,                         // EXTP R13,#2
+				0xd4, 0x2c, 0x02, 0x00,             // R2 = [R12+2] (inner PAGE)
+				0xa8, 0x1c,                         // R1 = [R12]   (inner OFFSET)
+				0xdc, 0x42,                         // EXTP R2,#1
+				0xd4, 0x41, 0x04, 0x00,             // R4 = [R1+4]
+				0xdb, 0x00));
+		nestedFarPointerLoad.setReturnType(word, SourceType.USER_DEFINED);
+		nestedFarPointerLoad.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("table", wordPointerPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function copiedSecondFarPointer = functionWithCode(0x3440,
+			"copied_second_far_pointer_offset", bytes(
+				0xf0, 0x1e,                         // R1 = second OFFSET
+				0xf0, 0x2f,                         // R2 = second PAGE
+				0x08, 0x12,                         // R1 += 2
+				0xdc, 0x42,                         // EXTP R2,#1
+				0xa8, 0x41,                         // R4 = [R1]
+				0xdb, 0x00));
+		copiedSecondFarPointer.setReturnType(word, SourceType.USER_DEFINED);
+		copiedSecondFarPointer.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("first", wordPointer, currentProgram),
+				new ParameterImpl("value", wordPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function indexedNestedFarPointer = functionWithCode(0x3460,
+			"indexed_nested_far_pointer", bytes(
+				0x08, 0xc4,                         // R12 += 4
+				0xdc, 0x5d,                         // EXTP R13,#2
+				0xd4, 0x2c, 0x02, 0x00,             // R2 = [R12+2] (inner PAGE)
+				0xa8, 0x1c,                         // R1 = [R12]   (inner OFFSET)
+				0xf0, 0x3e,                         // R3 = index
+				0x5c, 0x23,                         // R3 <<= 2
+				0x20, 0x3e,                         // R3 -= index
+				0x5c, 0x23,                         // R3 <<= 2 (index * 12)
+				0x00, 0x13,                         // R1 += R3
+				0xdc, 0x42,                         // EXTP R2,#1
+				0xa8, 0x41,                         // R4 = [R1]
+				0xdb, 0x00));
+		indexedNestedFarPointer.setReturnType(word, SourceType.USER_DEFINED);
+		indexedNestedFarPointer.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("table", wordPointerPointer, currentProgram),
+				new ParameterImpl("index", word, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function stackPreservedFarPointer = functionWithCode(0x3480,
+			"stack_preserved_far_pointer", bytes(
+				0x06, 0xfc, 0x3e, 0x02,             // OFFSET += 0x23e
+				0x88, 0xc0,                         // push OFFSET
+				0x88, 0xd0,                         // push PAGE
+				0xda, 0x00, 0x60, 0x21,             // returns_context()
+				0x98, 0xd0,                         // pop PAGE
+				0x98, 0xc0,                         // pop OFFSET
+				0xdc, 0x4d,                         // EXTP PAGE,#1
+				0xa8, 0x4c,                         // R4 = [OFFSET]
+				0xdb, 0x00));
+		stackPreservedFarPointer.setReturnType(word, SourceType.USER_DEFINED);
+		stackPreservedFarPointer.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("context", wordPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function postIncrementFarPointerLoad = functionWithCode(0x34a0,
+			"post_increment_far_pointer_load", bytes(
+				0x06, 0xfc, 0x08, 0x00,             // OFFSET += 8
+				0xf0, 0x3e,                         // R3 = index
+				0x5c, 0x23,                         // R3 <<= 2
+				0x20, 0x3e,                         // R3 -= index
+				0x5c, 0x23,                         // R3 <<= 2 (index * 12)
+				0x00, 0xc3,                         // OFFSET += R3
+				0xdc, 0x5d,                         // EXTP PAGE,#2
+				0x98, 0x1c,                         // R1 = [OFFSET++] (inner OFFSET)
+				0xa8, 0x2c,                         // R2 = [OFFSET]   (inner PAGE)
+				0xdc, 0x42,                         // EXTP R2,#1
+				0xa8, 0x41,                         // R4 = [R1]
+				0xdb, 0x00));
+		postIncrementFarPointerLoad.setReturnType(word, SourceType.USER_DEFINED);
+		postIncrementFarPointerLoad.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("table", wordPointerPointer, currentProgram),
+				new ParameterImpl("index", word, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 		FunctionDefinitionDataType callbackDefinition = new FunctionDefinitionDataType(
 			"paged_pointer_negative_callback", currentProgram.getDataTypeManager());
 		callbackDefinition.setReturnType(VoidDataType.dataType);
@@ -855,6 +938,31 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				.replaceAll("\\s+", "");
 			check(compactSavedField.equals(savedFieldSecondPass),
 				"saved far-pointer reconstruction was not idempotent");
+			String nestedFarPointerCode = decompile(decompiler, nestedFarPointerLoad);
+			check(!nestedFarPointerCode.contains("0x3fff") &&
+				!nestedFarPointerCode.contains("0x4000") &&
+				!nestedFarPointerCode.contains("CONCAT") &&
+				!nestedFarPointerCode.contains("segment(") &&
+				!nestedFarPointerCode.contains("Type propagation algorithm not settling"),
+				"nested far pointer loaded from memory was not reconstructed:\n" +
+					nestedFarPointerCode);
+			String postIncrementCode = decompile(decompiler,
+				postIncrementFarPointerLoad);
+			check(!postIncrementCode.contains("in_stack") &&
+				!postIncrementCode.contains("0x3fff") &&
+				!postIncrementCode.contains("CONCAT"),
+				"post-increment far-pointer load retained an invented stack term:\n" +
+					postIncrementCode);
+			for (Function pagedPointer : List.of(copiedSecondFarPointer,
+				indexedNestedFarPointer, stackPreservedFarPointer)) {
+				String code = decompile(decompiler, pagedPointer);
+				check(!code.contains("0x3fff") && !code.contains("0x4000") &&
+					!code.contains("CONCAT") && !code.contains("segment(") &&
+					!code.contains(">> 0x10") &&
+					!code.contains("Type propagation algorithm not settling"),
+					pagedPointer.getName() +
+						": paged pointer arithmetic was not reconstructed:\n" + code);
+			}
 			for (Function negative : List.of(callbackAsData, scalarAsData,
 				mismatchedFarPointerParts)) {
 				String negativeCode = decompile(decompiler, negative);

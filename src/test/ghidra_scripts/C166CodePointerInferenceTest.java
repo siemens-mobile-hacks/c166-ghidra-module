@@ -480,6 +480,30 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 					0xf0, 0xc4,             // R12 = returned R4
 					0xf0, 0xd5),            // R13 = returned R5
 				calls(scalar32ReturnConsumer), bytes(0xdb, 0x00)));
+		Function analysisGenericDataConsumer = fixture(
+			"analysis_generic_data_pointer_consumer", bytes(0xdb, 0x00));
+		setAnalysisPointer(analysisGenericDataConsumer, "value");
+		Function unsignedLongRuntime = fixture("tasking_unsigned_long_multiply",
+			bytes(0xdb, 0x00));
+		unsignedLongRuntime.setCallFixup("c166_tasking_mulu4");
+		Function runtimeScalarReturn = fixture("runtime_scalar_r5_r4_return", bytes(
+			0xe6, 0xf4, 0x01, 0x00,
+			0xe6, 0xf5, 0x00, 0x00,
+			0xdb, 0x00));
+		setAnalysisDataPointerReturn(runtimeScalarReturn);
+		Function runtimeScalarReturnCaller = fixture(
+			"runtime_scalar_r5_r4_return_caller", concat(
+				calls(runtimeScalarReturn), bytes(
+					0xf0, 0x84,             // preserve returned low word in R8
+					0xf0, 0x95,             // preserve returned high word in R9
+					0xf0, 0xc8,             // R12 = returned low word
+					0xf0, 0xd9),            // R13 = returned high word
+				calls(analysisGenericDataConsumer), bytes(
+					0xf0, 0x48,             // unsigned helper left low word
+					0xf0, 0x59,             // unsigned helper left high word
+					0xe6, 0xfa, 0x0c, 0x00, // right operand = 12
+					0xe6, 0xfb, 0x00, 0x00),
+				calls(unsignedLongRuntime), bytes(0xdb, 0x00)));
 		Function explicitSingleUseDataReturn = fixture(
 			"explicit_single_use_data_pointer_return", bytes(
 				0xe6, 0xf4, 0x00, 0x10,
@@ -718,6 +742,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkDataPointerReturn(directPagedReturn);
 		checkDataPointerReturn(explicitSingleUseDataReturn);
 		checkScalarReturn(explicitScalar32Return);
+		checkUnsignedLongReturn(runtimeScalarReturn);
 		checkFunctionPointerReturn(explicitCodeReturn);
 		check(partialScalarReturn.getReturnType().getLength() != 4,
 			"partial R4-only producer was widened from caller extraout evidence");
@@ -728,7 +753,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		check(Undefined.isUndefined(conflictingReturn.getReturnType()),
 			"conflicting data/code return was inferred as a data pointer");
 		String returnSnapshot = snapshot(dataReturn, directPagedReturn,
-			explicitSingleUseDataReturn, explicitScalar32Return, explicitCodeReturn,
+			explicitSingleUseDataReturn, explicitScalar32Return, runtimeScalarReturn,
+			explicitCodeReturn,
 			partialScalarReturn, userDefinedReturn, importedReturn,
 			scalarReturn, conflictingReturn);
 		MessageLog repeatedReturnLog = new MessageLog();
@@ -738,7 +764,8 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"repeated return diagnostics leaked into the Analysis Log: " +
 				repeatedReturnLog);
 		check(returnSnapshot.equals(snapshot(dataReturn, directPagedReturn,
-			explicitSingleUseDataReturn, explicitScalar32Return, explicitCodeReturn,
+			explicitSingleUseDataReturn, explicitScalar32Return, runtimeScalarReturn,
+			explicitCodeReturn,
 			partialScalarReturn, userDefinedReturn, importedReturn,
 			scalarReturn, conflictingReturn)),
 			"R5:R4 return classification is not idempotent");
@@ -1080,6 +1107,15 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 				function.getReturnType().getDisplayName());
 		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
 			function.getName() + ": scalar return storage is not R5:R4: " +
+				describe(function.getReturn().getVariableStorage()));
+	}
+
+	private void checkUnsignedLongReturn(Function function) {
+		check(function.getReturnType() instanceof UnsignedLongDataType,
+			function.getName() + ": return is not an unsigned long scalar: " +
+				function.getReturnType().getDisplayName());
+		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
+			function.getName() + ": unsigned long return storage is not R5:R4: " +
 				describe(function.getReturn().getVariableStorage()));
 	}
 

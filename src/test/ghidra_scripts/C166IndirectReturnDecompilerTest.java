@@ -147,6 +147,44 @@ public class C166IndirectReturnDecompilerTest extends GhidraScript {
 			"70552d05d1101b5acc00f2f50efe70bb2d05d1101bb4cc0002f50efed1101b4acc0002f50cfef2f40efedb01");
 		Function muluNearMiss = function(toAddr(0x3300), "not_tasking_mulu4",
 			muluNearMissBytes);
+		Function returnsUnsignedLong = function(toAddr(0x3700), "returns_unsigned_long",
+			new byte[] {
+				(byte) 0xe6, (byte) 0xf4, 2, 0,
+				(byte) 0xe6, (byte) 0xf5, 0, 0,
+				(byte) 0xdb, 0
+			});
+		returnsUnsignedLong.setReturnType(
+			new ghidra.program.model.data.UnsignedLongDataType(
+				currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
+		returnsUnsignedLong.updateFunction("__tasking_c166_classic", null, List.of(),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function unsignedMultiplyFieldCaller = function(toAddr(0x3800),
+			"runtime_unsigned_multiply_field", new byte[] {
+				(byte) 0xf0, (byte) 0x8c,             // R8 = context OFFSET
+				(byte) 0xf0, (byte) 0x9d,             // R9 = context PAGE
+				(byte) 0xda, 0, 0, 0x37,             // returns_unsigned_long()
+				(byte) 0xf0, (byte) 0xc8,
+				(byte) 0xf0, (byte) 0xd9,
+				(byte) 0xdc, (byte) 0x5d,
+				(byte) 0xc4, (byte) 0x5c, 2, 0,      // context[0]._2_2_ = R5
+				(byte) 0xb8, (byte) 0x4c,            // context[0] = R4
+				(byte) 0xdc, (byte) 0x5d,
+				(byte) 0xa8, (byte) 0x4c,            // R4 = context[0]
+				(byte) 0xd4, (byte) 0x5c, 2, 0,      // R5 = context[0]._2_2_
+				(byte) 0xe6, (byte) 0xfa, 0x0c, 0,
+				(byte) 0xe6, (byte) 0xfb, 0, 0,
+				(byte) 0xda, 0, 0, 0x30,             // tasking_mulu4
+				(byte) 0xdb, 0
+			});
+		unsignedMultiplyFieldCaller.setReturnType(
+			new ghidra.program.model.data.UnsignedShortDataType(
+				currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
+		unsignedMultiplyFieldCaller.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("context",
+				new ghidra.program.model.data.PointerDataType(
+					ghidra.program.model.data.VoidDataType.dataType,
+					currentProgram.getDataTypeManager()), currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 		C166TaskingRuntimeAnalyzer runtimeAnalyzer = new C166TaskingRuntimeAnalyzer();
 		check(runtimeAnalyzer.canAnalyze(currentProgram),
 			"TASKING runtime analyzer rejected the large-model language");
@@ -267,6 +305,15 @@ public class C166IndirectReturnDecompilerTest extends GhidraScript {
 			check(multiplyCode.contains("floor(") && multiplyCode.contains(" * ") &&
 				multiplyCode.contains("x") && multiplyCode.contains("y"),
 				"TASKING __mlf8r arithmetic data flow is missing:\n" + multiplyCode);
+			String unsignedMultiplyCode = decompile(decompiler,
+				unsignedMultiplyFieldCaller);
+			println(unsignedMultiplyCode);
+			check(!unsignedMultiplyCode.contains("Type propagation algorithm not settling") &&
+				!unsignedMultiplyCode.contains("(float)") &&
+				unsignedMultiplyCode.contains("returns_unsigned_long()") &&
+				unsignedMultiplyCode.contains(" * 0xc"),
+				"TASKING unsigned 32-bit runtime multiply poisoned type propagation:\n" +
+					unsignedMultiplyCode);
 
 			DecompileResults result = decompiler.decompileFunction(function, 30, monitor);
 			check(result.decompileCompleted(),

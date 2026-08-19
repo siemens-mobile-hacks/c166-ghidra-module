@@ -79,6 +79,7 @@ run_headless C166TaskingClassicAbiTest \
 	-cspec tasking-classic-large -noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
 	-postScript C166TaskingClassicAbiTest.java \
+	-postScript C166ScalarSignatureInferenceTest.java \
 	-postScript C166IncrementalAnalysisTest.java \
 	-postScript C166CodePointerInferenceTest.java \
 	-postScript C166FarPointerInferenceTest.java -deleteProject
@@ -100,6 +101,7 @@ run_headless C167CsTaskingClassicAbiTest \
 	-cspec tasking-classic-large -noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
 	-postScript C166TaskingClassicAbiTest.java \
+	-postScript C166ScalarSignatureInferenceTest.java \
 	-postScript C166IncrementalAnalysisTest.java \
 	-postScript C166CodePointerInferenceTest.java \
 	-postScript C166FarPointerInferenceTest.java -deleteProject

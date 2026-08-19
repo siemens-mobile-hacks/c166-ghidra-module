@@ -1,6 +1,6 @@
 # Systemic C166 TASKING Classic Large analysis refactor
 
-Date: 2026-08-18.
+Date: 2026-08-18; revised 2026-08-19.
 
 Status: implemented; synthetic and real-M55 headless tests pass.
 
@@ -42,10 +42,13 @@ overrides. It executes a fixed sequence:
 
 1. normalize ABI types;
 2. bootstrap known variadic prototypes;
-3. classify code pointers versus scalars;
-4. classify far data pointers;
-5. infer far-pointer returns;
-6. finalize variadic call sites.
+3. recover byte/word scalar returns and incoming register parameters;
+4. classify code pointers versus scalar word pairs;
+5. classify far data pointers while retaining the shared scalar evidence;
+6. finalize scalar signatures after pointer classification;
+7. classify `R5:R4` returns as data pointers, function pointers, or unsigned
+   32-bit scalars;
+8. finalize variadic call sites.
 
 Specialized logic lives in ordinary `*Phase` classes that do not implement the
 Ghidra `Analyzer` extension point. They do not appear in Auto Analysis and
@@ -70,6 +73,12 @@ The following contract applies:
 This removes circular reasoning of the form “the pair already has type
 `fpointer`, therefore it is used as a code pointer.” Direct paged data use is
 derived from the listing independently of the current `HighSymbol`.
+
+The scalar-signature phase follows the TASKING Classic Large ABI directly:
+byte results use `RL4`, word results use `R4`, and four-byte results use
+`R5:R4`. Incoming scalar words are recovered only from live reads of
+`R12..R15` before overwrite; a call is an ABI barrier. Imported/user-defined,
+stack-based, variadic, pointer, and four-byte parameters are preserved.
 
 ### Unified C166 data-address formation
 
@@ -112,9 +121,45 @@ Stores to the near range `0x2c0..0x2d4` resolve to writable RAM at
 of the indexed variable. `FUN_9b4e9c` still recovers a structure of length
 `0x44` with fields at offsets `0x40` and `0x42`.
 
+### `FUN_35b82a`
+
+The unified inference pass now keeps the following functions scalar:
+
+- `FUN_9b58ae` returns an unsigned 32-bit value in `R5:R4`;
+- `FUN_35b478` returns one word in `R4`;
+- `FUN_35cd78` and `FUN_254096` take one scalar parameter;
+- `FUN_99b4aa` takes two scalar parameters.
+
+Consequently, the decompiler emits `IsFeatureEnabled(0x514)`,
+`FUN_35cd78(3)`, `FUN_254096(0x32a)`, and `FUN_99b4aa(1,0xb86)` without
+fictitious register arguments. Multiplication through the TASKING unsigned
+32-bit runtime helper remains integer data flow; the invalid `(int)(float)`
+conversion is gone.
+
+The patched decompiler also rejoins far data pointers carried as separate
+OFFSET/PAGE words. Recovery covers constant and scalar-indexed pointer
+arithmetic, nested pointer fields, lock-step phi/indirect flows, reverse-order
+PAGE/OFFSET stack spills, and adjacent loads whose second word is reached by a
+post-incremented address. In `FUN_35b82a` this restores direct nested event
+accesses, `pcVar + 0x2cc`, the indexed array of embedded far pointers, and the
+pointer preserved across `FUN_254096`. None of those paths exposes `0x3fff`,
+`0x4000`, `CONCAT`, or a synthetic high-word shift.
+
+Recovery requires both a proven common origin and a terminal data-memory use.
+The semantic return type is read from call specifications before it has
+propagated onto the physical `R5:R4` join, so function-pointer and scalar call
+results cannot be retyped as data pointers. Function pointers, scalar pairs,
+mismatched halves, and unrelated adjacent loads are explicit negative cases.
+
+Finally, large C166 functions receive a type-recovery budget of 20 changes
+instead of upstream's empirical limit of 7. `FUN_35b82a` was verified to
+stabilize beyond the upstream limit; the change is selected only by the exact
+processor property `c166.abi=tasking-classic-large`. Every other architecture
+continues to use the upstream limit unchanged.
+
 ## Regression strategy
 
-- 119 synthetic functions cover positive, negative, ambiguous,
+- the synthetic matrix covers positive, negative, ambiguous,
   scalar/data/function, and forwarding cases;
 - after the unified pass, code and data phases are run separately and the full
   analysis is repeated; the signature snapshot must remain unchanged;
@@ -127,6 +172,17 @@ of the indexed variable. `FUN_9b4e9c` still recovers a structure of length
 - the complete suite runs for C167CR and C167CS;
 - the real-M55 test runs headless against a read-only saved database and checks
   `FUN_34b230`, `FUN_34b662`, `FUN_9b4e9c`, and the GUI-command path;
+- the `FUN_35b82a` real-database test executes the unified analyzer twice,
+  compares signature snapshots and two decompilations, rejects non-settling
+  type recovery and representation-level pointer arithmetic, and checks the
+  compact scalar call signatures;
+- synthetic runtime tests reject floating-point p-code in unsigned integer
+  multiply/divide/remainder helpers;
+- nested, scalar-indexed, post-incremented adjacent-word, and reverse stack-spill
+  fixtures check positive far-data recovery;
+- function-pointer call results, scalar call results, scalar pairs, mismatched
+  halves, and unrelated loads are negative controls and must retain their
+  representation-level masks instead of being folded into data pointers;
 - patched-Ghidra x86-64 and ARM controls must preserve upstream Auto Structure
   behavior.
 

@@ -33,6 +33,7 @@ import ghidra.util.classfinder.ClassSearcher;
 import ghidrainfineon.C166ArchitectureProfile;
 import ghidrainfineon.C166CodePointerPhase;
 import ghidrainfineon.C166FarPointerPhase;
+import ghidrainfineon.C166ScalarSignaturePhase;
 import ghidrainfineon.C166TaskingDataTypePhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 import ghidrainfineon.C166TaskingTypeInferenceAnalyzer;
@@ -55,6 +56,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 			"variadic phase does not accept TASKING Classic large");
 		check(new C166TaskingDataTypePhase().canAnalyze(currentProgram),
 			"data-type phase does not accept TASKING Classic large");
+		check(new C166ScalarSignaturePhase().canAnalyze(currentProgram),
+			"scalar-signature phase does not accept TASKING Classic large");
 		check(new C166TaskingRuntimeAnalyzer().canAnalyze(currentProgram),
 			"runtime analyzer does not accept TASKING Classic large");
 		C166TaskingTypeInferenceAnalyzer unified =
@@ -69,7 +72,8 @@ public class C166TaskingClassicAbiTest extends GhidraScript {
 		check(discoveredAnalyzers.contains("C166TaskingTypeInferenceAnalyzer"),
 			"unified TASKING type inference is absent from ClassSearcher");
 		for (String phase : Set.of("C166CodePointerPhase", "C166FarPointerPhase",
-			"C166PointerReturnPhase", "C166TaskingDataTypePhase",
+			"C166PointerReturnPhase", "C166ScalarSignaturePhase",
+			"C166TaskingDataTypePhase",
 			"C166VariadicCallPhase")) {
 			check(!discoveredAnalyzers.contains(phase),
 				"internal phase leaked into Ghidra Analyzer list: " + phase);

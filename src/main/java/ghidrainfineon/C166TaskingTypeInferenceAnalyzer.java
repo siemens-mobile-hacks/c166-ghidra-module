@@ -50,9 +50,13 @@ public class C166TaskingTypeInferenceAnalyzer extends AbstractAnalyzer {
 			program, set, monitor, log);
 		success &= runPhase("variadic bootstrap", new C166VariadicCallPhase(),
 			program, set, monitor, log);
+		success &= runPhase("scalar signatures", new C166ScalarSignaturePhase(),
+			program, set, monitor, log);
 		success &= runPhase("code/scalar classification", new C166CodePointerPhase(),
 			program, set, monitor, log);
 		success &= runPhase("far-data classification", new C166FarPointerPhase(),
+			program, set, monitor, log);
+		success &= runPhase("scalar finalization", new C166ScalarSignaturePhase(),
 			program, set, monitor, log);
 		success &= runPhase("pointer returns", new C166PointerReturnPhase(),
 			program, set, monitor, log);

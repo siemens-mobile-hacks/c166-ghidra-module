@@ -121,6 +121,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			removeLegacyCallReferences(program, set, fullScan, monitor);
 		CallSiteSeedStats seedStats = seedConstantDataPointers(program, set, fullScan,
 			monitor, log);
+		C166CodePointerPhase.addScalarPairEvidence(program, seedStats.scalarPairs());
 		CandidateGraph graph = buildCandidateGraph(program, set, fullScan, monitor);
 		SccSchedule schedule = buildSccSchedule(graph, monitor);
 		monitor.initialize(Math.max(1, graph.functions().size()),

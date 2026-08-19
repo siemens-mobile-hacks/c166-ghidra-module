@@ -25,6 +25,7 @@ import ghidrainfineon.C166CallTargetAnalyzer;
 import ghidrainfineon.C166CodePointerPhase;
 import ghidrainfineon.C166FarPointerPhase;
 import ghidrainfineon.C166PointerReturnPhase;
+import ghidrainfineon.C166ScalarSignaturePhase;
 import ghidrainfineon.C166TaskingDataTypePhase;
 import ghidrainfineon.C166TaskingRuntimeAnalyzer;
 import ghidrainfineon.C166TaskingTypeInferenceAnalyzer;
@@ -53,6 +54,8 @@ public class NonC166AutoStructureControlTest extends GhidraScript {
 			"far-pointer phase accepted " + language);
 		check(!new C166PointerReturnPhase().canAnalyze(currentProgram),
 			"pointer-return phase accepted " + language);
+		check(!new C166ScalarSignaturePhase().canAnalyze(currentProgram),
+			"scalar-signature phase accepted " + language);
 		check(!new C166TaskingDataTypePhase().canAnalyze(currentProgram),
 			"data-type phase accepted " + language);
 		check(!new C166VariadicCallPhase().canAnalyze(currentProgram),

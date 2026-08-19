@@ -81,6 +81,8 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 	private static final String ANALYSIS_OPTIONS = "C166 TASKING Code Pointer Inference";
 	private static final String SEMANTIC_EVIDENCE_PREFIX =
 		"Semantic code-pointer parameter slots at ";
+	private static final String SCALAR_PAIR_EVIDENCE_PREFIX =
+		"Scalar parameter-pair slots at ";
 	private static final Map<Program, Map<Address, Set<Integer>>> TRANSIENT_SEMANTIC_EVIDENCE =
 		Collections.synchronizedMap(new WeakHashMap<>());
 	private static final int FIRST_ARGUMENT_REGISTER = 12;
@@ -229,6 +231,7 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			referencesRemoved += update.referencesRemoved();
 		}
 		publishSemanticEvidence(program, callers, semanticEvidenceByTarget, fullScan);
+		publishScalarPairEvidence(program, callers, scalarPairs, fullScan);
 		if (fullScan) {
 			repairedPointers += repairUnsupportedGenericFunctionPointers(program, callers,
 				supportedEvidenceByTarget, log);
@@ -377,6 +380,47 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		return SEMANTIC_EVIDENCE_PREFIX + function.getEntryPoint();
 	}
 
+	static boolean hasScalarPairEvidence(Program program, Function function, int start) {
+		String slots = program.getOptions(ANALYSIS_OPTIONS).getString(
+			scalarPairEvidenceKey(function), null);
+		return slots != null && ("," + slots + ",").contains("," + start + ",");
+	}
+
+	static void addScalarPairEvidence(Program program,
+			Map<Function, Set<Integer>> evidenceByFunction) {
+		Options evidence = program.getOptions(ANALYSIS_OPTIONS);
+		for (Map.Entry<Function, Set<Integer>> entry : evidenceByFunction.entrySet()) {
+			Set<Integer> starts = new HashSet<>(entry.getValue());
+			String current = evidence.getString(scalarPairEvidenceKey(entry.getKey()), null);
+			if (current != null) {
+				for (String value : current.split(",")) {
+					try {
+						starts.add(Integer.parseInt(value));
+					}
+					catch (NumberFormatException ignored) {
+						// Replace malformed analyzer-owned evidence with valid values.
+					}
+				}
+			}
+			List<Integer> sorted = new ArrayList<>(starts);
+			Collections.sort(sorted);
+			StringBuilder encoded = new StringBuilder();
+			for (int start : sorted) {
+				if (encoded.length() != 0) {
+					encoded.append(',');
+				}
+				encoded.append(start);
+			}
+			if (encoded.length() != 0) {
+				evidence.setString(scalarPairEvidenceKey(entry.getKey()), encoded.toString());
+			}
+		}
+	}
+
+	private static String scalarPairEvidenceKey(Function function) {
+		return SCALAR_PAIR_EVIDENCE_PREFIX + function.getEntryPoint();
+	}
+
 	private void publishSemanticEvidence(Program program, List<Function> scannedFunctions,
 			Map<Function, Set<Integer>> evidenceByFunction, boolean fullScan) {
 		synchronized (TRANSIENT_SEMANTIC_EVIDENCE) {
@@ -421,6 +465,37 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			}
 			if (encoded.length() != 0) {
 				evidence.setString(semanticEvidenceKey(entry.getKey()), encoded.toString());
+			}
+		}
+	}
+
+	private void publishScalarPairEvidence(Program program, List<Function> scannedFunctions,
+			Map<Function, Set<Integer>> evidenceByFunction, boolean fullScan) {
+		Options evidence = program.getOptions(ANALYSIS_OPTIONS);
+		if (fullScan) {
+			for (String option : List.copyOf(evidence.getOptionNames())) {
+				if (option.startsWith(SCALAR_PAIR_EVIDENCE_PREFIX)) {
+					evidence.removeOption(option);
+				}
+			}
+		}
+		else {
+			for (Function function : scannedFunctions) {
+				evidence.removeOption(scalarPairEvidenceKey(function));
+			}
+		}
+		for (Map.Entry<Function, Set<Integer>> entry : evidenceByFunction.entrySet()) {
+			List<Integer> starts = new ArrayList<>(entry.getValue());
+			Collections.sort(starts);
+			StringBuilder encoded = new StringBuilder();
+			for (int start : starts) {
+				if (encoded.length() != 0) {
+					encoded.append(',');
+				}
+				encoded.append(start);
+			}
+			if (encoded.length() != 0) {
+				evidence.setString(scalarPairEvidenceKey(entry.getKey()), encoded.toString());
 			}
 		}
 	}

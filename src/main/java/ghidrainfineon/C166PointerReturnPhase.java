@@ -26,6 +26,7 @@ import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.TypedefDataType;
 import ghidra.program.model.data.Undefined;
+import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.lang.OperandType;
 import ghidra.program.model.lang.Register;
@@ -126,7 +127,9 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 				}
 				try {
 					DataType inferredType = enoughCode ? codePointer :
-						enoughData ? dataPointer : Undefined.getUndefinedDataType(4);
+						enoughData ? dataPointer : item.hasUnsignedLongUse()
+							? new UnsignedLongDataType(program.getDataTypeManager())
+							: Undefined.getUndefinedDataType(4);
 					if (sameReturnCategory(function.getReturnType(), inferredType)) {
 						continue;
 					}
@@ -153,8 +156,13 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 	private boolean sameReturnCategory(DataType current, DataType inferred) {
 		ReturnCategory currentCategory = returnCategory(current);
-		return currentCategory != ReturnCategory.UNKNOWN &&
-			currentCategory == returnCategory(inferred);
+		if (currentCategory == ReturnCategory.UNKNOWN ||
+			currentCategory != returnCategory(inferred)) {
+			return false;
+		}
+		// A proven unsigned-long consumer refines an analyzer-owned undefined4.
+		return currentCategory != ReturnCategory.SCALAR ||
+			!Undefined.isUndefined(current) || Undefined.isUndefined(inferred);
 	}
 
 	private ReturnCategory returnCategory(DataType type) {
@@ -220,6 +228,12 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 	private void recordCallUses(Program program, Function target, Instruction instruction,
 			Map<Integer, OriginWord> registers, Map<Function, ReturnEvidence> evidence) {
+		if (isUnsignedLongRuntimeHelper(target)) {
+			recordUnsignedLongPairUse(instruction, registers.get(4), registers.get(5),
+				evidence);
+			recordUnsignedLongPairUse(instruction, registers.get(10), registers.get(11),
+				evidence);
+		}
 		if (C166TaskingRuntimeAnalyzer.isFarIndirectDispatcher(program, target)) {
 			OriginWord low = registers.get(4);
 			OriginWord high = registers.get(5);
@@ -260,9 +274,30 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 				}
 			}
 			else {
-				item.markDataUse(instruction.getAddress());
+				// An analyzer-owned void * is often circular evidence propagated from
+				// the return currently being classified.  Concrete pointee types and
+				// user/imported declarations remain authoritative.
+				if (target.getSignatureSource() != SourceType.ANALYSIS ||
+					!isGenericDataPointer(type)) {
+					item.markDataUse(instruction.getAddress());
+				}
 			}
 		}
+	}
+
+	private void recordUnsignedLongPairUse(Instruction instruction, OriginWord low,
+			OriginWord high, Map<Function, ReturnEvidence> evidence) {
+		if (samePair(low, high)) {
+			evidence.computeIfAbsent(low.function(), ignored -> new ReturnEvidence())
+				.markUnsignedLongUse(instruction.getAddress());
+		}
+	}
+
+	private boolean isUnsignedLongRuntimeHelper(Function function) {
+		String fixup = function.getCallFixup();
+		return "c166_tasking_mulu4".equals(fixup) ||
+			"c166_tasking_divu4".equals(fixup) ||
+			"c166_tasking_modu4".equals(fixup);
 	}
 
 	private void applyRegisterWrites(Program program, Instruction instruction,
@@ -530,6 +565,18 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 			"/__c166_far_function".equals(path);
 	}
 
+	private boolean isGenericDataPointer(DataType type) {
+		Pointer pointer = pointerDataType(type);
+		if (pointer == null) {
+			return false;
+		}
+		DataType target = pointer.getDataType();
+		while (target instanceof TypeDef typeDef) {
+			target = typeDef.getBaseDataType();
+		}
+		return target instanceof VoidDataType || Undefined.isUndefined(target);
+	}
+
 	private Pointer pointerDataType(DataType type) {
 		DataType current = type;
 		while (current instanceof TypeDef typeDef) {
@@ -591,6 +638,7 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		private final Set<Address> dataUses = new HashSet<>();
 		private final Set<Address> codeUses = new HashSet<>();
 		private final Set<Address> scalarUses = new HashSet<>();
+		private final Set<Address> unsignedLongUses = new HashSet<>();
 		private boolean directPagedUse;
 
 		private void markDataUse(Address address) {
@@ -603,6 +651,11 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 		private void markScalarUse(Address address) {
 			scalarUses.add(address);
+		}
+
+		private void markUnsignedLongUse(Address address) {
+			scalarUses.add(address);
+			unsignedLongUses.add(address);
 		}
 
 		private void markDirectPagedUse() {
@@ -635,6 +688,10 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 		private Set<Address> scalarUses() {
 			return scalarUses;
+		}
+
+		private boolean hasUnsignedLongUse() {
+			return !unsignedLongUses.isEmpty();
 		}
 	}
 }

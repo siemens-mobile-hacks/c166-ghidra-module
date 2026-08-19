@@ -55,8 +55,9 @@
             local left:4 = (zext(r5) << 16) | zext(r4);
             local right:4 = (zext(r11) << 16) | zext(r10);
             local result:4 = left * right;
-            r4 = trunc(result);
-            r5 = trunc(result >> 16);
+            local high:4 = result >> 16;
+            r4 = result:2;
+            r5 = high:2;
             ]]></body>
         </pcode>
     </callfixup>
@@ -67,8 +68,9 @@
             local dividend:4 = (zext(r5) << 16) | zext(r4);
             local divisor:4 = (zext(r11) << 16) | zext(r10);
             local result:4 = dividend / divisor;
-            r4 = trunc(result);
-            r5 = trunc(result >> 16);
+            local high:4 = result >> 16;
+            r4 = result:2;
+            r5 = high:2;
             ]]></body>
         </pcode>
     </callfixup>
@@ -79,8 +81,9 @@
             local dividend:4 = (zext(r5) << 16) | zext(r4);
             local divisor:4 = (zext(r11) << 16) | zext(r10);
             local result:4 = dividend % divisor;
-            r4 = trunc(result);
-            r5 = trunc(result >> 16);
+            local high:4 = result >> 16;
+            r4 = result:2;
+            r5 = high:2;
             ]]></body>
         </pcode>
     </callfixup>

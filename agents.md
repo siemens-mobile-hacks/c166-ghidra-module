@@ -66,6 +66,14 @@ is explicitly requested, apply this sequence to both `c166-ghidra-module` and
 Write and maintain all repository documentation in English, including README
 content, design notes, bug reports, plans, test reports, and agent guidance.
 
+## Fix result reporting
+
+At the end of every implemented fix, show the user a concrete **Before / After**
+comparison. Use the smallest representative source, decompiler output, log, or
+behavioral example that demonstrates the original defect and the corrected
+result. Do not report only that tests passed. If suspicious-looking output
+remains intentionally, show it separately and explain why it is valid.
+
 ---
 
 ## Table of Contents

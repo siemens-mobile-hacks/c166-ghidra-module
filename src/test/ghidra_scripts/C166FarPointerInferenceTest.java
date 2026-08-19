@@ -483,7 +483,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		check(globalPointer != null && globalPointer.getDataType() instanceof Pointer &&
 			globalPointer.getLength() == 4,
 			"adjacent global PAGE:OFFSET words were not joined as a far pointer");
-		checkNoParameters(indexedGlobalPair);
+		checkWordSignature(indexedGlobalPair, SourceType.ANALYSIS, "r12");
 		Data indexedGlobalPointer =
 			currentProgram.getListing().getDefinedDataAt(toAddr(0x1100));
 		check(indexedGlobalPointer != null &&
@@ -495,7 +495,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			"analysis-owned false code survived global far-pointer recovery");
 		check(currentProgram.getFunctionManager().getFunctionContaining(toAddr(0x1100)) == null,
 			"analysis-owned false function survived global far-pointer recovery");
-		checkNoParameters(protectedIndexedGlobalPair);
+		checkWordSignature(protectedIndexedGlobalPair, SourceType.ANALYSIS, "r12");
 		check(currentProgram.getListing().getDefinedDataAt(toAddr(0x1200)) == null &&
 			currentProgram.getListing().getInstructionContaining(toAddr(0x1200)) != null &&
 			currentProgram.getFunctionManager().getFunctionAt(toAddr(0x1200)) ==
@@ -552,7 +552,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		// genuine live 16-bit input even though R13:R12 is the selected pointer.
 		checkSignature(strongerPair, Set.of(0), "r13+r12", "r14");
 
-		checkNoParameters(ambiguous);
+		checkWordSignature(ambiguous, SourceType.ANALYSIS, "r12", "r13");
 		checkSignature(constantSeedStore, Set.of(0), "r13+r12");
 		checkWordSignature(staleGenericCodePointer, SourceType.ANALYSIS, "r12", "r13");
 		checkSignature(staleConsumedGenericCodePointer, Set.of(0), "r13+r12");
@@ -564,12 +564,14 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		check(typedVariadicTarget.hasVarArgs(),
 			"far-pointer inference removed a variadic declaration");
 		checkWordSignature(typedVariadicTarget, SourceType.ANALYSIS, "r12", "r13");
-		checkNoParameters(freshScalarPair);
+		checkWordSignature(freshScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(staleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleForwardTarget, SourceType.ANALYSIS, "r12", "r13");
-		checkNoParameters(freshRectangleScalarPair);
-		checkNoParameters(rectangleWithUnrelatedExtp);
+		checkWordSignature(freshRectangleScalarPair, SourceType.ANALYSIS,
+			"r12", "r13");
+		checkWordSignature(rectangleWithUnrelatedExtp, SourceType.ANALYSIS,
+			"r12", "r13");
 		checkCharPointer(rectangleTypedSink, "r13+r12");
 		checkSignature(rectangleRealPointer, Set.of(0), "r13+r12");
 		checkCharPointer(rectangleConcretePointer, "r13+r12");
@@ -577,14 +579,14 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkFunctionPointer(codeSizedPageStore, 0,
 			"exact function-entry constants were not classified as an fpointer");
 		checkNoParameters(unmappedConstantStore);
-		checkNoParameters(wrongOffset);
-		checkNoParameters(sameWord);
-		checkNoParameters(constantPage);
+		checkWordSignature(wrongOffset, SourceType.ANALYSIS, "r12");
+		checkWordSignature(sameWord, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(constantPage, SourceType.ANALYSIS, "r12");
 		checkNoParameters(setupWithoutAccess);
-		checkNoParameters(accessWithoutSetup);
-		checkNoParameters(reversedPair);
-		checkNoParameters(nonArgumentPage);
-		checkNoParameters(dpp1Only);
+		checkWordSignature(accessWithoutSetup, SourceType.ANALYSIS, "r12");
+		checkWordSignature(reversedPair, SourceType.ANALYSIS, "r12", "r13");
+		checkWordSignature(nonArgumentPage, SourceType.ANALYSIS, "r12");
+		checkWordSignature(dpp1Only, SourceType.ANALYSIS, "r12", "r13");
 
 		checkSignature(preserved, Set.of(1), "r12", "r14+r13");
 		check("count".equals(preserved.getParameter(0).getName()),
@@ -616,8 +618,10 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		check(beforeSecondRun.equals(snapshotSignatures()),
 			"far-pointer phase rewrote the unified classification");
 		runAnalyzer();
-		check(beforeSecondRun.equals(snapshotSignatures()),
-			"unified TASKING type inference is not idempotent");
+		String afterSecondRun = snapshotSignatures();
+		check(beforeSecondRun.equals(afterSecondRun),
+			"unified TASKING type inference is not idempotent\nBEFORE:\n" +
+				beforeSecondRun + "\nAFTER:\n" + afterSecondRun);
 
 		println("TASKING far-pointer inference matrix passed: " + fixtures.size() +
 			" fixture functions, including positive, negative, ambiguous and idempotence cases.");
