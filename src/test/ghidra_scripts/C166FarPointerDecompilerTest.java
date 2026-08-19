@@ -26,6 +26,7 @@ import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.ShortDataType;
 import ghidra.program.model.data.Structure;
+import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.UnsignedIntegerDataType;
 import ghidra.program.model.data.UnsignedShortDataType;
@@ -177,6 +178,38 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			currentProgram.getDataTypeManager());
 		DataType wordPointerPointer = new PointerDataType(wordPointer,
 			currentProgram.getDataTypeManager());
+		StructureDataType nestedMessageDefinition = new StructureDataType(
+			new CategoryPath("/test"), "NestedFarPointerMessage", 0,
+			currentProgram.getDataTypeManager());
+		nestedMessageDefinition.add(word, "pid_from", null);
+		nestedMessageDefinition.add(word, "msg", null);
+		nestedMessageDefinition.add(word, "submess", null);
+		nestedMessageDefinition.add(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), "data0", null);
+		nestedMessageDefinition.add(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), "data1", null);
+		DataType nestedMessage = currentProgram.getDataTypeManager().addDataType(
+			nestedMessageDefinition, DataTypeConflictHandler.REPLACE_HANDLER);
+		DataType nestedMessagePointer = new PointerDataType(nestedMessage,
+			currentProgram.getDataTypeManager());
+		FunctionDefinitionDataType callbackDefinition = new FunctionDefinitionDataType(
+			"paged_pointer_negative_callback", currentProgram.getDataTypeManager());
+		callbackDefinition.setReturnType(VoidDataType.dataType);
+		DataType callbackPointer = new PointerDataType(callbackDefinition,
+			currentProgram.getDataTypeManager());
+		StructureDataType nestedOwnerDefinition = new StructureDataType(
+			new CategoryPath("/test"), "NestedFarPointerOwner", 0,
+			currentProgram.getDataTypeManager());
+		nestedOwnerDefinition.add(word, "prefix0", null);
+		nestedOwnerDefinition.add(word, "prefix2", null);
+		nestedOwnerDefinition.add(nestedMessagePointer, "message", null);
+		nestedOwnerDefinition.add(new UnsignedLongDataType(
+			currentProgram.getDataTypeManager()), "scalar_pair", null);
+		nestedOwnerDefinition.add(callbackPointer, "callback", null);
+		DataType nestedOwner = currentProgram.getDataTypeManager().addDataType(
+			nestedOwnerDefinition, DataTypeConflictHandler.REPLACE_HANDLER);
+		DataType nestedOwnerPointer = new PointerDataType(nestedOwner,
+			currentProgram.getDataTypeManager());
 		Function nestedFarPointerLoad = functionWithCode(0x3420,
 			"nested_far_pointer_loaded_from_memory", bytes(
 				0x08, 0xc4,                         // R12 += 4
@@ -188,7 +221,7 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				0xdb, 0x00));
 		nestedFarPointerLoad.setReturnType(word, SourceType.USER_DEFINED);
 		nestedFarPointerLoad.updateFunction("__tasking_c166_classic", null,
-			List.of(new ParameterImpl("table", wordPointerPointer, currentProgram)),
+			List.of(new ParameterImpl("owner", nestedOwnerPointer, currentProgram)),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 		Function copiedSecondFarPointer = functionWithCode(0x3440,
 			"copied_second_far_pointer_offset", bytes(
@@ -256,11 +289,32 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			List.of(new ParameterImpl("table", wordPointerPointer, currentProgram),
 				new ParameterImpl("index", word, currentProgram)),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
-		FunctionDefinitionDataType callbackDefinition = new FunctionDefinitionDataType(
-			"paged_pointer_negative_callback", currentProgram.getDataTypeManager());
-		callbackDefinition.setReturnType(VoidDataType.dataType);
-		DataType callbackPointer = new PointerDataType(callbackDefinition,
-			currentProgram.getDataTypeManager());
+		Function declaredScalarPairAsData = functionWithCode(0x3520,
+			"declared_scalar_field_is_not_paged_data", bytes(
+				0x06, 0xfc, 0x08, 0x00,             // R12 += 8 (scalar field)
+				0xdc, 0x5d,                         // EXTP R13,#2
+				0xd4, 0x2c, 0x02, 0x00,             // R2 = [R12+2]
+				0xa8, 0x1c,                         // R1 = [R12]
+				0xdc, 0x42,                         // EXTP R2,#1
+				0xd4, 0x41, 0x04, 0x00,             // R4 = [R1+4]
+				0xdb, 0x00));
+		declaredScalarPairAsData.setReturnType(word, SourceType.USER_DEFINED);
+		declaredScalarPairAsData.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("owner", nestedOwnerPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function declaredCallbackAsData = functionWithCode(0x3540,
+			"declared_callback_field_is_not_paged_data", bytes(
+				0x06, 0xfc, 0x0c, 0x00,             // R12 += 12 (callback field)
+				0xdc, 0x5d,                         // EXTP R13,#2
+				0xd4, 0x2c, 0x02, 0x00,             // R2 = [R12+2]
+				0xa8, 0x1c,                         // R1 = [R12]
+				0xdc, 0x42,                         // EXTP R2,#1
+				0xd4, 0x41, 0x04, 0x00,             // R4 = [R1+4]
+				0xdb, 0x00));
+		declaredCallbackAsData.setReturnType(word, SourceType.USER_DEFINED);
+		declaredCallbackAsData.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("owner", nestedOwnerPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 		callee(0x21a0, "returns_callback", callbackPointer);
 		Function callbackAsData = caller(0x21b0,
 			"function_pointer_is_not_paged_data", bytes(
@@ -939,7 +993,10 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			check(compactSavedField.equals(savedFieldSecondPass),
 				"saved far-pointer reconstruction was not idempotent");
 			String nestedFarPointerCode = decompile(decompiler, nestedFarPointerLoad);
-			check(!nestedFarPointerCode.contains("0x3fff") &&
+			String compactNestedFarPointer = nestedFarPointerCode.replaceAll("\\s+", "");
+			check(compactNestedFarPointer.contains("->message->submess") &&
+				!compactNestedFarPointer.contains("(undefined2*)owner->message") &&
+				!nestedFarPointerCode.contains("0x3fff") &&
 				!nestedFarPointerCode.contains("0x4000") &&
 				!nestedFarPointerCode.contains("CONCAT") &&
 				!nestedFarPointerCode.contains("segment(") &&
@@ -964,7 +1021,8 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 						": paged pointer arithmetic was not reconstructed:\n" + code);
 			}
 			for (Function negative : List.of(callbackAsData, scalarAsData,
-				mismatchedFarPointerParts)) {
+				mismatchedFarPointerParts, declaredScalarPairAsData,
+				declaredCallbackAsData)) {
 				String negativeCode = decompile(decompiler, negative);
 				check(negativeCode.contains("0x3fff"),
 					negative.getName() +

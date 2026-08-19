@@ -1,4 +1,5 @@
 // Run headlessly against the saved real-program fixture after full analysis.
+import java.io.File;
 import java.lang.reflect.Field;
 
 import ghidra.app.decompiler.DecompInterface;
@@ -7,11 +8,18 @@ import ghidra.app.decompiler.DecompileProcessFactory;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.UnsignedLongDataType;
+import ghidra.program.model.data.UnsignedShortDataType;
+import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.symbol.SourceType;
 import ghidrainfineon.C166TaskingTypeInferenceAnalyzer;
 
 public class C166PagedPointerArithmeticHeadlessTest extends GhidraScript {
@@ -31,6 +39,7 @@ public class C166PagedPointerArithmeticHeadlessTest extends GhidraScript {
 		Function mapKey = requiredFunction(0x35cd78L);
 		Function selectMessage = requiredFunction(0x254096L);
 		Function notify = requiredFunction(0x99b4aaL);
+		installNestedMessageTypes(function);
 
 		AddressSet scope = new AddressSet(function.getBody());
 		for (Function dependency : new Function[] {
@@ -61,6 +70,10 @@ public class C166PagedPointerArithmeticHeadlessTest extends GhidraScript {
 		decompiler.toggleSyntaxTree(true);
 		check(decompiler.openProgram(currentProgram), decompiler.getLastMessage());
 		try {
+			String debugPath = System.getenv("C166_TEST_DECOMPILER_DEBUG");
+			if (debugPath != null && !debugPath.isBlank()) {
+				decompiler.enableDebug(new File(debugPath));
+			}
 			String first = decompile(decompiler, function);
 			String second = decompile(decompiler, function);
 			check(first.equals(second), "0x35b82a decompilation is not idempotent");
@@ -69,6 +82,12 @@ public class C166PagedPointerArithmeticHeadlessTest extends GhidraScript {
 			check(first.contains("IsFeatureEnabled(0x514)"),
 				"0x35b82a lost the feature-test call or its scalar argument:\n" + first);
 			String nestedPrefix = first.substring(0, first.indexOf("IsFeatureEnabled(0x514)"));
+			String compactNestedPrefix = nestedPrefix.replaceAll("\\s+", "");
+			check(compactNestedPrefix.contains("->field3_0x4->submess") &&
+				compactNestedPrefix.contains("==0x193") &&
+				!compactNestedPrefix.contains("(undefined2*)param_2->field3_0x4"),
+				"0x35b82a discarded the declared GBS_MSG pointee type:\n" +
+					nestedPrefix);
 			check(!nestedPrefix.contains("0x3fff") &&
 				!nestedPrefix.contains("0x4000") &&
 				!nestedPrefix.contains("segment(") &&
@@ -133,6 +152,39 @@ public class C166PagedPointerArithmeticHeadlessTest extends GhidraScript {
 		finally {
 			decompiler.dispose();
 		}
+	}
+
+	private void installNestedMessageTypes(Function function) throws Exception {
+		StructureDataType messageDefinition = new StructureDataType(
+			new CategoryPath("/test"), "GBS_MSGHeadlessFixture", 0,
+			currentProgram.getDataTypeManager());
+		DataType word = new UnsignedShortDataType(currentProgram.getDataTypeManager());
+		DataType voidPointer = new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager());
+		messageDefinition.add(word, "pid_from", null);
+		messageDefinition.add(word, "msg", null);
+		messageDefinition.add(word, "submess", null);
+		messageDefinition.add(voidPointer, "data0", null);
+		messageDefinition.add(voidPointer, "data1", null);
+		DataType messageType = currentProgram.getDataTypeManager().addDataType(
+			messageDefinition, DataTypeConflictHandler.REPLACE_HANDLER);
+		check(messageType.getLength() == 0xe,
+			"TASKING Large GBS_MSG fixture has wrong size: " + messageType.getLength());
+		DataType messagePointer = new PointerDataType(messageType,
+			currentProgram.getDataTypeManager());
+		StructureDataType ownerDefinition = new StructureDataType(
+			new CategoryPath("/test"), "NestedMessageOwnerHeadlessFixture", 0,
+			currentProgram.getDataTypeManager());
+		ownerDefinition.add(word, "field0_0x0", null);
+		ownerDefinition.add(word, "field1_0x2", null);
+		ownerDefinition.add(messagePointer, "field3_0x4", null);
+		DataType ownerType = currentProgram.getDataTypeManager().addDataType(
+			ownerDefinition, DataTypeConflictHandler.REPLACE_HANDLER);
+		DataType ownerPointer = new PointerDataType(ownerType,
+			currentProgram.getDataTypeManager());
+		check(function.getParameterCount() >= 2,
+			"0x35b82a is missing its second parameter: " + function.getSignature());
+		function.getParameter(1).setDataType(ownerPointer, SourceType.USER_DEFINED);
 	}
 
 	private void assertSignatures(Function index, Function predicate, Function mapKey,
