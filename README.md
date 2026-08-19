@@ -32,7 +32,9 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   DPP/EXTP/EXTS p-code emitter, preserving DPP writes as live register dataflow
   and typed register-mode EXTP addresses as far-pointer operations instead of
   exposing page-shift arithmetic.
-- Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
+- Infers far-pointer parameters and global far-pointer objects from documented
+  DPP0/EXTP page-and-offset data flow, including four-byte pointer values already
+  rejoined by the patched decompiler.
 - Joins constant far code-pointer arguments as four-byte function pointers
   when their `SEGMENT:OFFSET` encoding names an executable function entry,
   while requiring repeated or semantic evidence before propagating that type

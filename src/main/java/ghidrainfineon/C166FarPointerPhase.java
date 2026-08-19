@@ -1813,6 +1813,20 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				scoreForwardedPointers(program, operation, scores, pointerTypes,
 					globalPointerStarts);
 			}
+			RecoveredParameterPointer recoveredParameter =
+				recoveredParameterFarPointer(operation);
+			if (recoveredParameter != null) {
+				int start = recoveredParameter.start();
+				scores.merge(start, 1, Integer::sum);
+				liveSlots.add(start);
+				liveSlots.add(start + 1);
+				directPagedPairs.add(start);
+				mergePointerType(program, pointerTypes, start, recoveredParameter.type());
+			}
+			Address recoveredGlobal = recoveredGlobalFarPointerStart(operation);
+			if (recoveredGlobal != null) {
+				globalPointerStarts.add(recoveredGlobal);
+			}
 			Address directGlobal = directPagedGlobalPairStart(program, function, operation);
 			if (directGlobal != null) {
 				globalPointerStarts.add(directGlobal);
@@ -1862,6 +1876,59 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		return new Inference(selection.starts(), liveSlots, pointerTypes,
 			globalPointerStarts, directPagedPairs,
 			selection.ambiguous() && selection.score() != 0);
+	}
+
+	/**
+	 * Recognize an incoming stack far pointer after the patched decompiler has
+	 * already rejoined its two TASKING words.  A positive, aligned four-byte stack
+	 * input used directly as a data LOAD/STORE address is parameter evidence; a
+	 * local stack value has a definition and a scalar input is not pointer-typed.
+	 * {@link #retainSupportedPairs(Function, Set, Set)} still requires all four
+	 * register argument words to be occupied before accepting any stack argument.
+	 */
+	private RecoveredParameterPointer recoveredParameterFarPointer(PcodeOp operation) {
+		if ((operation.getOpcode() != PcodeOp.LOAD &&
+			operation.getOpcode() != PcodeOp.STORE) || operation.getNumInputs() < 2) {
+			return null;
+		}
+		Varnode address = operation.getInput(1);
+		Address storage = address.getAddress();
+		if (!address.isInput() || address.getDef() != null || address.getSize() != 4 ||
+			storage == null || !storage.isStackAddress() || storage.getOffset() < 0 ||
+			(storage.getOffset() & 1) != 0 || address.getHigh() == null) {
+			return null;
+		}
+		DataType type = address.getHigh().getDataType();
+		if (!isPointerType(type) || isFunctionPointer(type) || type.getLength() != 4) {
+			return null;
+		}
+		long word = storage.getOffset() / 2;
+		if (word > Integer.MAX_VALUE - 5) {
+			return null;
+		}
+		return new RecoveredParameterPointer(4 + (int) word, type);
+	}
+
+	/**
+	 * Recognize a global far pointer after the patched decompiler has already
+	 * rejoined its adjacent OFFSET/PAGE loads.  The resulting four-byte,
+	 * address-tied HighVariable is used directly as the address of a data
+	 * LOAD/STORE, so no SEGMENTOP or PIECE remains for the older paths below.
+	 */
+	private Address recoveredGlobalFarPointerStart(PcodeOp operation) {
+		if ((operation.getOpcode() != PcodeOp.LOAD &&
+			operation.getOpcode() != PcodeOp.STORE) || operation.getNumInputs() < 2) {
+			return null;
+		}
+		Varnode address = operation.getInput(1);
+		Address storage = address.getAddress();
+		if (address.getSize() != 4 || storage == null || !storage.isMemoryAddress() ||
+			address.getHigh() == null) {
+			return null;
+		}
+		DataType type = address.getHigh().getDataType();
+		return isPointerType(type) && !isFunctionPointer(type) && type.getLength() == 4
+			? storage : null;
 	}
 
 	/**
@@ -3213,6 +3280,9 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	private record Inference(Set<Integer> pairStarts, Set<Integer> liveSlots,
 			Map<Integer, DataType> pointerTypes, Set<Address> globalPointerStarts,
 			Set<Integer> directPagedPairs, boolean ambiguous) {
+	}
+
+	private record RecoveredParameterPointer(int start, DataType type) {
 	}
 
 	private record Selection(int score, Set<Integer> starts, boolean ambiguous) {

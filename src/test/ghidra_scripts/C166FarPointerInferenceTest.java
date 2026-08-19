@@ -68,6 +68,12 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			0xf2, 0xfc, 0x00, 0x10, // R12 = [0x1000], offset
 			0xf2, 0xfd, 0x02, 0x10, // R13 = [0x1002], page
 			0xdc, 0x4d, 0xa8, 0x4c, 0xdb, 0x00));
+		createMemoryBlock("global_scalar_words", toAddr(0x1300), new byte[4], false);
+		Function globalScalar = fixture("global_scalar_pair", bytes(
+			0xf2, 0xfc, 0x00, 0x13, // R12 = [0x1300], low word
+			0xf2, 0xfd, 0x02, 0x13, // R13 = [0x1302], high word
+			0x00, 0xcd,             // R12 += R13
+			0xf0, 0x4c, 0xdb, 0x00)); // R4 = R12; rets
 		Function indexedGlobalSink = fixture("indexed_global_sink", bytes(0xdb, 0x00));
 		setUserParameters(indexedGlobalSink, wordType(), charPointerType());
 		MemoryBlock indexedGlobalBlock = createMemoryBlock("indexed_global_far_words",
@@ -483,6 +489,12 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		check(globalPointer != null && globalPointer.getDataType() instanceof Pointer &&
 			globalPointer.getLength() == 4,
 			"adjacent global PAGE:OFFSET words were not joined as a far pointer");
+		Data globalScalarData =
+			currentProgram.getListing().getDefinedDataAt(toAddr(0x1300));
+		check(globalScalarData == null ||
+			!(globalScalarData.getDataType() instanceof Pointer),
+			"adjacent scalar global words were incorrectly joined as a far pointer");
+		checkNoParameters(globalScalar);
 		checkWordSignature(indexedGlobalPair, SourceType.ANALYSIS, "r12");
 		Data indexedGlobalPointer =
 			currentProgram.getListing().getDefinedDataAt(toAddr(0x1100));
@@ -906,7 +918,11 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		Parameter[] parameters = function.getParameters();
 		check(parameters.length == expectedStorage.length,
 			function.getName() + ": expected " + expectedStorage.length +
-				" parameters, got " + parameters.length);
+				" parameters, got " + parameters.length + ": " +
+				Arrays.stream(parameters)
+					.map(parameter -> parameter.getFormalDataType().getDisplayName() + "@" +
+						describe(parameter.getVariableStorage()))
+					.collect(Collectors.joining(", ")));
 		for (int i = 0; i < parameters.length; i++) {
 			String storage = describe(parameters[i].getVariableStorage());
 			check(expectedStorage[i].equals(storage), function.getName() + "[" + i +
