@@ -155,6 +155,72 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			0xe6, 0xf4, 0x00, 0x10, // R4 = offset
 			0xe6, 0xf5, 0x01, 0x00, // R5 = page
 			0xdb, 0x00));
+		callee(0x2160, "returns_context", charPointer);
+		callee(0x2170, "feature_enabled", word, word);
+		Function savedFarPointerField = caller(0x2180,
+			"saved_far_pointer_field_after_call", bytes(
+				0xda, 0x00, 0x60, 0x21,             // returns_context() -> R5:R4
+				0xf0, 0x84,                         // R8 = OFFSET
+				0xf0, 0x95,                         // R9 = PAGE
+				0xe6, 0xfc, 0x14, 0x05,             // R12 = 0x514
+				0xda, 0x00, 0x70, 0x21,             // feature_enabled(0x514)
+				0xf0, 0xc8,                         // R12 = saved OFFSET
+				0xf0, 0xd9,                         // R13 = saved PAGE
+				0x06, 0xfc, 0xcc, 0x02,             // R12 += 0x2cc
+				0xdc, 0x4d,                         // EXTP R13,#1
+				0xa8, 0x4c,                         // R4 = [R12]
+				0xdb, 0x00));
+		savedFarPointerField.setReturnType(word, SourceType.USER_DEFINED);
+		savedFarPointerField.updateFunction("__tasking_c166_classic", null, List.of(),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		FunctionDefinitionDataType callbackDefinition = new FunctionDefinitionDataType(
+			"paged_pointer_negative_callback", currentProgram.getDataTypeManager());
+		callbackDefinition.setReturnType(VoidDataType.dataType);
+		DataType callbackPointer = new PointerDataType(callbackDefinition,
+			currentProgram.getDataTypeManager());
+		callee(0x21a0, "returns_callback", callbackPointer);
+		Function callbackAsData = caller(0x21b0,
+			"function_pointer_is_not_paged_data", bytes(
+				0xda, 0x00, 0xa0, 0x21,
+				0xf0, 0x84,
+				0xf0, 0x95,
+				0xf0, 0xc8,
+				0xf0, 0xd9,
+				0x06, 0xfc, 0xcc, 0x02,
+				0xdc, 0x4d,
+				0xa8, 0x4c,
+				0xdb, 0x00));
+		callbackAsData.setReturnType(word, SourceType.USER_DEFINED);
+		callbackAsData.updateFunction("__tasking_c166_classic", null, List.of(),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		DataType dword = new UnsignedLongDataType(currentProgram.getDataTypeManager());
+		callee(0x21d0, "returns_scalar_pair", dword);
+		Function scalarAsData = caller(0x21e0,
+			"scalar_pair_is_not_paged_pointer", bytes(
+				0xda, 0x00, 0xd0, 0x21,
+				0xf0, 0x84,
+				0xf0, 0x95,
+				0xf0, 0xc8,
+				0xf0, 0xd9,
+				0x06, 0xfc, 0xcc, 0x02,
+				0xdc, 0x4d,
+				0xa8, 0x4c,
+				0xdb, 0x00));
+		scalarAsData.setReturnType(word, SourceType.USER_DEFINED);
+		scalarAsData.updateFunction("__tasking_c166_classic", null, List.of(),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
+		Function mismatchedFarPointerParts = functionWithCode(0x3500,
+			"mismatched_far_pointer_parts", bytes(
+				0x06, 0xfc, 0xcc, 0x02,             // first OFFSET += 0x2cc
+				0xdc, 0x4f,                         // EXTP second PAGE,#1
+				0xa8, 0x4c,                         // R4 = [first OFFSET]
+				0xdb, 0x00));
+		mismatchedFarPointerParts.setReturnType(word, SourceType.USER_DEFINED);
+		mismatchedFarPointerParts.updateFunction("__tasking_c166_classic", null,
+			List.of(
+				new ParameterImpl("first", charPointer, currentProgram),
+				new ParameterImpl("second", charPointer, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 		DataType dwordPointer = new PointerDataType(
 			new UnsignedLongDataType(currentProgram.getDataTypeManager()),
 			currentProgram.getDataTypeManager());
@@ -772,6 +838,31 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 				!extpCode.contains("0x1950e3b"),
 				"register EXTP was not normalized to page<<14 address 0x654e3b:\n" +
 					extpCode);
+			String savedFieldCode = decompile(decompiler, savedFarPointerField);
+			String compactSavedField = savedFieldCode.replaceAll("\\s+", "");
+			check(compactSavedField.contains("returns_context()") &&
+				compactSavedField.contains("feature_enabled(0x514)") &&
+				compactSavedField.contains("+0x2cc") &&
+				!savedFieldCode.contains("0x4000") &&
+				!savedFieldCode.contains("0x3fff") &&
+				!savedFieldCode.contains(">> 0x10") &&
+				!savedFieldCode.contains("CONCAT") &&
+				!savedFieldCode.contains("segment(") &&
+				!savedFieldCode.contains("Type propagation algorithm not settling"),
+				"saved far-pointer field access was not reconstructed:\n" +
+					savedFieldCode);
+			String savedFieldSecondPass = decompile(decompiler, savedFarPointerField)
+				.replaceAll("\\s+", "");
+			check(compactSavedField.equals(savedFieldSecondPass),
+				"saved far-pointer reconstruction was not idempotent");
+			for (Function negative : List.of(callbackAsData, scalarAsData,
+				mismatchedFarPointerParts)) {
+				String negativeCode = decompile(decompiler, negative);
+				check(negativeCode.contains("0x3fff"),
+					negative.getName() +
+						": unrelated halves were incorrectly folded into one data pointer:\n" +
+						negativeCode);
+			}
 			String pair0 = decompile(decompiler, callers.get(0));
 			checkCleanPointerCall(pair0, "\"blabla\"");
 

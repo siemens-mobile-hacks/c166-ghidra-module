@@ -23,6 +23,7 @@ import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.symbol.SourceType;
 import ghidrainfineon.GetPagedOffset;
+import ghidrainfineon.RegOffsetAddr;
 import ghidrainfineon.SwitchLoad;
 
 public class C166DppAddressingTest extends GhidraScript {
@@ -83,8 +84,74 @@ public class C166DppAddressingTest extends GhidraScript {
 
 		checkSwitchLoadUsesLiveDpp();
 		checkExtsOverridePrecedence();
+		checkRegisterExtpKeepsFarPointerSemantics();
 
 		println("C166 direct and switch DPP dataflow regressions passed.");
+	}
+
+	private void checkRegisterExtpKeepsFarPointerSemantics() throws Exception {
+		Address extpAddress = toAddr(0x7100);
+		Address extsAddress = toAddr(0x7110);
+		createMemoryBlock("register_ext_overrides", extpAddress, new byte[0x20], false);
+		setContext(extpAddress, "ExtpEn", 1);
+		setContext(extpAddress, "ExtpRegMode", 1);
+		setContext(extpAddress, "ExtpReg", 7);
+		setContext(extsAddress, "ExtsEn", 1);
+		setContext(extsAddress, "ExtsRegMode", 1);
+		setContext(extsAddress, "ExtsReg", 7);
+
+		PcodeOp[] extp = registerOffsetPcode(extpAddress, 6, 0x2cc, 0x400);
+		check(extp.length == 3 && extp[0].getOpcode() == PcodeOp.INT_ADD &&
+			extp[1].getOpcode() == PcodeOp.INT_AND &&
+			extp[1].getInput(1).isConstant() &&
+			extp[1].getInput(1).getOffset() == 0x3fff &&
+			extp[2].getOpcode() == PcodeOp.CALLOTHER &&
+			extp[2].getInput(1).getAddress().equals(
+				currentProgram.getRegister("r7").getAddress()),
+			"register EXTP was lowered to raw page arithmetic instead of segment(page,offset)");
+		for (PcodeOp operation : extp) {
+			check(operation.getOpcode() != PcodeOp.INT_LEFT &&
+				operation.getOpcode() != PcodeOp.INT_MULT,
+				"register EXTP retained a raw page<<14 operation");
+		}
+
+		PcodeOp[] exts = registerOffsetPcode(extsAddress, 6, 0x2cc, 0x500);
+		boolean shiftsBy16 = false;
+		for (PcodeOp operation : exts) {
+			check(operation.getOpcode() != PcodeOp.CALLOTHER,
+				"register EXTS was incorrectly represented by the paged segmentop");
+			if (operation.getOpcode() == PcodeOp.INT_LEFT &&
+				operation.getInput(1).isConstant() &&
+				operation.getInput(1).getOffset() == 16) {
+				shiftsBy16 = true;
+			}
+		}
+		check(shiftsBy16, "register EXTS lost its 16-bit segment arithmetic");
+	}
+
+	private PcodeOp[] registerOffsetPcode(Address address, int baseRegister,
+			long offset, long uniqueOffset) throws Exception {
+		SleighLanguage language = (SleighLanguage) currentProgram.getLanguage();
+		InjectContext context = new InjectContext();
+		context.language = language;
+		context.baseAddr = address;
+		context.nextAddr = address.add(2);
+		context.inputlist = new ArrayList<>();
+		context.output = new ArrayList<>();
+		Register base = currentProgram.getRegister("r" + baseRegister);
+		context.inputlist.add(new Varnode(base.getAddress(), base.getMinimumByteSize()));
+		context.inputlist.add(new Varnode(
+			language.getAddressFactory().getConstantSpace().getAddress(offset), 2));
+		context.output.add(new Varnode(
+			language.getAddressFactory().getUniqueSpace().getAddress(uniqueOffset), 3));
+		return new RegOffsetAddr("c166_reg_offset_addr", language, 0x12000)
+			.getPcode(currentProgram, context);
+	}
+
+	private void setContext(Address address, String registerName, long value)
+			throws Exception {
+		currentProgram.getProgramContext().setValue(currentProgram.getRegister(registerName),
+			address, address, BigInteger.valueOf(value));
 	}
 
 	private void checkExtsOverridePrecedence() throws Exception {

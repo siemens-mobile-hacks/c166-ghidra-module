@@ -27,7 +27,8 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   Analysis entries.
 - Forms direct, register-offset, and switch-table data addresses through one
   DPP/EXTP/EXTS p-code emitter, preserving DPP writes as live register dataflow
-  instead of reusing persisted analyzer context.
+  and typed register-mode EXTP addresses as far-pointer operations instead of
+  exposing page-shift arithmetic.
 - Infers far-pointer parameters from documented DPP0/EXTP page-and-offset data flow.
 - Joins constant far code-pointer arguments as four-byte function pointers
   when their `SEGMENT:OFFSET` encoding names an executable function entry,

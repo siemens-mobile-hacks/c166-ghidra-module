@@ -84,6 +84,14 @@ final class C166PagedAddressEmitter {
 				return emitFixed(address, base, encodedOffset & PAGE_MASK,
 					(extp.immediate & 0x3ffL) << 14, PAGE_MASK, output, uniqueBase);
 			}
+			// Register-mode EXTP is the architectural dereference of a TASKING
+			// PAGE:OFFSET far pointer.  Keep that relationship explicit for the
+			// decompiler instead of lowering it to page<<14 arithmetic.  The
+			// segmentop definition supplies the exact 14-bit offset semantics.
+			if (segmentUseropIndex >= 0) {
+				return emitSegment(address, base, encodedOffset & PAGE_MASK,
+					extp.register, output, uniqueBase);
+			}
 			return emitRegisterPage(address, base, encodedOffset & PAGE_MASK,
 				extp.register, 14, PAGE_MASK, output, uniqueBase);
 		}

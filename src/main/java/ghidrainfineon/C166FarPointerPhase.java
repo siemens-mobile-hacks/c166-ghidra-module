@@ -1956,12 +1956,10 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	}
 
 	/**
-	 * Register-mode EXTP is emitted as explicit `(page << 14) + inner` p-code.
-	 * It must not use SEGMENTOP: under the large-model far-pointer ABI the
-	 * decompiler first interprets SEGMENTOP's two words as SEGMENT:OFFSET and
-	 * can manufacture an out-of-range page<<16 address.  Recover the same
-	 * PAGE:OFFSET inference evidence from the explicit architectural operation,
-	 * but only at an instruction whose decode context proves register-mode EXTP.
+	 * Compatibility recovery for register-mode EXTP represented as explicit
+	 * {@code (page << 14) + inner} p-code.  Current TASKING Classic Large
+	 * injection emits SEGMENTOP directly; retain this path for incomplete or
+	 * legacy injection contexts, and require decode context to prove EXTP.
 	 */
 	private boolean isExplicitRegisterExtpAddress(Program program, PcodeOpAST operation) {
 		if (operation.getOpcode() != PcodeOp.INT_ADD || operation.getNumInputs() != 2 ||
