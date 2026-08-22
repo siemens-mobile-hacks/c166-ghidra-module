@@ -6,8 +6,10 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -87,6 +89,7 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		Collections.synchronizedMap(new WeakHashMap<>());
 	private static final int FIRST_ARGUMENT_REGISTER = 12;
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
+	private static final int MAX_SCALAR_TRACE_CACHE_ENTRIES = 262144;
 
 	public C166CodePointerPhase() {
 		super("C166 TASKING Code Pointer Inference");
@@ -184,8 +187,10 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			constantPairsByTarget, semanticEvidenceByTarget);
 		independentScalarPairs = propagateEntryForwardingScalarPairs(program,
 			independentScalarPairs, monitor);
+		ScalarCallTraceCache scalarTraceCache = new ScalarCallTraceCache();
 		Map<Function, Set<Integer>> packedScalarPairs = packedScalarPairs(program, callers,
-			directCalls, blocks, callWordsByTarget, semanticEvidenceByTarget, monitor);
+			directCalls, blocks, callWordsByTarget, semanticEvidenceByTarget,
+			scalarTraceCache, monitor);
 		independentScalarPairs = removePackedScalarPairs(independentScalarPairs,
 			packedScalarPairs);
 		Map<Function, Set<Integer>> scalarPairs = unionScalarPairs(independentScalarPairs,
@@ -215,9 +220,12 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		int forwardingPasses = 0;
 		while (true) {
 			monitor.checkCancelled();
+			monitor.initialize(Math.max(1, directCalls.size()),
+				"C166 code-pointer inference: propagating code pointers (pass " +
+					(forwardingPasses + 1) + ")");
 			int added = collectForwardingEvidence(program, directCalls, blocks,
 				scoresByTarget, semanticEvidenceByTarget, forwardingEvidenceByTarget,
-				supportedEvidenceByTarget, monitor);
+				supportedEvidenceByTarget, scalarTraceCache, monitor);
 			if (added == 0) {
 				break;
 			}
@@ -630,11 +638,17 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			!visited.add("register:" + before.getAddress() + ":" + register.getName())) {
 			return null;
 		}
-		Instruction instruction = program.getListing().getInstructionBefore(before.getAddress());
-		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
-				scanned++, instruction =
-					program.getListing().getInstructionBefore(instruction.getAddress())) {
-			if (!function.getBody().contains(instruction.getAddress()) ||
+		InstructionIterator instructions =
+			program.getListing().getInstructions(before.getAddress(), false);
+		AddressSetView functionBody = function.getBody();
+		for (int scanned = 0; instructions.hasNext() &&
+				scanned < MAX_SETUP_SCAN_INSTRUCTIONS;) {
+			Instruction instruction = instructions.next();
+			if (instruction.getAddress().compareTo(before.getAddress()) >= 0) {
+				continue;
+			}
+			scanned++;
+			if (!functionBody.contains(instruction.getAddress()) ||
 				!setupRegion.contains(instruction.getAddress())) {
 				break;
 			}
@@ -791,11 +805,17 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			return null;
 		}
 		int offset = initialOffset;
-		Instruction instruction = program.getListing().getInstructionBefore(before.getAddress());
-		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
-				scanned++, instruction =
-					program.getListing().getInstructionBefore(instruction.getAddress())) {
-			if (!function.getBody().contains(instruction.getAddress()) ||
+		InstructionIterator instructions =
+			program.getListing().getInstructions(before.getAddress(), false);
+		AddressSetView functionBody = function.getBody();
+		for (int scanned = 0; instructions.hasNext() &&
+				scanned < MAX_SETUP_SCAN_INSTRUCTIONS;) {
+			Instruction instruction = instructions.next();
+			if (instruction.getAddress().compareTo(before.getAddress()) >= 0) {
+				continue;
+			}
+			scanned++;
+			if (!functionBody.contains(instruction.getAddress()) ||
 				!setupRegion.contains(instruction.getAddress())) {
 				break;
 			}
@@ -887,24 +907,30 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			BasicBlockModel blocks, Map<Function, Map<Integer, Integer>> scoresByTarget,
 			Map<Function, Set<Integer>> semanticEvidenceByTarget,
 			Map<Function, Set<Integer>> forwardingEvidenceByTarget,
-			Map<Function, Set<Integer>> supportedEvidenceByTarget, TaskMonitor monitor)
+			Map<Function, Set<Integer>> supportedEvidenceByTarget,
+			ScalarCallTraceCache scalarTraceCache, TaskMonitor monitor)
 			throws CancelledException {
 		int added = 0;
 		for (DirectCallSite site : directCalls) {
-			monitor.checkCancelled();
-			if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
-				continue;
-			}
-			for (int start : forwardedCodePointerPairs(program, site, blocks,
-				forwardingEvidenceByTarget, monitor)) {
-				if (addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
-					site.caller(), start)) {
-					forwardingEvidenceByTarget.computeIfAbsent(site.caller(),
-						ignored -> new HashSet<>()).add(start);
-					supportedEvidenceByTarget.computeIfAbsent(site.caller(),
-						ignored -> new HashSet<>()).add(start);
-					added++;
+			try {
+				monitor.checkCancelled();
+				if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
+					continue;
 				}
+				for (int start : forwardedCodePointerPairs(program, site, blocks,
+					forwardingEvidenceByTarget, scalarTraceCache, monitor)) {
+					if (addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
+						site.caller(), start)) {
+						forwardingEvidenceByTarget.computeIfAbsent(site.caller(),
+							ignored -> new HashSet<>()).add(start);
+						supportedEvidenceByTarget.computeIfAbsent(site.caller(),
+							ignored -> new HashSet<>()).add(start);
+						added++;
+					}
+				}
+			}
+			finally {
+				monitor.incrementProgress(1);
 			}
 		}
 		return added;
@@ -912,11 +938,9 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 
 	private Set<Integer> forwardedCodePointerPairs(Program program, DirectCallSite site,
 			BasicBlockModel blocks, Map<Function, Set<Integer>> trustedEvidence,
-			TaskMonitor monitor) throws CancelledException {
+			ScalarCallTraceCache scalarTraceCache, TaskMonitor monitor)
+			throws CancelledException {
 		Set<Integer> result = new HashSet<>();
-		CodeBlock setupBlock = blocks.getFirstCodeBlockContaining(site.call().getAddress(), monitor);
-		AddressSetView setupRegion =
-			setupBlock == null ? site.caller().getBody() : setupBlock;
 		for (Parameter parameter : site.target().getParameters()) {
 			if (!isFunctionPointer(parameter.getFormalDataType())) {
 				continue;
@@ -941,10 +965,10 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			// conservative frame-aware tracer as scalar propagation so callbacks
 			// forwarded from an incoming stack slot across validation branches are not
 			// lost (for example FUN_9bc42a -> FUN_9057dc).
-			Integer low = traceScalarCallArgumentWord(program, site.caller(), setupRegion,
-				site.call(), targetStart);
-			Integer high = traceScalarCallArgumentWord(program, site.caller(), setupRegion,
-				site.call(), targetStart + 1);
+			Integer low = traceScalarCallArgumentWord(program, site, blocks, targetStart,
+				scalarTraceCache, monitor);
+			Integer high = traceScalarCallArgumentWord(program, site, blocks, targetStart + 1,
+				scalarTraceCache, monitor);
 			if (low != null && high != null && high == low + 1 && isLegalPairStart(low)) {
 				result.add(low);
 			}
@@ -1098,20 +1122,21 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		if (instruction == null || instruction.getNumOperands() < 2) {
 			return null;
 		}
+		String mnemonic = instruction.getMnemonicString();
+		boolean add = mnemonic.equalsIgnoreCase("add");
+		if (!add && !mnemonic.equalsIgnoreCase("sub")) {
+			return null;
+		}
 		Register destination = operandRegister(instruction, 0);
+		if (destination == null || !destination.getName().equalsIgnoreCase("r0")) {
+			return null;
+		}
 		Scalar amount = instruction.getScalar(1);
-		if (destination == null || !destination.getName().equalsIgnoreCase("r0") ||
-			amount == null) {
+		if (amount == null) {
 			return null;
 		}
 		int value = (int) amount.getUnsignedValue();
-		if (instruction.getMnemonicString().equalsIgnoreCase("add")) {
-			return value;
-		}
-		if (instruction.getMnemonicString().equalsIgnoreCase("sub")) {
-			return -value;
-		}
-		return null;
+		return add ? value : -value;
 	}
 
 	private boolean isStackPush(Instruction instruction) {
@@ -1181,13 +1206,16 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			List<Function> functions, List<DirectCallSite> directCalls,
 			BasicBlockModel blocks,
 			Map<Function, List<C166TaskingCallArguments.CallWords>> callWordsByTarget,
-			Map<Function, Set<Integer>> semanticEvidenceByTarget, TaskMonitor monitor)
+			Map<Function, Set<Integer>> semanticEvidenceByTarget,
+			ScalarCallTraceCache scalarTraceCache, TaskMonitor monitor)
 			throws CancelledException {
 		Map<Function, Set<Integer>> result = new HashMap<>();
 		Set<Function> candidates = new HashSet<>(functions);
 		for (DirectCallSite site : directCalls) {
 			candidates.add(site.target());
 		}
+		monitor.initialize(Math.max(1, candidates.size()),
+			"C166 code-pointer inference: finding packed scalar roots");
 		for (Function function : candidates) {
 			monitor.checkCancelled();
 			for (Parameter parameter : function.getParameters()) {
@@ -1201,67 +1229,82 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			for (int start : directCarryScalarPairs(program, function)) {
 				result.computeIfAbsent(function, ignored -> new HashSet<>()).add(start);
 			}
+			monitor.incrementProgress(1);
 		}
 
-		boolean changed;
-		do {
-			changed = false;
-			for (DirectCallSite site : directCalls) {
+		Map<Function, List<DirectCallSite>> callsByTarget = new HashMap<>();
+		for (DirectCallSite site : directCalls) {
+			if (mayUpdate(site.caller()) && usesTaskingConvention(site.caller())) {
+				callsByTarget.computeIfAbsent(site.target(), ignored -> new ArrayList<>())
+					.add(site);
+			}
+		}
+		ArrayDeque<FunctionSlot> pending = new ArrayDeque<>();
+		for (Map.Entry<Function, Set<Integer>> entry : result.entrySet()) {
+			for (int start : entry.getValue()) {
+				pending.addLast(new FunctionSlot(entry.getKey(), start));
+			}
+		}
+		monitor.initialize(Math.max(1, pending.size()),
+			"C166 code-pointer inference: propagating packed scalar pairs");
+		while (!pending.isEmpty()) {
+			monitor.checkCancelled();
+			FunctionSlot target = pending.removeFirst();
+			for (DirectCallSite site : callsByTarget.getOrDefault(
+				target.function(), List.of())) {
+				Integer low = traceScalarCallArgumentWord(program, site, blocks, target.start(),
+					scalarTraceCache, monitor);
+				Integer high = traceScalarCallArgumentWord(program, site, blocks,
+					target.start() + 1, scalarTraceCache, monitor);
+				if (low == null || high == null || high != low + 1 ||
+					!isLegalPairStart(low) ||
+					!hasPackedAnalysisCandidateAt(site.caller(), low) ||
+					semanticEvidenceByTarget.getOrDefault(site.caller(), Set.of()).contains(low)) {
+					continue;
+				}
+				Set<Integer> starts =
+					result.computeIfAbsent(site.caller(), ignored -> new HashSet<>());
+				if (starts.add(low)) {
+					pending.addLast(new FunctionSlot(site.caller(), low));
+					monitor.setMaximum(monitor.getMaximum() + 1);
+				}
+			}
+			monitor.incrementProgress(1);
+		}
+
+		monitor.initialize(Math.max(1, directCalls.size()),
+			"C166 code-pointer inference: repairing narrowed scalar pairs");
+		for (DirectCallSite site : directCalls) {
+			try {
 				monitor.checkCancelled();
 				if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
 					continue;
 				}
-				CodeBlock setupBlock =
-					blocks.getFirstCodeBlockContaining(site.call().getAddress(), monitor);
-				AddressSetView setupRegion =
-					setupBlock == null ? site.caller().getBody() : setupBlock;
-				for (int targetStart : Set.copyOf(
-					result.getOrDefault(site.target(), Set.of()))) {
-					Integer low = traceScalarCallArgumentWord(program, site.caller(), setupRegion,
-						site.call(), targetStart);
-					Integer high = traceScalarCallArgumentWord(program, site.caller(), setupRegion,
-						site.call(), targetStart + 1);
-					if (low != null && high != null && high == low + 1 &&
-						isLegalPairStart(low) &&
+				for (Parameter targetParameter : site.target().getParameters()) {
+					DataType type = targetParameter.getFormalDataType();
+					Integer targetStart = parameterStart(targetParameter.getVariableStorage());
+					if (targetStart == null || type.getLength() > 2 ||
+						!isConcreteInteger(type)) {
+						continue;
+					}
+					Integer source = traceScalarCallArgumentWord(program, site, blocks,
+						targetStart, scalarTraceCache, monitor);
+					Integer packedStart = source == null ? null :
+						genericFunctionPointerContaining(site.caller(), source);
+					if (packedStart != null &&
 						!semanticEvidenceByTarget.getOrDefault(site.caller(), Set.of())
-							.contains(low)) {
-						changed |= result.computeIfAbsent(site.caller(),
-							ignored -> new HashSet<>()).add(low);
+							.contains(packedStart)) {
+						result.computeIfAbsent(site.caller(), ignored -> new HashSet<>())
+							.add(packedStart);
 					}
 				}
 			}
-		}
-		while (changed);
-
-		for (DirectCallSite site : directCalls) {
-			monitor.checkCancelled();
-			if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
-				continue;
-			}
-			CodeBlock setupBlock =
-				blocks.getFirstCodeBlockContaining(site.call().getAddress(), monitor);
-			AddressSetView setupRegion =
-				setupBlock == null ? site.caller().getBody() : setupBlock;
-			for (Parameter targetParameter : site.target().getParameters()) {
-				DataType type = targetParameter.getFormalDataType();
-				Integer targetStart = parameterStart(targetParameter.getVariableStorage());
-				if (targetStart == null || type.getLength() > 2 ||
-					!isConcreteInteger(type)) {
-					continue;
-				}
-				Integer source = traceScalarCallArgumentWord(program, site.caller(), setupRegion,
-					site.call(), targetStart);
-				Integer packedStart = source == null ? null :
-					genericFunctionPointerContaining(site.caller(), source);
-				if (packedStart != null &&
-					!semanticEvidenceByTarget.getOrDefault(site.caller(), Set.of())
-						.contains(packedStart)) {
-					result.computeIfAbsent(site.caller(), ignored -> new HashSet<>())
-						.add(packedStart);
-				}
+			finally {
+				monitor.incrementProgress(1);
 			}
 		}
 
+		monitor.setMessage("C166 code-pointer inference: finalizing packed scalar pairs");
 		for (Map.Entry<Function, Set<Integer>> entry : new ArrayList<>(result.entrySet())) {
 			Function function = entry.getKey();
 			boolean laterStackScalar = entry.getValue().stream().anyMatch(start -> start >= 6);
@@ -1281,6 +1324,27 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			}
 		}
 		return Map.copyOf(immutable);
+	}
+
+	private Integer traceScalarCallArgumentWord(Program program, DirectCallSite site,
+			BasicBlockModel blocks, int targetSlot, ScalarCallTraceCache cache,
+			TaskMonitor monitor) throws CancelledException {
+		ScalarCallSlot key = new ScalarCallSlot(site.call().getAddress(), targetSlot);
+		OptionalInt cached = cache.words.get(key);
+		if (cached != null) {
+			return cached.isPresent() ? cached.getAsInt() : null;
+		}
+		AddressSetView setupRegion = cache.setupRegions.get(site.call().getAddress());
+		if (setupRegion == null) {
+			CodeBlock setupBlock =
+				blocks.getFirstCodeBlockContaining(site.call().getAddress(), monitor);
+			setupRegion = setupBlock == null ? site.caller().getBody() : setupBlock;
+			cache.setupRegions.put(site.call().getAddress(), setupRegion);
+		}
+		Integer result = traceScalarCallArgumentWord(program, site.caller(), setupRegion,
+			site.call(), targetSlot);
+		cache.words.put(key, result == null ? OptionalInt.empty() : OptionalInt.of(result));
+		return result;
 	}
 
 	private boolean isConcreteInteger(DataType type) {
@@ -2269,6 +2333,29 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 	}
 
 	private record DirectCallSite(Function caller, Function target, Instruction call) {
+	}
+
+	private record ScalarCallSlot(Address call, int targetSlot) {
+	}
+
+	private static final class ScalarCallTraceCache {
+		private final Map<Address, AddressSetView> setupRegions = new HashMap<>();
+		private final Map<ScalarCallSlot, OptionalInt> words =
+			new BoundedCache<>(MAX_SCALAR_TRACE_CACHE_ENTRIES);
+	}
+
+	private static final class BoundedCache<K, V> extends LinkedHashMap<K, V> {
+		private final int maximumEntries;
+
+		BoundedCache(int maximumEntries) {
+			super(16, 0.75f, true);
+			this.maximumEntries = maximumEntries;
+		}
+
+		@Override
+		protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+			return size() > maximumEntries;
+		}
 	}
 
 	private record FunctionSlot(Function function, int start) {

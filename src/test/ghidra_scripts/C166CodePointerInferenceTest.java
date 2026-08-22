@@ -224,6 +224,25 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Function packedForwardingCaller = fixture("packed_scalar_forwarding_caller", concat(
 			bytes(0xe6, 0xfc, 0x40, 0x00, 0xe6, 0xfd, 0x00, 0x00),
 			calls(packedForwardingWrapper), bytes(0xdb, 0x00)));
+
+		// A reverse-address-ordered forwarding chain used to require one complete
+		// direct-call scan per edge: function iteration sees the outermost wrapper
+		// first and the carry-arithmetic root last.  The worklist must propagate the
+		// packed scalar through the whole chain without depending on address order.
+		Function packedWorklistTarget = fixtureAt(0x302000,
+			"packed_scalar_worklist_root", bytes(
+				0x26, 0xfc, 0x01, 0x00,
+				0x36, 0xfd, 0x00, 0x00,
+				0xdb, 0x00));
+		List<Function> packedWorklistChain = new ArrayList<>();
+		for (int index = 31; index >= 0; index--) {
+			Function wrapper = fixtureAt(0x300000L + index * 0x100L,
+				"packed_scalar_worklist_" + index,
+				concat(calls(packedWorklistTarget), bytes(0xdb, 0x00)));
+			setLegacyGenericFunctionPointers(wrapper, "value");
+			packedWorklistChain.add(wrapper);
+			packedWorklistTarget = wrapper;
+		}
 		Function packedNarrowingTarget = fixture("packed_scalar_narrowing_target",
 			bytes(0xdb, 0x00));
 		setUserWords(packedNarrowingTarget, "length");
@@ -621,6 +640,9 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkMixedSignature(mixed);
 		checkDataPointer(dataWins, "r13+r12");
 		checkPackedScalar(packedForwardingWrapper, "r13+r12");
+		for (Function wrapper : packedWorklistChain) {
+			checkPackedScalar(wrapper, "r13+r12");
+		}
 		checkPackedScalar(packedNarrowingWrapper, "r13+r12");
 		checkPackedStackScalars(packedStackSpill);
 		checkCodeSignature(stackCallback, "r12", "r13", "r14", "r15", "Stack[0x0]:4");
@@ -785,6 +807,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			branchMergeCaller != null && stalePushCaller != null &&
 			nestedFixedStackCaller != null && unknownStackMutationCaller != null &&
 			packedForwardingCaller != null && packedNarrowingCaller != null &&
+			packedWorklistChain.size() == 32 &&
 			packedStackExactCaller != null &&
 			packedStackScalarCaller != null &&
 			explicitScalar32ReturnCaller != null &&
@@ -819,6 +842,11 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 	private Function fixture(String name, byte[] code) throws Exception {
 		Address entry = toAddr(nextFixture);
 		nextFixture += 0x100;
+		return fixtureAt(entry.getUnsignedOffset(), name, code);
+	}
+
+	private Function fixtureAt(long offset, String name, byte[] code) throws Exception {
+		Address entry = toAddr(offset);
 		MemoryBlock block = createMemoryBlock(name + "_bytes", entry, code, false);
 		block.setExecute(true);
 		check(disassemble(entry), "failed to disassemble " + name);
@@ -835,7 +863,11 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 	}
 
 	private byte[] calls(Function target) {
-		long address = target.getEntryPoint().getUnsignedOffset();
+		return calls(target.getEntryPoint());
+	}
+
+	private byte[] calls(Address target) {
+		long address = target.getUnsignedOffset();
 		return bytes(0xda, (int) (address >> 16), (int) address, (int) (address >> 8));
 	}
 
