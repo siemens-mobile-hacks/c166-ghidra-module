@@ -155,7 +155,8 @@ final class C166TaskingCallArguments {
 			if (scalar != null && OperandType.isAddress(sourceType)) {
 				Address loadAddress = resolveDirectDataAddress(program, function, setupRegion,
 					instruction, scalar.getUnsignedValue(), depth + 1, visited);
-				return new WordValue(true, null, instruction.getAddress(), loadAddress,
+				return new WordValue(true, scalar.getUnsignedValue() & 0xffff,
+					instruction.getAddress(), loadAddress,
 					null, -1, null);
 			}
 			Address directAddress = operandAddress(instruction, 1);

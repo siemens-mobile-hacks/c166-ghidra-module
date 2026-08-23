@@ -13,13 +13,17 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import ghidra.app.cmd.disassemble.DisassembleCommand;
+import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.services.ConsoleService;
+import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.framework.options.Options;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressOutOfBoundsException;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
@@ -126,6 +130,7 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		int callsSeen = 0;
 		int evidenceCount = 0;
 		int indirectUseCount = 0;
+		Set<Address> recoveredCodeTargets = new HashSet<>();
 		for (Function caller : callers) {
 			monitor.checkCancelled();
 			InstructionIterator instructions =
@@ -133,11 +138,8 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			while (instructions.hasNext()) {
 				monitor.checkCancelled();
 				Instruction instruction = instructions.next();
-				if (!instruction.getFlowType().isCall()) {
-					continue;
-				}
 				Function target = directTarget(program, instruction);
-				if (target == null) {
+				if (target == null || !isCallOrTailJump(caller, instruction, target)) {
 					continue;
 				}
 				boolean dispatcher = dispatcherCache.computeIfAbsent(target,
@@ -162,7 +164,8 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 					C166TaskingCallArguments.recover(program, caller, instruction, blocks, monitor);
 				callWordsByTarget.computeIfAbsent(target, ignored -> new ArrayList<>()).add(words);
 				recordConstantWordPairs(target, words, constantPairsByTarget);
-				Map<Integer, CodePointerEvidence> evidence = codePointerEvidence(program, words);
+				Map<Integer, CodePointerEvidence> evidence = codePointerEvidence(program, words,
+					recoveredCodeTargets, monitor);
 				Map<Integer, Integer> scores =
 					scoresByTarget.computeIfAbsent(target, ignored -> new HashMap<>());
 				Map<Integer, List<CodePointerEvidence>> occurrences =
@@ -244,12 +247,22 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			repairedPointers += repairUnsupportedGenericFunctionPointers(program, callers,
 				supportedEvidenceByTarget, log);
 		}
+		// Signature commits may invalidate analyzer-created code units in the same
+		// transaction.  Revalidate only targets that already passed the strict
+		// boundary/subroutine test and were used as accepted call-site evidence.
+		for (Address recoveredTarget : List.copyOf(recoveredCodeTargets)) {
+			monitor.checkCancelled();
+			if (program.getFunctionManager().getFunctionAt(recoveredTarget) == null) {
+				exactOrRecoverFunctionEntry(program, recoveredTarget, new HashSet<>(), monitor);
+			}
+		}
 
 		report(program, (fullScan ? "Full" : "Incremental") + " scan: inspected " +
 			callers.size() + " caller function(s) and " + callsSeen +
 			" direct call(s); found " + evidenceCount +
 			" executable SEGMENT:OFFSET argument occurrence(s) and " + indirectUseCount +
-			" parameter-fed far-indirect target use(s), propagated " +
+			" parameter-fed far-indirect target use(s), recovered " +
+			recoveredCodeTargets.size() + " missing code target(s), propagated " +
 			forwardingEvidenceCount + " function-pointer parameter use(s) in " +
 			forwardingPasses + " fixed-point pass(es), inferred " +
 			inferredParameters + " code-pointer-sized parameter(s) in " +
@@ -542,6 +555,8 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 				}
 			}
 			for (int start : starts) {
+				referencesRemoved += removeOverlappingPagedReferences(program, function,
+					start, occurrences.getOrDefault(start, List.of()));
 				for (CodePointerEvidence evidence : occurrences.getOrDefault(start, List.of())) {
 					referencesRemoved += removeConflictingPagedReference(program, evidence);
 					referenceCount += addCodePointerReference(program, evidence);
@@ -568,6 +583,46 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		return new UpdateStats(inferredParameters, referenceCount, referencesRemoved);
 	}
 
+	private int removeOverlappingPagedReferences(Program program, Function function,
+			int codeStart, List<CodePointerEvidence> occurrences) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return 0;
+		}
+		Set<Integer> repairableStarts = new HashSet<>();
+		for (Parameter parameter : function.getParameters()) {
+			Integer dataStart = parameterStart(parameter.getVariableStorage());
+			int span = Math.max(1, parameter.getVariableStorage().size() / 2);
+			if (dataStart != null && dataStart < codeStart + 2 && codeStart < dataStart + span &&
+				isGenericAnalysisPointer(function, parameter.getFormalDataType()) &&
+				!isFunctionPointer(parameter.getFormalDataType())) {
+				repairableStarts.add(dataStart);
+			}
+		}
+		if (repairableStarts.isEmpty()) {
+			return 0;
+		}
+		ReferenceManager references = program.getReferenceManager();
+		int removed = 0;
+		for (CodePointerEvidence occurrence : occurrences) {
+			for (int dataStart : repairableStarts) {
+				PagedPointerEvidence paged = occurrence.pagedPointers().get(dataStart);
+				if (paged == null || paged.target().equals(occurrence.target())) {
+					continue;
+				}
+				for (Address source : paged.sources()) {
+					Reference reference = references.getReference(source, paged.target(),
+						Reference.MNEMONIC);
+					if (reference != null && reference.getSource() == SourceType.ANALYSIS &&
+						!reference.getReferenceType().isFlow()) {
+						references.delete(reference);
+						removed++;
+					}
+				}
+			}
+		}
+		return removed;
+	}
+
 	private Function directTarget(Program program, Instruction instruction) {
 		for (Address flow : instruction.getFlows()) {
 			Function target = program.getFunctionManager().getFunctionAt(flow);
@@ -585,6 +640,18 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			}
 		}
 		return null;
+	}
+
+	private boolean isCallOrTailJump(Function caller, Instruction instruction,
+			Function target) {
+		if (instruction.getFlowType().isCall()) {
+			return true;
+		}
+		return instruction.getFlowType().isJump() &&
+			instruction.getFlowType().isUnConditional() &&
+			!instruction.getFlowType().isComputed() &&
+			!instruction.hasFallthrough() &&
+			!caller.getBody().contains(target.getEntryPoint());
 	}
 
 	/**
@@ -1724,7 +1791,9 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 	}
 
 	private Map<Integer, CodePointerEvidence> codePointerEvidence(Program program,
-			C166TaskingCallArguments.CallWords callWords) {
+			C166TaskingCallArguments.CallWords callWords,
+			Set<Address> recoveredCodeTargets, TaskMonitor monitor)
+			throws CancelledException {
 		Map<Integer, CodePointerEvidence> evidence = new HashMap<>();
 		for (Map.Entry<Integer, C166TaskingCallArguments.WordValue> entry :
 				callWords.words().entrySet()) {
@@ -1744,16 +1813,107 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			if (address == null) {
 				continue;
 			}
-			MemoryBlock block = program.getMemory().getBlock(address);
-			Function function = program.getFunctionManager().getFunctionAt(address);
-			if (block != null && block.isExecute() && function != null) {
+			Function function = exactOrRecoverFunctionEntry(program, address,
+				recoveredCodeTargets, monitor);
+			if (function != null) {
 				Address source = later(low.source(), high.source());
 				if (source != null) {
-					evidence.put(start, new CodePointerEvidence(address, source));
+					evidence.put(start, new CodePointerEvidence(address, source,
+						adjacentPagedPointerEvidence(program, callWords, start)));
 				}
 			}
 		}
 		return Map.copyOf(evidence);
+	}
+
+	/**
+	 * Recover only a strongly delimited missing callback entry.  An executable
+	 * constant is not normally enough to create code: it must start immediately
+	 * after a decoded terminal instruction, contain no defined data/instruction,
+	 * and pass Ghidra's conservative subroutine validation.  An undefined tail in
+	 * an overextended enclosing body may be split; actual interior instructions
+	 * remain negative controls.
+	 */
+	private Function exactOrRecoverFunctionEntry(Program program, Address address,
+			Set<Address> recoveredCodeTargets, TaskMonitor monitor)
+			throws CancelledException {
+		Function exact = program.getFunctionManager().getFunctionAt(address);
+		if (exact != null) {
+			return exact;
+		}
+		MemoryBlock block = program.getMemory().getBlock(address);
+		int alignment = program.getLanguage().getInstructionAlignment();
+		Function containing = program.getFunctionManager().getFunctionContaining(address);
+		if (block == null || !block.isExecute() ||
+			alignment > 1 && Long.remainderUnsigned(address.getOffset(), alignment) != 0 ||
+			containing != null && (address.equals(containing.getEntryPoint()) ||
+				program.getListing().getInstructionContaining(address) != null) ||
+			program.getListing().getDefinedDataContaining(address) != null) {
+			return null;
+		}
+		Instruction previous = program.getListing().getInstructionBefore(address);
+		if (previous == null || !previous.getFlowType().isTerminal() ||
+			previous.getMaxAddress().next() == null ||
+			!address.equals(previous.getMaxAddress().next())) {
+			return null;
+		}
+
+		PseudoDisassembler pseudoDisassembler = new PseudoDisassembler(program);
+		pseudoDisassembler.setMaxInstructions(20);
+		if (!pseudoDisassembler.checkValidSubroutine(address, true, false, true) ||
+			pseudoDisassembler.getLastCheckValidInstructionCount() < 2) {
+			return null;
+		}
+		if (program.getListing().getInstructionAt(address) == null) {
+			DisassembleCommand disassemble = new DisassembleCommand(address,
+				program.getMemory().getExecuteSet(), true);
+			disassemble.enableCodeAnalysis(false);
+			if (!disassemble.applyTo(program, monitor) ||
+				program.getListing().getInstructionAt(address) == null) {
+				return null;
+			}
+		}
+		CreateFunctionCmd create = new CreateFunctionCmd(
+			new AddressSet(address, address), SourceType.ANALYSIS);
+		if (!create.applyTo(program, monitor)) {
+			return null;
+		}
+		Function function = program.getFunctionManager().getFunctionAt(address);
+		if (function != null) {
+			recoveredCodeTargets.add(address);
+		}
+		return function;
+	}
+
+	private Map<Integer, PagedPointerEvidence> adjacentPagedPointerEvidence(
+			Program program, C166TaskingCallArguments.CallWords callWords,
+			int codeStart) {
+		Map<Integer, PagedPointerEvidence> result = new HashMap<>();
+		for (int dataStart = codeStart - 1; dataStart <= codeStart + 1; dataStart++) {
+			if (!isLegalPairStart(dataStart)) {
+				continue;
+			}
+			C166TaskingCallArguments.WordValue low = callWords.words().get(dataStart);
+			C166TaskingCallArguments.WordValue high = callWords.words().get(dataStart + 1);
+			if (low == null || high == null || low.constant() == null ||
+				high.constant() == null) {
+				continue;
+			}
+			Address target = address(program,
+				((high.constant() & 0x3ff) << 14) | (low.constant() & 0x3fff));
+			if (target == null) {
+				continue;
+			}
+			Set<Address> sources = new HashSet<>();
+			if (low.source() != null) {
+				sources.add(low.source());
+			}
+			if (high.source() != null) {
+				sources.add(high.source());
+			}
+			result.put(dataStart, new PagedPointerEvidence(target, Set.copyOf(sources)));
+		}
+		return Map.copyOf(result);
 	}
 
 	private Address later(Address first, Address second) {
@@ -2377,6 +2537,10 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			int referencesRemoved) {
 	}
 
-	private record CodePointerEvidence(Address target, Address source) {
+	private record PagedPointerEvidence(Address target, Set<Address> sources) {
+	}
+
+	private record CodePointerEvidence(Address target, Address source,
+			Map<Integer, PagedPointerEvidence> pagedPointers) {
 	}
 }

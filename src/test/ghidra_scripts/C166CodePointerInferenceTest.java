@@ -7,6 +7,7 @@ import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileProcessFactory;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
+import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
@@ -141,6 +142,65 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Function nonEntryCaller = fixture("non_entry_code_constant_caller", concat(
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint().add(1)),
 			calls(nonEntry), bytes(0xdb, 0x00)));
+
+		// M55 FUN_2e5364 shape: an analyzer-owned R14:R13 data pointer overlaps
+		// the real R15:R14 SEGMENT:OFFSET callback.  The callback entry is initially
+		// missing, but begins immediately after a decoded RETS and forms a valid
+		// subroutine.  Recover that entry, split R13 back to a word, and remove the
+		// stale PAGE:OFFSET reference manufactured from R14:R13.
+		Address missingCallbackBoundary = toAddr(0x2a2000);
+		MemoryBlock missingCallbackBlock = createMemoryBlock("missing_callback_bytes",
+			missingCallbackBoundary, bytes(
+				0xdb, 0x00,                   // preceding RETS boundary
+				0xe0, 0x5c,                   // callback: R12 = 5
+				0xdb, 0x00,                    // callback RETS
+				0x11, 0x22, 0x33, 0x44,
+				0x55, 0x66, 0x77, 0x88), false); // validator read-ahead padding
+		missingCallbackBlock.setExecute(true);
+		check(disassemble(missingCallbackBoundary),
+			"failed to disassemble missing-callback boundary");
+		Function missingCallbackBoundaryFunction = createFunction(missingCallbackBoundary,
+			"missing_callback_boundary");
+		check(missingCallbackBoundaryFunction != null,
+			"failed to create missing-callback boundary function");
+		missingCallbackBoundaryFunction.setBody(new AddressSet(missingCallbackBoundary,
+			missingCallbackBoundary.add(1)));
+		Address missingCallback = missingCallbackBoundary.add(2);
+		check(getInstructionAt(missingCallback) == null &&
+			getFunctionContaining(missingCallback) == null,
+			"missing callback was unexpectedly defined before analysis");
+		PseudoDisassembler callbackValidator = new PseudoDisassembler(currentProgram);
+		callbackValidator.setMaxInstructions(20);
+		check(callbackValidator.checkValidSubroutine(missingCallback, true, false, true),
+			"synthetic callback did not pass pseudo-disassembly validation (" +
+				callbackValidator.getLastCheckValidInstructionCount() + " instructions)");
+		Address wrongOverlap0 = toAddr(0x867c);
+		MemoryBlock wrongOverlapBlock = createMemoryBlock("wrong_overlap_data",
+			wrongOverlap0, bytes(0x11, 0x22), false);
+		wrongOverlapBlock.setWrite(false);
+		Function overlappingCallback = fixture(
+			"overlapping_data_and_missing_callback", bytes(0xdb, 0x00));
+		setAnalysisWordPointerWord(overlappingCallback);
+		Function overlappingCallbackCaller = fixture(
+			"overlapping_missing_callback_caller", concat(bytes(
+				0xe0, 0x1c,
+				0xe6, 0xfd, 0x7c, 0x06,
+				0xe6, 0xfe, 0x02, 0x20,
+				0xe6, 0xff, 0x2a, 0x00),
+			jumps(overlappingCallback)));
+		Function overlappingCallbackCaller2 = fixture(
+			"overlapping_missing_callback_caller_2", concat(bytes(
+				0xe0, 0x1c,
+				0xe6, 0xfd, 0x7d, 0x06,
+				0xe6, 0xfe, 0x02, 0x20,
+				0xe6, 0xff, 0x2a, 0x00),
+			calls(overlappingCallback), bytes(0xdb, 0x00)));
+		currentProgram.getReferenceManager().addMemoryReference(
+			overlappingCallbackCaller.getEntryPoint().add(2), wrongOverlap0,
+			RefType.PARAM, SourceType.ANALYSIS, Reference.MNEMONIC);
+		currentProgram.getReferenceManager().addMemoryReference(
+			overlappingCallbackCaller.getEntryPoint().add(6), toAddr(0x2002),
+			RefType.DATA, SourceType.ANALYSIS, Reference.MNEMONIC);
 
 		// Four SEGMENT:OFFSET constants may each name an exact function entry and
 		// still be two scalar parameters.  A complete 2x2 combination proves that
@@ -294,6 +354,11 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Function dispatcher = fixture("far_indirect_dispatcher_shape",
 			bytes(0xec, 0xf5, 0xec, 0xf4, 0xdb, 0x00));
 		setAnalysisWords(dispatcher, "stale0", "stale1", "stale2");
+		Function extendedDispatcherLookalike = fixture(
+			"extended_function_ending_like_dispatcher",
+			bytes(0xe0, 0x1c, 0xec, 0xf5, 0xec, 0xf4, 0xdb, 0x00));
+		setAnalysisWords(extendedDispatcherLookalike, "arg0", "arg1", "arg2");
+		extendedDispatcherLookalike.setCallFixup("call_far_indirect");
 		Function dispatcherCaller = fixture("far_indirect_dispatcher_caller", concat(
 			codePointerSetup(4, 5, freeTarget.getEntryPoint()),
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint()),
@@ -623,6 +688,10 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"far indirect dispatcher did not receive its call-fixup");
 		check(dispatcher.getParameterCount() == 0,
 			"far indirect dispatcher retained a stale analysis signature");
+		check(extendedDispatcherLookalike.getCallFixup() == null,
+			"extended function retained a stale dispatcher call-fixup");
+		check(extendedDispatcherLookalike.getParameterCount() == 3,
+			"extended dispatcher lookalike lost its real signature");
 		C166CodePointerPhase analyzer = new C166CodePointerPhase();
 		check(analyzer.added(currentProgram, twoCallbacksCaller.getBody(), monitor,
 			new MessageLog()), "incremental code-pointer analysis failed");
@@ -641,6 +710,14 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 
 		check(analyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			new MessageLog()), "full code-pointer One Shot failed");
+		Function recoveredMissingCallback = getFunctionAt(missingCallback);
+		check(recoveredMissingCallback != null,
+			"strongly delimited missing callback was not created");
+		checkCodeSignature(overlappingCallback, "r12", "r13", "r15+r14");
+		checkParamReference(overlappingCallbackCaller.getEntryPoint().add(10),
+			missingCallback, true);
+		checkParamReference(overlappingCallbackCaller.getEntryPoint().add(2),
+			wrongOverlap0, false);
 		checkWordSignature(rectangleScalar, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleForwardingTarget, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(staleRectangleFunctionPointer, SourceType.ANALYSIS,
@@ -666,6 +743,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkWordSignature(staleRectangleFunctionPointer, SourceType.ANALYSIS,
 			"r12", "r13");
 		checkCodeSignature(twoCallbacks, "r13+r12", "r15+r14");
+		checkCodeSignature(overlappingCallback, "r12", "r13", "r15+r14");
 		checkMixedSignature(mixed);
 		checkDataPointer(dataWins, "r13+r12");
 		checkPackedScalar(packedForwardingWrapper, "r13+r12");
@@ -757,6 +835,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 
 		String snapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
+			overlappingCallback, recoveredMissingCallback,
 			singleExactTarget, singleExactDataWrapper, dataWins, dispatcher,
 			packedForwardingWrapper, packedNarrowingWrapper, packedStackSpill,
 			indirectTarget, middleIndirectTarget, lateIndirectTarget,
@@ -770,6 +849,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			new MessageLog()), "second code-pointer analysis failed");
 		String secondSnapshot = snapshot(twoCallbacks, mixed, stackCallback, copiedCallback,
 			twoStackCallbacks, ambiguousOverlap, nonEntry, userDefined, existingDataPointer,
+			overlappingCallback, recoveredMissingCallback,
 			singleExactTarget, singleExactDataWrapper, dataWins, dispatcher,
 			packedForwardingWrapper, packedNarrowingWrapper, packedStackSpill,
 			indirectTarget, middleIndirectTarget, lateIndirectTarget,
@@ -903,6 +983,11 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		return bytes(0xda, (int) (address >> 16), (int) address, (int) (address >> 8));
 	}
 
+	private byte[] jumps(Function target) {
+		long address = target.getEntryPoint().getUnsignedOffset();
+		return bytes(0xfa, (int) (address >> 16), (int) address, (int) (address >> 8));
+	}
+
 	private byte[] pagedRead(int highRegister, int lowRegister) {
 		return concat(pagedAccess(highRegister, lowRegister), bytes(0xdb, 0x00));
 	}
@@ -956,6 +1041,17 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 					currentProgram.getDataTypeManager()), currentProgram));
 		}
 		function.updateFunction("__tasking_c166_classic", null, pointers,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisWordPointerWord(Function function) throws Exception {
+		List<Variable> parameters = List.of(
+			new ParameterImpl("kind", Undefined.getUndefinedDataType(2), currentProgram),
+			new ParameterImpl("misclassified",
+				new PointerDataType(VoidDataType.dataType,
+					currentProgram.getDataTypeManager()), currentProgram),
+			new ParameterImpl("tail", Undefined.getUndefinedDataType(2), currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 

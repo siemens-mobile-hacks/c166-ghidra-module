@@ -3167,10 +3167,28 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		if (block == null || !block.isWrite() || !block.contains(end)) {
 			return false;
 		}
+		Iterator<Function> overlappingFunctions =
+			program.getFunctionManager().getFunctionsOverlapping(range);
+		while (overlappingFunctions.hasNext()) {
+			Function function = overlappingFunctions.next();
+			Address entry = function.getEntryPoint();
+			if (!range.contains(entry)) {
+				continue;
+			}
+			ReferenceIterator incoming =
+				program.getReferenceManager().getReferencesTo(entry);
+			while (incoming.hasNext()) {
+				RefType type = incoming.next().getReferenceType();
+				if (type.isFlow() || type == RefType.PARAM) {
+					return false;
+				}
+			}
+		}
 		for (Address address = start; address.compareTo(end) <= 0; address = address.next()) {
 			if (address == null || program.getSymbolTable().isExternalEntryPoint(address)) {
 				return false;
 			}
+			Function function = program.getFunctionManager().getFunctionContaining(address);
 			for (Symbol symbol : program.getSymbolTable().getSymbols(address)) {
 				SourceType source = symbol.getSource();
 				if (source != SourceType.DEFAULT && source != SourceType.ANALYSIS) {
@@ -3180,12 +3198,17 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			ReferenceIterator references =
 				program.getReferenceManager().getReferencesTo(address);
 			while (references.hasNext()) {
-				SourceType source = references.next().getSource();
+				Reference reference = references.next();
+				if (function != null && address.equals(function.getEntryPoint()) &&
+					(reference.getReferenceType().isFlow() ||
+						reference.getReferenceType() == RefType.PARAM)) {
+					return false;
+				}
+				SourceType source = reference.getSource();
 				if (source != SourceType.DEFAULT && source != SourceType.ANALYSIS) {
 					return false;
 				}
 			}
-			Function function = program.getFunctionManager().getFunctionContaining(address);
 			if (function != null && function.getSymbol().getSource() != SourceType.DEFAULT &&
 				function.getSymbol().getSource() != SourceType.ANALYSIS) {
 				return false;

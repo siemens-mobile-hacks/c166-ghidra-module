@@ -75,6 +75,7 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 		int matched = 0;
 		int conventions = 0;
 		int dispatchers = 0;
+		int staleDispatcherFixups = 0;
 		int runtimeSignatures = 0;
 		while (functions.hasNext()) {
 			monitor.checkCancelled();
@@ -88,6 +89,10 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 			}
 
 			boolean dispatcher = isFarIndirectDispatcher(program, function);
+			if (!dispatcher && "call_far_indirect".equals(function.getCallFixup())) {
+				function.setCallFixup(null);
+				staleDispatcherFixups++;
+			}
 			String fixup = dispatcher ? "call_far_indirect" : matchingFixup(memory, function);
 			if (fixup != null && function.getCallFixup() == null) {
 				function.setCallFixup(fixup);
@@ -111,10 +116,12 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 			}
 		}
 
-		if (matched != 0 || conventions != 0 || dispatchers != 0) {
+		if (matched != 0 || conventions != 0 || dispatchers != 0 ||
+			staleDispatcherFixups != 0) {
 			report(program, "Applied " + matched + " precise runtime p-code model(s), " +
 				conventions + " ABI register-preservation model(s), and recognized " +
-				dispatchers + " far-indirect dispatcher(s); repaired " +
+				dispatchers + " far-indirect dispatcher(s); removed " +
+				staleDispatcherFixups + " stale dispatcher fixup(s) and repaired " +
 				runtimeSignatures + " stale runtime signature(s).");
 		}
 		return true;
@@ -228,25 +235,27 @@ public class C166TaskingRuntimeAnalyzer extends AbstractAnalyzer {
 	 * dispatcher itself must never acquire a C prototype inferred from R12-R15.
 	 */
 	static boolean isFarIndirectDispatcher(Program program, Function function) {
-		if ("call_far_indirect".equals(function.getCallFixup()) ||
-			"__call_far_indirect".equals(function.getName())) {
+		if ("__call_far_indirect".equals(function.getName())) {
 			return true;
 		}
 		Instruction previousPrevious = null;
 		Instruction previous = null;
+		int instructionCount = 0;
+		boolean terminalDispatch = false;
 		InstructionIterator instructions =
 			program.getListing().getInstructions(function.getBody(), true);
 		while (instructions.hasNext()) {
 			Instruction current = instructions.next();
+			instructionCount++;
 			if (current.getMnemonicString().equalsIgnoreCase("rets") &&
 				isRegisterPush(previousPrevious, "r5") &&
 				isRegisterPush(previous, "r4")) {
-				return true;
+				terminalDispatch = true;
 			}
 			previousPrevious = previous;
 			previous = current;
 		}
-		return false;
+		return terminalDispatch && instructionCount == 3;
 	}
 
 	private static boolean isRegisterPush(Instruction instruction, String registerName) {
