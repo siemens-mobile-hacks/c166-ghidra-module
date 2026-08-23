@@ -34,7 +34,8 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   exposing page-shift arithmetic.
 - Infers far-pointer parameters and global far-pointer objects from documented
   DPP0/EXTP page-and-offset data flow, including four-byte pointer values already
-  rejoined by the patched decompiler.
+  rejoined by the patched decompiler, repeated typed call sites, and adjacent
+  object-field stores whose typed consumer later dereferences the stored pair.
 - Joins constant far code-pointer arguments as four-byte function pointers
   when their `SEGMENT:OFFSET` encoding names an executable function entry,
   while requiring repeated or semantic evidence before propagating that type
@@ -44,7 +45,8 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   callback target signatures indirectly through thunks.
 - Classifies values returned in the documented R5/R4 pair as far data
   pointers, far function pointers, or four-byte scalars from explicit producer
-  writes and proven downstream use, while preserving user/imported signatures.
+  writes, complete callee-saved forwarded returns, and proven downstream use,
+  while preserving user/imported signatures.
 - Recognizes TASKING far-indirect dispatchers, applies their call fixup, and
   removes stale analyzer-owned C parameters from the dispatcher itself.
 - Models TASKING Classic Large `double` and aggregate results as caller-stack

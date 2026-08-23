@@ -631,6 +631,18 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			depth, visited, true);
 	}
 
+	/**
+	 * Trace one register at a proven scalar use back through TASKING's saved
+	 * software-stack frame to its incoming argument word.  Far-pointer inference
+	 * shares this only for negative machine-level evidence; speculative pointer
+	 * propagation keeps using the stricter tracer above.
+	 */
+	Integer traceScalarInputWord(Program program, Function function,
+			Instruction before, Register register) {
+		return traceScalarParameterRegister(program, function, function.getBody(),
+			before, register, 0, new HashSet<>());
+	}
+
 	private Integer traceParameterRegister(Program program, Function function,
 			AddressSetView setupRegion, Instruction before, Register register, int depth,
 			Set<String> visited, boolean allowFrameBaseline) {

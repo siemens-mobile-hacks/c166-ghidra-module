@@ -117,8 +117,54 @@ public class NonC166AutoStructureControlTest extends GhidraScript {
 		finally {
 			decompiler.dispose();
 		}
+		checkNativeWidthPointerConstant(language);
 
 		println("Non-C166 auto-structure control passed for " + language + ".");
+	}
+
+	private void checkNativeWidthPointerConstant(String language) throws Exception {
+		Address target = toAddr(0x12345678L);
+		MemoryBlock data = createMemoryBlock("native_pointer_target", target,
+			bytes(0x78, 0x56, 0x34, 0x12), false);
+		data.setWrite(false);
+		createData(target, Undefined4DataType.dataType);
+		createLabel(target, "g_native_width_pointer", true);
+
+		Address entry = toAddr(0x2000);
+		byte[] code;
+		if (language.startsWith("x86:")) {
+			code = bytes(
+				0xa1, 0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0, // mov eax,[0x12345678]
+				0xc3);                                      // ret
+		}
+		else {
+			code = bytes(
+				0x78, 0x06, 0x05, 0xe3, // movw r0,#0x5678
+				0x34, 0x02, 0x41, 0xe3, // movt r0,#0x1234
+				0x00, 0x00, 0x90, 0xe5, // ldr r0,[r0]
+				0x1e, 0xff, 0x2f, 0xe1);// bx lr
+		}
+		MemoryBlock block = createMemoryBlock("native_pointer_code", entry, code, false);
+		block.setExecute(true);
+		check(disassemble(entry), "failed to disassemble native-pointer control");
+		Function function = createFunction(entry, "native_pointer_control");
+		check(function != null, "failed to create native-pointer control");
+		function.setReturnType(Undefined4DataType.dataType, SourceType.USER_DEFINED);
+
+		DecompInterface decompiler = new DecompInterface();
+		decompiler.toggleCCode(true);
+		decompiler.toggleSyntaxTree(true);
+		check(decompiler.openProgram(currentProgram), decompiler.getLastMessage());
+		try {
+			DecompileResults results = decompiler.decompileFunction(function, 30, monitor);
+			check(results.decompileCompleted(), results.getErrorMessage());
+			String codeText = results.getDecompiledFunction().getC();
+			check(codeText.contains("g_native_width_pointer"),
+				"native-width pointer constant changed on " + language + ":\n" + codeText);
+		}
+		finally {
+			decompiler.dispose();
+		}
 	}
 
 	private byte[] bytes(int... values) {

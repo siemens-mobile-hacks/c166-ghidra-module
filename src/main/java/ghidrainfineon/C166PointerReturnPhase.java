@@ -82,6 +82,7 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		int inferred = 0;
 		int rounds = 0;
 		Set<Function> conflicts = new HashSet<>();
+		Set<Function> provenThisRun = new HashSet<>();
 		DataType dataPointer = new PointerDataType(VoidDataType.dataType,
 			program.getDataTypeManager());
 		DataType codePointer = genericFunctionPointer(program);
@@ -90,6 +91,13 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 			for (Function caller : callers) {
 				monitor.checkCancelled();
 				traceCaller(program, caller, evidence, monitor);
+				ReturnCategory forwarded = forwardedReturnCategory(program, caller,
+					provenThisRun, monitor);
+				if (forwarded != ReturnCategory.UNKNOWN) {
+					ReturnEvidence item = evidence.computeIfAbsent(caller,
+						ignored -> new ReturnEvidence());
+					item.markForwardedUse(forwarded, caller.getEntryPoint());
+				}
 				monitor.incrementProgress(1);
 			}
 			int roundInferred = 0;
@@ -131,10 +139,12 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 							? new UnsignedLongDataType(program.getDataTypeManager())
 							: Undefined.getUndefinedDataType(4);
 					if (sameReturnCategory(function.getReturnType(), inferredType)) {
+						provenThisRun.add(function);
 						continue;
 					}
 					function.setCallingConvention(CALLING_CONVENTION);
 					function.setReturnType(inferredType, SourceType.ANALYSIS);
+					provenThisRun.add(function);
 					roundInferred++;
 				}
 				catch (InvalidInputException e) {
@@ -337,6 +347,128 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		if (destination != null && written.contains(destination) && copied != null) {
 			registers.put(destination, copied);
 		}
+	}
+
+	/**
+	 * Classify a complete R5:R4 return which is forwarded from another function's
+	 * already trusted four-byte return.  The trace is intentionally limited to a
+	 * straight-line path: both words must originate at the same call, direct
+	 * register copies are followed backwards, and only TASKING's documented
+	 * callee-saved R6-R9 may survive intervening calls.  This recovers wrappers
+	 * and constructor-like functions whose callers consume only R4 even though
+	 * the callee deliberately returns the full pointer pair.
+	 */
+	private ReturnCategory forwardedReturnCategory(Program program, Function function,
+			Set<Function> provenThisRun, TaskMonitor monitor)
+			throws CancelledException {
+		ReturnCategory category = null;
+		boolean sawReturn = false;
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			monitor.checkCancelled();
+			Instruction terminal = instructions.next();
+			if (!terminal.getFlowType().isTerminal()) {
+				continue;
+			}
+			sawReturn = true;
+			ForwardedWordOrigin low = traceForwardedReturnWord(program, function,
+				terminal, 4, provenThisRun, monitor);
+			ForwardedWordOrigin high = traceForwardedReturnWord(program, function,
+				terminal, 5, provenThisRun, monitor);
+			if (low == null || high == null || low.word() != 0 || high.word() != 1 ||
+				!low.call().equals(high.call()) || !low.function().equals(high.function()) ||
+				low.category() != high.category()) {
+				return ReturnCategory.UNKNOWN;
+			}
+			if (category != null && category != low.category()) {
+				return ReturnCategory.UNKNOWN;
+			}
+			category = low.category();
+		}
+		return sawReturn && category != null ? category : ReturnCategory.UNKNOWN;
+	}
+
+	private ForwardedWordOrigin traceForwardedReturnWord(Program program,
+			Function function, Instruction terminal, int returnRegister,
+			Set<Function> provenThisRun, TaskMonitor monitor)
+			throws CancelledException {
+		int traced = returnRegister;
+		Instruction instruction =
+			program.getListing().getInstructionBefore(terminal.getAddress());
+		for (int scanned = 0; instruction != null && scanned < 512; scanned++) {
+			monitor.checkCancelled();
+			if (!function.getBody().contains(instruction.getAddress()) ||
+				instruction.getFlowType().isJump() || instruction.getFlowType().isTerminal()) {
+				return null;
+			}
+			if (instruction.getFlowType().isCall()) {
+				if (traced >= 6 && traced <= 9) {
+					instruction = program.getListing().getInstructionBefore(
+						instruction.getAddress());
+					continue;
+				}
+				if (traced != 4 && traced != 5) {
+					return null;
+				}
+				Function target = directTarget(program, instruction);
+				ReturnCategory category = trustedReturnCategory(target, provenThisRun);
+				return category == ReturnCategory.UNKNOWN ? null :
+					new ForwardedWordOrigin(instruction.getAddress(), target,
+						traced - 4, category);
+			}
+			if (writesGeneralRegister(program, instruction, traced)) {
+				if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
+					instruction.getNumOperands() < 2 ||
+					OperandType.isIndirect(instruction.getOperandType(0)) ||
+					OperandType.isIndirect(instruction.getOperandType(1))) {
+					return null;
+				}
+				Integer source = generalRegisterNumber(program,
+					operandRegister(instruction, 1));
+				if (source == null) {
+					return null;
+				}
+				traced = source;
+			}
+			instruction = program.getListing().getInstructionBefore(
+				instruction.getAddress());
+		}
+		return null;
+	}
+
+	private boolean writesGeneralRegister(Program program, Instruction instruction,
+			int number) {
+		for (Object result : instruction.getResultObjects()) {
+			if (result instanceof Register register &&
+				Integer.valueOf(number).equals(generalRegisterNumber(program, register)) &&
+				register.getMinimumByteSize() >= 2) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private ReturnCategory trustedReturnCategory(Function function,
+			Set<Function> provenThisRun) {
+		if (function == null) {
+			return ReturnCategory.UNKNOWN;
+		}
+		DataType type = function.getReturnType();
+		ReturnCategory category = returnCategory(type);
+		if (category != ReturnCategory.DATA && category != ReturnCategory.CODE) {
+			return ReturnCategory.UNKNOWN;
+		}
+		if (category == ReturnCategory.UNKNOWN ||
+			function.getSignatureSource() != SourceType.ANALYSIS ||
+			provenThisRun.contains(function)) {
+			return category;
+		}
+		if (category == ReturnCategory.DATA && !isGenericDataPointer(type) ||
+			category == ReturnCategory.CODE && !isGenericFunctionPointer(type)) {
+			return category;
+		}
+		return ReturnCategory.UNKNOWN;
 	}
 
 	/**
@@ -621,6 +753,10 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 	private record OriginWord(Function function, int word) {
 	}
 
+	private record ForwardedWordOrigin(Address call, Function function, int word,
+			ReturnCategory category) {
+	}
+
 	private enum PairReturnState {
 		UNKNOWN,
 		EXPLICIT,
@@ -656,6 +792,16 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		private void markUnsignedLongUse(Address address) {
 			scalarUses.add(address);
 			unsignedLongUses.add(address);
+		}
+
+		private void markForwardedUse(ReturnCategory category, Address address) {
+			switch (category) {
+				case DATA -> markDataUse(address);
+				case CODE -> markCodeUse(address);
+				case SCALAR -> markScalarUse(address);
+				case UNKNOWN -> {
+				}
+			}
 		}
 
 		private void markDirectPagedUse() {

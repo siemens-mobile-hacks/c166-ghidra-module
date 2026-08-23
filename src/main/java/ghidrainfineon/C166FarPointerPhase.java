@@ -103,6 +103,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	private static final int MAX_TRACE_DEPTH = 32;
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
 	private static final int MIN_CONSTANT_CALL_SITES = 2;
+	private static final int MIN_TYPED_CALL_SITES = 2;
 
 	public C166FarPointerPhase() {
 		super("C166 TASKING Far Pointer Inference");
@@ -176,7 +177,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			" global far-pointer object(s), " +
 			"seeded " + seedStats.parameters() + " parameter(s) in " +
 			seedStats.functions() + " function(s) from " + seedStats.occurrences() +
-			" unambiguous constant call-site occurrence(s), rejected " +
+			" corroborated constant or typed call-site occurrence(s), rejected " +
 			seedStats.scalarConflicts() + " scalar-use candidate pair(s), repaired " +
 			(seedStats.repairedPointers() + stats.repairedPointers) +
 			" stale analysis pointer(s), " +
@@ -246,6 +247,17 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		stats.inspected.add(function);
 		stats.decompilations++;
 		try {
+			Set<Integer> separatedScalarPairs =
+				findSeparatelyStoredScalarPairs(program, function);
+			Set<Integer> storedPointerPairs =
+				findIndirectlyConsumedStoredPointerPairs(program, function);
+			boolean repairedSeparatedScalars = !separatedScalarPairs.isEmpty() &&
+				splitContradictedAnalysisPointers(program, function,
+					separatedScalarPairs) != 0;
+			if (repairedSeparatedScalars) {
+				stats.repairedPointers++;
+				decompiler.flushCache();
+			}
 			monitor.setMessage("C166 far-pointer inference (" +
 				(stats.processedCandidates + 1) + "/" + monitor.getMaximum() + "): " +
 				function.getName());
@@ -278,6 +290,11 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			Set<Integer> liveSlots = new HashSet<>(inference.liveSlots());
 			Set<Integer> pairStarts = new HashSet<>(retainSupportedPairs(function,
 				inference.pairStarts(), liveSlots));
+			for (int start : storedPointerPairs) {
+				pairStarts.add(start);
+				liveSlots.add(start);
+				liveSlots.add(start + 1);
+			}
 			Set<Integer> directPagedPairs = new HashSet<>(inference.directPagedPairs());
 			// A stale generic fpointer can suppress the very PIECE/SEGMENTOP p-code
 			// needed to rediscover its pair.  Seed only its exact ABI storage when the
@@ -303,6 +320,10 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			}
 			Map<Integer, DataType> pointerTypes = preferDirectPagedDataTypes(program,
 				function, inference.pointerTypes(), directPagedPairs);
+			for (int start : storedPointerPairs) {
+				pointerTypes.putIfAbsent(start, new PointerDataType(VoidDataType.dataType,
+					program.getDataTypeManager()));
+			}
 			pairStarts = removeFunctionPointerConflicts(program, function, pairStarts,
 				directPagedPairs, pointerTypes);
 			pairStarts = removeCallSiteScalarConflicts(function, pairStarts,
@@ -312,9 +333,14 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				retained.removeAll(forwardedScalarPairs);
 				pairStarts = Set.copyOf(retained);
 			}
+			if (!separatedScalarPairs.isEmpty()) {
+				Set<Integer> retained = new HashSet<>(pairStarts);
+				retained.removeAll(separatedScalarPairs);
+				pairStarts = Set.copyOf(retained);
+			}
 			if (pairStarts.isEmpty() || signatureMatches(function, pairStarts,
 				liveSlots, pointerTypes)) {
-				return repairedForwardedScalars;
+				return repairedSeparatedScalars || repairedForwardedScalars;
 			}
 
 			updateSignature(program, function, pairStarts, liveSlots,
@@ -417,17 +443,18 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		BasicBlockModel blocks = new BasicBlockModel(program);
 		Map<Function, Map<Integer, Set<Address>>> occurrences = new HashMap<>();
 		Map<Function, Map<Integer, Set<ConstantWordPair>>> constantPairs = new HashMap<>();
+		Map<Function, Map<Integer, Set<Address>>> typedOccurrences = new HashMap<>();
 		Set<Address> scannedCalls = new HashSet<>();
 		Set<Function> discoveredTargets = new HashSet<>();
-		scanConstantCallers(program, callers, blocks, occurrences, constantPairs, scannedCalls,
-			discoveredTargets, monitor);
+		scanConstantCallers(program, callers, blocks, occurrences, constantPairs,
+			typedOccurrences, scannedCalls, discoveredTargets, monitor);
 		if (!fullScan) {
 			Set<Function> corroboratingCallers = new HashSet<>();
 			for (Function target : discoveredTargets) {
 				corroboratingCallers.addAll(directCallers(program, target));
 			}
-			scanConstantCallers(program, corroboratingCallers, blocks, occurrences, constantPairs,
-				scannedCalls, discoveredTargets, monitor);
+			scanConstantCallers(program, corroboratingCallers, blocks, occurrences,
+				constantPairs, typedOccurrences, scannedCalls, discoveredTargets, monitor);
 		}
 
 		int seededFunctions = 0;
@@ -496,18 +523,32 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			}
 		}
 
-		for (Map.Entry<Function, Map<Integer, Set<Address>>> targetEntry :
-				occurrences.entrySet()) {
+		Set<Function> seededTargets = new HashSet<>(occurrences.keySet());
+		seededTargets.addAll(typedOccurrences.keySet());
+		for (Function target : orderedFunctions(seededTargets)) {
 			monitor.checkCancelled();
-			Function target = targetEntry.getKey();
 			Set<Integer> contradicted = scalarPairs.getOrDefault(target, Set.of());
 			Map<Integer, Integer> scores = new HashMap<>();
-			for (Map.Entry<Integer, Set<Address>> pair : targetEntry.getValue().entrySet()) {
+			Map<Integer, Set<Address>> constantTargetOccurrences =
+				occurrences.getOrDefault(target, Map.of());
+			for (Map.Entry<Integer, Set<Address>> pair :
+					constantTargetOccurrences.entrySet()) {
 				if (pair.getValue().size() >= MIN_CONSTANT_CALL_SITES &&
 					!contradicted.contains(pair.getKey()) &&
 					directlyConsumesSeedPair(program, target, pair.getKey()) &&
 					!overlapsExistingPointer(target, pair.getKey())) {
 					scores.put(pair.getKey(), pair.getValue().size());
+				}
+			}
+			Map<Integer, Set<Address>> typedTargetOccurrences =
+				typedOccurrences.getOrDefault(target, Map.of());
+			for (Map.Entry<Integer, Set<Address>> pair :
+					typedTargetOccurrences.entrySet()) {
+				if (pair.getValue().size() >= MIN_TYPED_CALL_SITES &&
+					!contradicted.contains(pair.getKey()) &&
+					directlyConsumesSeedPair(program, target, pair.getKey()) &&
+					!overlapsExistingPointer(target, pair.getKey())) {
+					scores.merge(pair.getKey(), pair.getValue().size(), Integer::sum);
 				}
 			}
 			List<Integer> candidates = new ArrayList<>(scores.keySet());
@@ -525,7 +566,10 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				}
 				pointerTypes.put(start, new PointerDataType(VoidDataType.dataType,
 					program.getDataTypeManager()));
-				acceptedOccurrences += targetEntry.getValue().get(start).size();
+				acceptedOccurrences +=
+					constantTargetOccurrences.getOrDefault(start, Set.of()).size();
+				acceptedOccurrences +=
+					typedTargetOccurrences.getOrDefault(start, Set.of()).size();
 			}
 			Set<Integer> supported = retainSupportedPairs(target, selection.starts(), liveSlots);
 			if (supported.isEmpty() || signatureMatches(target, supported, liveSlots,
@@ -852,6 +896,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	private void scanConstantCallers(Program program, Set<Function> callers,
 			BasicBlockModel blocks, Map<Function, Map<Integer, Set<Address>>> occurrences,
 			Map<Function, Map<Integer, Set<ConstantWordPair>>> constantPairs,
+			Map<Function, Map<Integer, Set<Address>>> typedOccurrences,
 			Set<Address> scannedCalls, Set<Function> discoveredTargets, TaskMonitor monitor)
 			throws CancelledException {
 		monitor.initialize(Math.max(1, callers.size()),
@@ -881,6 +926,11 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 					}
 					C166TaskingCallArguments.WordValue low = entry.getValue();
 					C166TaskingCallArguments.WordValue high = words.words().get(start + 1);
+					if (isTypedPointerOrigin(low, high)) {
+						typedOccurrences.computeIfAbsent(target, ignored -> new HashMap<>())
+							.computeIfAbsent(start, ignored -> new HashSet<>())
+							.add(call.getAddress());
+					}
 					if (low != null && high != null && low.constant() != null &&
 						high.constant() != null) {
 						constantPairs.computeIfAbsent(target, ignored -> new HashMap<>())
@@ -897,6 +947,28 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			}
 			monitor.incrementProgress(1);
 		}
+	}
+
+	/**
+	 * A caller's already recovered data-pointer parameter is positive evidence for
+	 * the corresponding callee pair.  Require both OFFSET and PAGE words to come
+	 * from the same four-byte parameter in documented low/high order; a typed word
+	 * on only one side, an fpointer, and two unrelated pointer parameters are not
+	 * enough.  The call-site seeder additionally requires two distinct calls so a
+	 * single stale signature cannot create a new formal parameter by itself.
+	 */
+	private boolean isTypedPointerOrigin(C166TaskingCallArguments.WordValue low,
+			C166TaskingCallArguments.WordValue high) {
+		if (low == null || high == null || low.parameterOrdinal() == null ||
+			high.parameterOrdinal() == null ||
+			!low.parameterOrdinal().equals(high.parameterOrdinal()) ||
+			low.byteOffset() != 0 || high.byteOffset() != 2 ||
+			low.originType() == null || high.originType() == null ||
+			!low.originType().isEquivalent(high.originType())) {
+			return false;
+		}
+		DataType type = low.originType();
+		return isPointerType(type) && !isFunctionPointer(type) && type.getLength() == 4;
 	}
 
 	private boolean isUnambiguousConstantDataPointer(Program program,
@@ -972,6 +1044,20 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	}
 
 	private record FunctionSlot(Function function, int start) {
+	}
+
+	private record ScalarWordStore(Instruction instruction, Register base,
+			Register page, int offset) {
+	}
+
+	private enum SymbolicWordKind {
+		BASE_LOW, BASE_PAGE, FIELD_WORD
+	}
+
+	private record SymbolicWord(SymbolicWordKind kind, int parameterStart, int offset) {
+	}
+
+	private record PointerFieldUse(int parameterStart, int fieldOffset) {
 	}
 
 	private record CandidateGraph(Set<Function> functions,
@@ -1632,9 +1718,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			if (pageSlot == null || pageSlot != pairStart + 1) {
 				continue;
 			}
-			Scalar range = setup.getNumOperands() > 1 ? setup.getScalar(1) : null;
-			int remaining = range == null ? 1 :
-				Math.max(1, Math.min(4, (int) range.getUnsignedValue()));
+			int remaining = pageAccessCount(setup);
 			Instruction access = program.getListing().getInstructionAfter(setup.getAddress());
 			while (access != null && remaining-- > 0 &&
 				function.getBody().contains(access.getAddress())) {
@@ -2327,6 +2411,479 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			}
 		}
 		return Set.copyOf(conflicts);
+	}
+
+	/**
+	 * Reject a stale generic pointer when its two saved input words are copied to
+	 * separate, non-adjacent 16-bit fields.  TASKING saves R12-R15 one word at a
+	 * time in the prologue, so a store alone is not evidence.  We require both
+	 * values to survive the frame, reach semantic stores through the scalar frame
+	 * tracer, use the same unchanged destination base, and land more than one word
+	 * apart.  A real architectural PAGE:OFFSET use always wins over this negative
+	 * evidence.
+	 */
+	private Set<Integer> findSeparatelyStoredScalarPairs(Program program,
+			Function function) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return Set.of();
+		}
+		Set<Integer> repairable = new HashSet<>();
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (start != null && start < 4 && isLegalPairStart(start) &&
+				parameter.getVariableStorage().size() == 4 &&
+				isGenericVoidPointer(parameter.getFormalDataType()) &&
+				!containsDirectPagedDataUseForPair(program, function, start) &&
+				!containsDynamicPagedAccessSetupForPair(program, function, start)) {
+				repairable.add(start);
+			}
+		}
+		if (repairable.isEmpty()) {
+			return Set.of();
+		}
+
+		Map<Integer, List<ScalarWordStore>> stores = new HashMap<>();
+		C166CodePointerPhase tracer = new C166CodePointerPhase();
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction instruction = instructions.next();
+			if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
+				instruction.getNumOperands() < 2 ||
+				!isBracketMemoryOperand(instruction, 0) ||
+				isBracketMemoryOperand(instruction, 1)) {
+				continue;
+			}
+			Register base = operandRegister(instruction, 0);
+			Register source = operandRegister(instruction, 1);
+			if (base == null || source == null ||
+				"r0".equalsIgnoreCase(base.getName()) ||
+				source.getMinimumByteSize() != 2) {
+				continue;
+			}
+			Integer slot = tracer.traceScalarInputWord(program, function,
+				instruction, source);
+			if (slot == null || repairable.stream().noneMatch(start ->
+				slot == start || slot == start + 1)) {
+				continue;
+			}
+			Scalar displacement = operandScalar(instruction, 0);
+			int offset = displacement == null ? 0 :
+				(int) displacement.getSignedValue();
+			stores.computeIfAbsent(slot, ignored -> new ArrayList<>())
+				.add(new ScalarWordStore(instruction, base,
+					activePageRegister(program, function, instruction), offset));
+		}
+
+		Set<Integer> conflicts = new HashSet<>();
+		for (int start : repairable) {
+			for (ScalarWordStore low : stores.getOrDefault(start, List.of())) {
+				for (ScalarWordStore high : stores.getOrDefault(start + 1, List.of())) {
+					if (!overlaps(low.base(), high.base()) ||
+						Math.abs(low.offset() - high.offset()) <= 2 ||
+						!sameBaseValueBetween(program, function, low, high)) {
+						continue;
+					}
+					conflicts.add(start);
+				}
+			}
+		}
+		return Set.copyOf(conflicts);
+	}
+
+	private boolean sameBaseValueBetween(Program program, Function function,
+			ScalarWordStore left, ScalarWordStore right) {
+		Instruction first = left.instruction().getAddress().compareTo(
+			right.instruction().getAddress()) <= 0 ? left.instruction() : right.instruction();
+		Instruction last = first == left.instruction() ? right.instruction() :
+			left.instruction();
+		Register base = first == left.instruction() ? left.base() : right.base();
+		Instruction instruction =
+			program.getListing().getInstructionAfter(first.getAddress());
+		while (instruction != null &&
+			instruction.getAddress().compareTo(last.getAddress()) < 0 &&
+			function.getBody().contains(instruction.getAddress())) {
+			if (instruction.getFlowType().isCall() ||
+				instruction.getFlowType().isJump() || writesRegister(instruction, base)) {
+				return false;
+			}
+			instruction = program.getListing().getInstructionAfter(
+				instruction.getAddress());
+		}
+		return instruction != null &&
+			instruction.getAddress().equals(last.getAddress());
+	}
+
+	private Scalar operandScalar(Instruction instruction, int operand) {
+		for (Object object : instruction.getOpObjects(operand)) {
+			if (object instanceof Scalar scalar) {
+				return scalar;
+			}
+		}
+		return null;
+	}
+
+	private int pageAccessCount(Instruction instruction) {
+		for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
+			Scalar count = operandScalar(instruction, operand);
+			if (count != null) {
+				return Math.max(1, Math.min(4, (int) count.getUnsignedValue()));
+			}
+		}
+		return 1;
+	}
+
+	private boolean isBracketMemoryOperand(Instruction instruction, int operand) {
+		if (operand < 0 || operand >= instruction.getNumOperands()) {
+			return false;
+		}
+		return instruction.getDefaultOperandRepresentation(operand).trim()
+			.startsWith("[");
+	}
+
+	/**
+	 * Recover a pointer which a constructor-like function copies into an object
+	 * and whose consumer later dereferences that exact field.  This covers code
+	 * where the producer itself never dereferences the incoming pointer: the two
+	 * words are stored at adjacent offsets, the same object base is passed to a
+	 * typed callee, and that callee reloads the field as PAGE:OFFSET before a
+	 * paged access.  Every link is machine-level data flow; names and firmware
+	 * addresses are deliberately irrelevant.
+	 */
+	private Set<Integer> findIndirectlyConsumedStoredPointerPairs(Program program,
+			Function function) {
+		Map<Integer, List<ScalarWordStore>> stores = inputWordStores(program, function);
+		if (stores.isEmpty()) {
+			return Set.of();
+		}
+		Set<Integer> inferred = new HashSet<>();
+		for (int start = 0; start < 3; start++) {
+			if (!isLegalPairStart(start)) {
+				continue;
+			}
+			for (ScalarWordStore low : stores.getOrDefault(start, List.of())) {
+				for (ScalarWordStore high : stores.getOrDefault(start + 1, List.of())) {
+					if (low.page() == null || high.page() == null ||
+						high.offset() != low.offset() + 2 ||
+						!overlaps(low.base(), high.base()) ||
+						!overlaps(low.page(), high.page()) ||
+						!sameBaseValueBetween(program, function, low, high) ||
+						!sameRegisterValueBetween(program, function, low.instruction(),
+							high.instruction(), low.page())) {
+						continue;
+					}
+					Instruction after = low.instruction().getAddress().compareTo(
+						high.instruction().getAddress()) > 0 ? low.instruction() :
+							high.instruction();
+					if (storedFieldReachesPointerConsumer(program, function, after,
+							low.base(), low.page(), low.offset())) {
+						inferred.add(start);
+					}
+				}
+			}
+		}
+		return Set.copyOf(inferred);
+	}
+
+	private Map<Integer, List<ScalarWordStore>> inputWordStores(Program program,
+			Function function) {
+		Map<Integer, List<ScalarWordStore>> stores = new HashMap<>();
+		C166CodePointerPhase tracer = new C166CodePointerPhase();
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction instruction = instructions.next();
+			if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
+				instruction.getNumOperands() < 2 ||
+				!isBracketMemoryOperand(instruction, 0) ||
+				isBracketMemoryOperand(instruction, 1)) {
+				continue;
+			}
+			Register base = operandRegister(instruction, 0);
+			Register source = operandRegister(instruction, 1);
+			if (base == null || source == null ||
+				"r0".equalsIgnoreCase(base.getName()) ||
+				source.getMinimumByteSize() != 2) {
+				continue;
+			}
+			Integer slot = tracer.traceScalarInputWord(program, function,
+				instruction, source);
+			if (slot == null || slot < 0 || slot >= 4) {
+				continue;
+			}
+			Scalar displacement = operandScalar(instruction, 0);
+			int offset = displacement == null ? 0 :
+				(int) displacement.getSignedValue();
+			stores.computeIfAbsent(slot, ignored -> new ArrayList<>())
+				.add(new ScalarWordStore(instruction, base,
+					activePageRegister(program, function, instruction), offset));
+		}
+		return stores;
+	}
+
+	private Register activePageRegister(Program program, Function function,
+			Instruction access) {
+		Instruction instruction =
+			program.getListing().getInstructionBefore(access.getAddress());
+		for (int following = 0; instruction != null && following < 4; following++) {
+			if (!function.getBody().contains(instruction.getAddress()) ||
+				instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				return null;
+			}
+			String mnemonic = instruction.getMnemonicString().toLowerCase();
+			if (mnemonic.equals("extp") || mnemonic.equals("extpr")) {
+				Register page = dynamicPageSource(instruction);
+				int range = pageAccessCount(instruction);
+				return page != null && following < range ? page : null;
+			}
+			instruction = program.getListing().getInstructionBefore(
+				instruction.getAddress());
+		}
+		return null;
+	}
+
+	private boolean sameRegisterValueBetween(Program program, Function function,
+			Instruction left, Instruction right, Register register) {
+		Instruction first = left.getAddress().compareTo(right.getAddress()) <= 0 ?
+			left : right;
+		Instruction last = first == left ? right : left;
+		Instruction instruction =
+			program.getListing().getInstructionAfter(first.getAddress());
+		while (instruction != null &&
+			instruction.getAddress().compareTo(last.getAddress()) < 0 &&
+			function.getBody().contains(instruction.getAddress())) {
+			if (instruction.getFlowType().isCall() ||
+				instruction.getFlowType().isJump() || writesRegister(instruction, register)) {
+				return false;
+			}
+			instruction = program.getListing().getInstructionAfter(
+				instruction.getAddress());
+		}
+		return instruction != null && instruction.getAddress().equals(last.getAddress());
+	}
+
+	private boolean storedFieldReachesPointerConsumer(Program program, Function function,
+			Instruction after, Register base, Register page, int fieldOffset) {
+		Instruction instruction =
+			program.getListing().getInstructionAfter(after.getAddress());
+		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
+				scanned++, instruction = program.getListing().getInstructionAfter(
+					instruction.getAddress())) {
+			if (!function.getBody().contains(instruction.getAddress()) ||
+				instruction.getFlowType().isJump()) {
+				return false;
+			}
+			if (!instruction.getFlowType().isCall()) {
+				continue;
+			}
+			Function target = directTarget(program, instruction);
+			if (target != null) {
+				for (PointerFieldUse use : directlyDereferencedPointerFields(program,
+						target)) {
+					if (use.fieldOffset() == fieldOffset &&
+						callPairTracesTo(program, function, instruction,
+							use.parameterStart(), base, page, after)) {
+						return true;
+					}
+				}
+			}
+			// A call may clobber the outgoing registers, but R6-R9 keep the object
+			// base. Continue only while the exact stored base pair is callee-saved.
+			if (!isTaskingCalleeSavedRegister(base) ||
+				!isTaskingCalleeSavedRegister(page)) {
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private boolean callPairTracesTo(Program program, Function function,
+			Instruction call, int parameterStart, Register expectedLow,
+			Register expectedPage, Instruction boundary) {
+		if (parameterStart < 0 || parameterStart >= 3) {
+			return false;
+		}
+		Register low = program.getRegister(
+			"r" + (FIRST_ARGUMENT_REGISTER + parameterStart));
+		Register page = program.getRegister(
+			"r" + (FIRST_ARGUMENT_REGISTER + parameterStart + 1));
+		return registerAtCallTracesTo(program, function, call, low, expectedLow,
+			boundary) && registerAtCallTracesTo(program, function, call, page,
+				expectedPage, boundary);
+	}
+
+	private boolean registerAtCallTracesTo(Program program, Function function,
+			Instruction call, Register outgoing, Register expected,
+			Instruction boundary) {
+		if (outgoing == null || expected == null) {
+			return false;
+		}
+		Register traced = outgoing;
+		Instruction instruction =
+			program.getListing().getInstructionBefore(call.getAddress());
+		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
+				scanned++, instruction = program.getListing().getInstructionBefore(
+					instruction.getAddress())) {
+			if (!function.getBody().contains(instruction.getAddress()) ||
+				instruction.getAddress().compareTo(boundary.getAddress()) <= 0 ||
+				instruction.getFlowType().isJump()) {
+				break;
+			}
+			if (instruction.getFlowType().isCall()) {
+				if (!isTaskingCalleeSavedRegister(traced)) {
+					return false;
+				}
+				continue;
+			}
+			if (!writesRegister(instruction, traced)) {
+				continue;
+			}
+			if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
+				instruction.getNumOperands() < 2 ||
+				OperandType.isIndirect(instruction.getOperandType(0)) ||
+				OperandType.isIndirect(instruction.getOperandType(1))) {
+				return false;
+			}
+			Register source = operandRegister(instruction, 1);
+			if (source == null) {
+				return false;
+			}
+			traced = source;
+		}
+		return overlaps(traced, expected);
+	}
+
+	private boolean isTaskingCalleeSavedRegister(Register register) {
+		Integer number = generalRegisterNumber(register);
+		return number != null && number >= 6 && number <= 9;
+	}
+
+	private Set<PointerFieldUse> directlyDereferencedPointerFields(Program program,
+			Function function) {
+		Map<Register, SymbolicWord> values = new HashMap<>();
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			DataType type = parameter.getFormalDataType();
+			if (start == null || start < 0 || start >= 3 ||
+				!isPointerType(type) || isFunctionPointer(type) || type.getLength() != 4) {
+				continue;
+			}
+			values.put(program.getRegister("r" +
+				(FIRST_ARGUMENT_REGISTER + start)),
+				new SymbolicWord(SymbolicWordKind.BASE_LOW, start, 0));
+			values.put(program.getRegister("r" +
+				(FIRST_ARGUMENT_REGISTER + start + 1)),
+				new SymbolicWord(SymbolicWordKind.BASE_PAGE, start, 0));
+		}
+		if (values.isEmpty()) {
+			return Set.of();
+		}
+
+		Set<PointerFieldUse> fields = new HashSet<>();
+		SymbolicWord activePage = null;
+		int activeRemaining = 0;
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		for (int scanned = 0; instructions.hasNext() &&
+				scanned < MAX_SETUP_SCAN_INSTRUCTIONS; scanned++) {
+			Instruction instruction = instructions.next();
+			if (instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				break;
+			}
+			String mnemonic = instruction.getMnemonicString().toLowerCase();
+			if (mnemonic.equals("extp") || mnemonic.equals("extpr")) {
+				Register source = dynamicPageSource(instruction);
+				activePage = symbolicValue(values, source);
+				activeRemaining = pageAccessCount(instruction);
+				continue;
+			}
+
+			boolean handledDestination = false;
+			if (mnemonic.equals("mov") && instruction.getNumOperands() >= 2 &&
+				!OperandType.isIndirect(instruction.getOperandType(0))) {
+				Register destination = operandRegister(instruction, 0);
+				if (destination != null) {
+					handledDestination = true;
+					SymbolicWord next = null;
+					if (isBracketMemoryOperand(instruction, 1) &&
+						activePage != null && activeRemaining > 0) {
+						Register base = operandRegister(instruction, 1);
+						SymbolicWord baseValue = symbolicValue(values, base);
+						Scalar displacement = operandScalar(instruction, 1);
+						int offset = displacement == null ? 0 :
+							(int) displacement.getSignedValue();
+						if (baseValue != null &&
+							baseValue.kind() == SymbolicWordKind.BASE_LOW &&
+							activePage.kind() == SymbolicWordKind.BASE_PAGE &&
+							baseValue.parameterStart() == activePage.parameterStart()) {
+							next = new SymbolicWord(SymbolicWordKind.FIELD_WORD,
+								baseValue.parameterStart(), baseValue.offset() + offset);
+						}
+						else if (baseValue != null &&
+							baseValue.kind() == SymbolicWordKind.FIELD_WORD &&
+							activePage.kind() == SymbolicWordKind.FIELD_WORD &&
+							baseValue.parameterStart() == activePage.parameterStart() &&
+							activePage.offset() == baseValue.offset() + 2) {
+							fields.add(new PointerFieldUse(baseValue.parameterStart(),
+								baseValue.offset()));
+						}
+					}
+					else if (!OperandType.isIndirect(instruction.getOperandType(1))) {
+						next = symbolicValue(values, operandRegister(instruction, 1));
+					}
+					putSymbolicValue(values, destination, next);
+				}
+			}
+			else if (mnemonic.equals("add") && instruction.getNumOperands() >= 2 &&
+				!OperandType.isIndirect(instruction.getOperandType(0))) {
+				Register destination = operandRegister(instruction, 0);
+				Scalar amount = operandScalar(instruction, 1);
+				SymbolicWord current = symbolicValue(values, destination);
+				if (destination != null && amount != null && current != null &&
+					current.kind() == SymbolicWordKind.BASE_LOW) {
+					handledDestination = true;
+					putSymbolicValue(values, destination,
+						new SymbolicWord(current.kind(), current.parameterStart(),
+							current.offset() + (int) amount.getSignedValue()));
+				}
+			}
+
+			if (!handledDestination) {
+				for (Object result : instruction.getResultObjects()) {
+					if (result instanceof Register register) {
+						putSymbolicValue(values, register, null);
+					}
+				}
+			}
+			if (activeRemaining > 0 && --activeRemaining == 0) {
+				activePage = null;
+			}
+		}
+		return Set.copyOf(fields);
+	}
+
+	private SymbolicWord symbolicValue(Map<Register, SymbolicWord> values,
+			Register register) {
+		if (register == null) {
+			return null;
+		}
+		for (Map.Entry<Register, SymbolicWord> entry : values.entrySet()) {
+			if (overlaps(entry.getKey(), register)) {
+				return entry.getValue();
+			}
+		}
+		return null;
+	}
+
+	private void putSymbolicValue(Map<Register, SymbolicWord> values,
+			Register register, SymbolicWord value) {
+		if (register == null) {
+			return;
+		}
+		values.keySet().removeIf(existing -> overlaps(existing, register));
+		if (value != null) {
+			values.put(register, value);
+		}
 	}
 
 	private void scorePointerValue(Program program, Varnode value,

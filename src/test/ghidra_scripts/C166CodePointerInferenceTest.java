@@ -464,6 +464,35 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		Function returnDataConsumer = fixture("return_data_pointer_consumer",
 			bytes(0xdb, 0x00));
 		setUserDataPointer(returnDataConsumer, "object");
+		Function forwardedDataProducer = fixture("forwarded_data_pointer_producer",
+			bytes(
+				0xe6, 0xf4, 0x00, 0x10,
+				0xe6, 0xf5, 0x02, 0x00,
+				0xdb, 0x00));
+		setUserDataPointerReturn(forwardedDataProducer);
+		Function forwardedReturnClobber = fixture("forwarded_return_clobber",
+			bytes(0xdb, 0x00));
+		Function forwardedDataReturn = fixture("callee_saved_forwarded_data_return",
+			concat(calls(forwardedDataProducer), bytes(
+				0xf0, 0x84,             // R8 = returned OFFSET R4
+				0xf0, 0x95),            // R9 = returned PAGE R5
+				calls(forwardedReturnClobber), bytes(
+				0xf0, 0x48,             // R4 = preserved OFFSET R8
+				0xf0, 0x59,             // R5 = preserved PAGE R9
+				0xdb, 0x00)));
+		forwardedDataReturn.setReturnType(Undefined.getUndefinedDataType(2),
+			SourceType.ANALYSIS);
+		Function mixedForwardedDataReturn = fixture(
+			"mixed_call_words_are_not_a_forwarded_return",
+			concat(calls(forwardedDataProducer), bytes(
+				0xf0, 0x84),            // low word from first call
+				calls(forwardedDataProducer), bytes(
+				0xf0, 0x95,             // high word from second call
+				0xf0, 0x48,
+				0xf0, 0x59,
+				0xdb, 0x00)));
+		mixedForwardedDataReturn.setReturnType(Undefined.getUndefinedDataType(2),
+			SourceType.ANALYSIS);
 		Function dataReturn = fixture("two_uses_prove_data_pointer_return",
 			bytes(0xdb, 0x00));
 		Function dataReturnCaller = fixture("two_uses_prove_data_pointer_return_caller",
@@ -763,6 +792,9 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		checkDataPointerReturn(dataReturn);
 		checkDataPointerReturn(directPagedReturn);
 		checkDataPointerReturn(explicitSingleUseDataReturn);
+		checkDataPointerReturn(forwardedDataReturn);
+		check(mixedForwardedDataReturn.getReturnType().getLength() != 4,
+			"R4/R5 from different calls were joined as one forwarded pointer return");
 		checkScalarReturn(explicitScalar32Return);
 		checkUnsignedLongReturn(runtimeScalarReturn);
 		checkFunctionPointerReturn(explicitCodeReturn);
@@ -776,7 +808,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"conflicting data/code return was inferred as a data pointer");
 		String returnSnapshot = snapshot(dataReturn, directPagedReturn,
 			explicitSingleUseDataReturn, explicitScalar32Return, runtimeScalarReturn,
-			explicitCodeReturn,
+			explicitCodeReturn, forwardedDataReturn, mixedForwardedDataReturn,
 			partialScalarReturn, userDefinedReturn, importedReturn,
 			scalarReturn, conflictingReturn);
 		MessageLog repeatedReturnLog = new MessageLog();
@@ -787,7 +819,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 				repeatedReturnLog);
 		check(returnSnapshot.equals(snapshot(dataReturn, directPagedReturn,
 			explicitSingleUseDataReturn, explicitScalar32Return, runtimeScalarReturn,
-			explicitCodeReturn,
+			explicitCodeReturn, forwardedDataReturn, mixedForwardedDataReturn,
 			partialScalarReturn, userDefinedReturn, importedReturn,
 			scalarReturn, conflictingReturn)),
 			"R5:R4 return classification is not idempotent");
@@ -931,6 +963,12 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		function.setCallingConvention("__tasking_c166_classic");
 		function.setReturnType(new PointerDataType(VoidDataType.dataType,
 			currentProgram.getDataTypeManager()), SourceType.ANALYSIS);
+	}
+
+	private void setUserDataPointerReturn(Function function) throws Exception {
+		function.setCallingConvention("__tasking_c166_classic");
+		function.setReturnType(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
 	}
 
 	private void setUserDataPointer(Function function, String name) throws Exception {

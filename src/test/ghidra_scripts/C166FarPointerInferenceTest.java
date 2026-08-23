@@ -330,6 +330,59 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("scalar_pair_stale_caller_b",
 			constantPairCall(staleScalarPair, 0x0001, 0x02c3));
 
+		// M55 FUN_a060d6 shape: R12:R13 is copied to an adjacent object field which
+		// a typed consumer reloads and dereferences through EXTP.  R13 and R14 also
+		// land in non-adjacent fields, disproving the stale overlapping R13:R14
+		// pointer.  The producer never dereferences R12:R13 itself.
+		Function separatedScalarStoreClobber = fixture(
+			"separated_scalar_store_clobber", bytes(0xdb, 0x00));
+		Function storedPointerConsumer = fixture("stored_pointer_field_consumer", bytes(
+			0xf0, 0x9d,                   // R9 = incoming PAGE R13
+			0xf0, 0x8c,                   // R8 = incoming OFFSET R12
+			0xf0, 0x68, 0xf0, 0x79,       // R6:R7 = object OFFSET:PAGE
+			0x08, 0x64,                   // R6 += 4
+			0xdc, 0x57,                   // EXTP R7,#2
+			0xd4, 0xd6, 0x02, 0x00,       // R13 = [R6+2], field PAGE
+			0xa8, 0xc6,                   // R12 = [R6], field OFFSET
+			0xdc, 0x5d,                   // EXTP R13,#2
+			0xd4, 0xfc, 0x02, 0x00,       // direct field-pointer read
+			0xa8, 0xec, 0xdb, 0x00));
+		setUserCharPointer(storedPointerConsumer, "object");
+		Function separatedScalarStores = fixture("separated_scalar_word_stores", concat(bytes(
+			0x88, 0xf0, 0x88, 0xe0, 0x88, 0xd0, 0x88, 0xc0,
+			0x88, 0x90, 0x88, 0x80),
+			callInstruction(separatedScalarStoreClobber.getEntryPoint()), bytes(
+			0xe6, 0xf8, 0x00, 0x30,       // synthetic object OFFSET in R8
+			0xe6, 0xf9, 0x00, 0x00,       // synthetic object PAGE in R9
+			0xd4, 0xc0, 0x04, 0x00,       // R12 = saved incoming R12
+			0xd4, 0xd0, 0x06, 0x00,       // R13 = saved incoming R13
+			0xdc, 0x59,
+			0xc4, 0xc8, 0x04, 0x00,       // [R8+4] = R12, pointer OFFSET
+			0xc4, 0xd8, 0x06, 0x00,       // [R8+6] = R13
+			0xd4, 0x10, 0x08, 0x00,       // R1 = saved incoming R14
+			0xdc, 0x59,
+			0xc4, 0x18, 0x0c, 0x00,       // [R8+0xc] = R1
+			0xf0, 0xc8, 0xf0, 0xd9),      // pass the same object base
+			callInstruction(storedPointerConsumer.getEntryPoint()), bytes(
+			0x06, 0xf0, 0x0c, 0x00,
+			0xdb, 0x00)));
+		setAnalysisWordPointerWord(separatedScalarStores);
+
+		// Caller-to-callee evidence for opaque stack payloads: two independent
+		// typed callers place one pointer at Stack[0]:4 and two more place it at
+		// Stack[4]:4.  A single typed word or a single call is intentionally
+		// insufficient to create either formal pointer.
+		Function typedStackPairTarget = fixture("typed_callsite_stack_pairs",
+			bytes(0xdb, 0x00));
+		for (int i = 0; i < 2; i++) {
+			Function first = fixture("typed_stack_first_caller_" + i,
+				typedStackPairCall(typedStackPairTarget, false));
+			setUserCharPointer(first, "payload");
+			Function second = fixture("typed_stack_second_caller_" + i,
+				typedStackPairCall(typedStackPairTarget, true));
+			setUserCharPointer(second, "payload");
+		}
+
 		// firmware FUN_c3ca42 shape: an old generic pointer survives because the wrapper
 		// forwards it before either word is tested.  A complete call-site rectangle
 		// proves that both words vary independently: (0x39,0xae/0xaf) and
@@ -578,6 +631,10 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkWordSignature(typedVariadicTarget, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(freshScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(staleScalarPair, SourceType.ANALYSIS, "r12", "r13");
+		checkSignature(separatedScalarStores, Set.of(0),
+			"r13+r12", "r14", "r15");
+		checkSignature(typedStackPairTarget, Set.of(4, 5),
+			"r12", "r13", "r14", "r15", "Stack[0x0]:4", "Stack[0x4]:4");
 		checkWordSignature(rectangleScalarPair, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(rectangleForwardTarget, SourceType.ANALYSIS, "r12", "r13");
 		checkWordSignature(freshRectangleScalarPair, SourceType.ANALYSIS,
@@ -709,6 +766,27 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			calls(target));
 	}
 
+	private byte[] typedStackPairCall(Function target, boolean secondPair) {
+		byte[] pointerPushes = bytes(
+			0x88, 0x70,                   // push PAGE saved in R7
+			0x88, 0x60);                  // push OFFSET saved in R6
+		byte[] zeroPushes = bytes(
+			0x88, 0x80, 0x88, 0x80);     // push 0:0 from R8
+		return concat(bytes(
+			0xf0, 0x6c, 0xf0, 0x7d,       // preserve incoming R12:R13 in R6:R7
+			0xe0, 0x08),                  // R8 = 0
+			secondPair ? pointerPushes : zeroPushes,
+			secondPair ? zeroPushes : pointerPushes,
+			bytes(
+				0xe6, 0xfc, 0x01, 0x00,
+				0xe6, 0xfd, 0x02, 0x00,
+				0xe6, 0xfe, 0x03, 0x00,
+				0xe6, 0xff, 0x04, 0x00),
+			callInstruction(target.getEntryPoint()), bytes(
+				0x06, 0xf0, 0x08, 0x00,
+				0xdb, 0x00));
+	}
+
 	private Address nextFixtureAddress(int delta) {
 		return toAddr(FIXTURE_BASE + (long) (nextFixture + delta) * FIXTURE_STRIDE);
 	}
@@ -755,6 +833,18 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 			new PointerDataType(VoidDataType.dataType, currentProgram.getDataTypeManager()),
 			currentProgram);
 		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisWordPointerWord(Function function) throws Exception {
+		DataType word = wordType();
+		DataType pointer = new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager());
+		List<Variable> parameters = List.of(
+			new ParameterImpl("first", word, currentProgram),
+			new ParameterImpl("misclassified", pointer, currentProgram),
+			new ParameterImpl("last", word, currentProgram));
+		function.updateFunction("__tasking_c166_classic", null, parameters,
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 

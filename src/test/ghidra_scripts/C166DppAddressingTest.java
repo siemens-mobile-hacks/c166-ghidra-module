@@ -11,6 +11,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.CharDataType;
 import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.UnsignedShortDataType;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Function.FunctionUpdateType;
@@ -85,8 +86,73 @@ public class C166DppAddressingTest extends GhidraScript {
 		checkSwitchLoadUsesLiveDpp();
 		checkExtsOverridePrecedence();
 		checkRegisterExtpKeepsFarPointerSemantics();
+		checkImmediateExtpKeepsFullPage();
 
 		println("C166 direct and switch DPP dataflow regressions passed.");
+	}
+
+	private void checkImmediateExtpKeepsFullPage() throws Exception {
+		MemoryBlock lowPageTarget = createMemoryBlock("immediate_extp_low_target",
+			toAddr(0x2a2f0), bytes(0x34, 0x12), false);
+		lowPageTarget.setWrite(false);
+		createData(toAddr(0x2a2f0), UnsignedShortDataType.dataType);
+		createLabel(toAddr(0x2a2f0), "g_immediate_extp_low", true);
+		MemoryBlock lowPageWrong = createMemoryBlock("immediate_extp_low_wrong",
+			toAddr(0x0a2f0), bytes(0x78, 0x56), false);
+		lowPageWrong.setWrite(false);
+		createData(toAddr(0x0a2f0), UnsignedShortDataType.dataType);
+		createLabel(toAddr(0x0a2f0), "wrong_immediate_extp_low", true);
+
+		MemoryBlock highPageTarget = createMemoryBlock("immediate_extp_high_target",
+			toAddr(0x581c58), bytes(0xbc, 0x9a), false);
+		highPageTarget.setWrite(false);
+		createData(toAddr(0x581c58), UnsignedShortDataType.dataType);
+		createLabel(toAddr(0x581c58), "g_immediate_extp_high", true);
+		MemoryBlock highPageWrong = createMemoryBlock("immediate_extp_high_wrong",
+			toAddr(0x161c58), bytes(0xf0, 0xde), false);
+		highPageWrong.setWrite(false);
+		createData(toAddr(0x161c58), UnsignedShortDataType.dataType);
+		createLabel(toAddr(0x161c58), "wrong_immediate_extp_high", true);
+
+		checkImmediateExtpFunction(0x7200, 0x00a, 0x22f0,
+			"g_immediate_extp_low", "wrong_immediate_extp_low");
+		checkImmediateExtpFunction(0x7300, 0x160, 0x1c58,
+			"g_immediate_extp_high", "wrong_immediate_extp_high");
+	}
+
+	private void checkImmediateExtpFunction(long entryOffset, int page, int offset,
+			String expectedLabel, String wrongLabel) throws Exception {
+		Function function = function(entryOffset, "immediate_extp_" +
+			Integer.toHexString(page), bytes(
+				0xe6, 0xf7, 0x00, 0x00,             // mov r7,#0
+				0xd7, 0x40, page, page >> 8,       // extp #page,#1
+				0xd4, 0x47, offset, offset >> 8,   // mov r4,[r7+#offset]
+				0xdb, 0x00));                       // rets
+		function.setReturnType(UnsignedShortDataType.dataType, SourceType.USER_DEFINED);
+
+		Address load = toAddr(entryOffset + 8);
+		BigInteger contextPage = currentProgram.getProgramContext().getValue(
+			currentProgram.getRegister("Extp"), load, false);
+		check(contextPage != null && contextPage.longValue() == page,
+			"fresh immediate EXTP #0x" + Integer.toHexString(page) +
+				" decoded as context page " +
+				(contextPage == null ? "null" : "0x" + contextPage.toString(16)));
+		DecompInterface decompiler = new DecompInterface();
+		decompiler.toggleCCode(true);
+		decompiler.toggleSyntaxTree(true);
+		check(decompiler.openProgram(currentProgram), decompiler.getLastMessage());
+		try {
+			DecompileResults results = decompiler.decompileFunction(function, 30, monitor);
+			check(results.decompileCompleted(), results.getErrorMessage());
+			String code = results.getDecompiledFunction().getC();
+			println(code);
+			check(code.contains(expectedLabel) && !code.contains(wrongLabel),
+				"immediate EXTP #0x" + Integer.toHexString(page) +
+					" did not resolve its full physical page:\n" + code);
+		}
+		finally {
+			decompiler.dispose();
+		}
 	}
 
 	private void checkRegisterExtpKeepsFarPointerSemantics() throws Exception {
