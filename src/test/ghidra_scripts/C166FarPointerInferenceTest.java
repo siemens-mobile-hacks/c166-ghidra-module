@@ -330,7 +330,7 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		fixture("scalar_pair_stale_caller_b",
 			constantPairCall(staleScalarPair, 0x0001, 0x02c3));
 
-		// M55 FUN_a060d6 shape: R12:R13 is copied to an adjacent object field which
+		// Saved-program FUN_a060d6 shape: R12:R13 is copied to an adjacent object field which
 		// a typed consumer reloads and dereferences through EXTP.  R13 and R14 also
 		// land in non-adjacent fields, disproving the stale overlapping R13:R14
 		// pointer.  The producer never dereferences R12:R13 itself.

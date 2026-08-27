@@ -13,6 +13,7 @@ import ghidra.program.model.data.UnsignedShortDataType;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Function.FunctionUpdateType;
+import ghidra.program.model.listing.FlowOverride;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.ParameterImpl;
 import ghidra.program.model.listing.Variable;
@@ -44,6 +45,66 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 			0xdb, 0x00));
 		concreteReturn.setReturnType(
 			new UnsignedCharDataType(currentProgram.getDataTypeManager()), SourceType.ANALYSIS);
+		Function wordTailWrapper = fixture("word_tail_wrapper",
+			concat(bytes(0xe0, 0x1c), jmps(wordReturn)));
+		Function fixedArgumentTarget = fixture("fixed_argument_tail_target", bytes(
+			0xf0, 0x4c,             // mov r4,r12
+			0xdb, 0x00));
+		Function fixedArgumentWrapper = fixture("fixed_argument_tail_wrapper",
+			concat(bytes(0xe0, 0x2c), jmps(fixedArgumentTarget)));
+		fixedArgumentWrapper.setThunkedFunction(fixedArgumentTarget);
+		Function transparentThunk = fixture("transparent_tail_thunk",
+			jmps(fixedArgumentTarget));
+		transparentThunk.setThunkedFunction(fixedArgumentTarget);
+		Function callOverrideWrapper = fixture("fixed_argument_call_override_wrapper",
+			concat(bytes(0xe0, 0x2c), jmps(fixedArgumentTarget)));
+		getInstructionAt(callOverrideWrapper.getEntryPoint().add(2))
+			.setFlowOverride(FlowOverride.CALL_RETURN);
+		Address lateTargetEntry = toAddr(nextFixture + 0x100);
+		Function earlyWrapper = fixture("wrapper_before_its_tail_target",
+			concat(bytes(0xe0, 0x2c), jmps(lateTargetEntry)));
+		Function lateTarget = fixture("tail_target_after_its_wrapper", bytes(
+			0xf0, 0x4c,             // mov r4,r12
+			0xdb, 0x00));
+		earlyWrapper.setThunkedFunction(lateTarget);
+		Function voidTailTarget = fixture("void_tail_target", bytes(0xdb, 0x00));
+		voidTailTarget.setReturnType(VoidDataType.dataType, SourceType.USER_DEFINED);
+		Function voidTailWrapper = fixture("void_tail_wrapper",
+			concat(bytes(0xf0, 0x8c), jmps(voidTailTarget)));
+		Function noParameterConvention = fixture("no_parameter_convention",
+			bytes(0xdb, 0x00));
+		Function splitReturnBlock = fixture("split_return_block", bytes(
+			0x48, 0xc0,             // cmp r12,#0
+			0x2d, 0x03,             // jmpr cc_EQ,zero
+			0xe6, 0xf4, 0x01, 0x00, // mov r4,#1
+			0x0d, 0x02,             // jmpr cc_UC,shared_rets
+			0xe6, 0xf4, 0x00, 0x00, // zero: mov r4,#0
+			0xdb, 0x00));            // shared_rets: rets
+		Function callForwardedWord = fixture("call_forwarded_word",
+			concat(calls(wordReturn), bytes(0xdb, 0x00)));
+		Function wordAcrossVoidCall = fixture("word_across_void_call", concat(
+			bytes(0xe6, 0xf4, 0x01, 0x00), calls(voidTailTarget),
+			bytes(0xdb, 0x00)));
+		Function pointerCallTarget = fixture("pointer_call_target", bytes(0xdb, 0x00));
+		pointerCallTarget.setReturnType(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
+		Function unknownCallResult = fixture("unknown_call_result",
+			concat(calls(pointerCallTarget), bytes(0xdb, 0x00)));
+		Function staleCallResult = fixture("nonterminal_call_result_is_not_returned",
+			concat(calls(wordReturn), bytes(
+				0xe6, 0xfc, 0x34, 0x12, // mov r12,#0x1234
+				0xdb, 0x00)));
+		Function mixedForwarding = fixture("mixed_forwarding_and_empty_path_is_void",
+			concat(bytes(
+				0x48, 0xc0,             // cmp r12,#0
+				0x2d, 0x04),            // jmpr cc_EQ,empty
+				calls(wordReturn), bytes(
+				0x0d, 0x02,             // jmpr cc_UC,shared_rets
+				0xe6, 0xfc, 0x00, 0x00, // empty: mov r12,#0
+				0xdb, 0x00)));
+		Function highByteOnly = fixture("rh4_is_not_a_char_return", bytes(
+			0xe1, 0x19,             // movb RH4,#1
+			0xdb, 0x00));
 
 		Function liveR12 = fixture("incoming_r12_is_parameter", bytes(
 			0xf0, 0x8c,             // mov R8,R12
@@ -92,7 +153,7 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 		stackSignature.setReturnType(
 			new UnsignedShortDataType(currentProgram.getDataTypeManager()), SourceType.ANALYSIS);
 
-		String protectedSnapshot = snapshot(concreteReturn, userDefined, stackSignature);
+		String protectedSnapshot = snapshot(userDefined, stackSignature);
 		C166ScalarSignaturePhase phase = new C166ScalarSignaturePhase();
 		MessageLog log = new MessageLog();
 		check(phase.added(currentProgram, currentProgram.getMemory(), monitor, log),
@@ -101,6 +162,50 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 
 		checkReturn(wordReturn, 2);
 		checkReturn(byteReturn, 1);
+		check(wordTailWrapper.getReturnType().getLength() == 2,
+			"word_tail_wrapper: unexpected return " +
+			wordTailWrapper.getReturnType().getDisplayName() + ", source=" +
+			wordTailWrapper.getReturn().getSource() + ", body=" +
+			wordTailWrapper.getBody() + ", thunk=" + wordTailWrapper.isThunk() +
+			", instructions=" + instructionDiagnostics(wordTailWrapper));
+		check(!fixedArgumentWrapper.isThunk(),
+			"argument-setting tail wrapper remained a signature-identical thunk");
+		checkParameters(fixedArgumentWrapper);
+		checkReturn(fixedArgumentWrapper, 2);
+		check(transparentThunk.isThunk(),
+			"signature-identical tail thunk was detached");
+		checkParameters(callOverrideWrapper);
+		checkReturn(callOverrideWrapper, 2);
+		check(callOverrideWrapper.getSignatureSource() == SourceType.ANALYSIS,
+			"CALL_RETURN tail wrapper retained an unlocked empty prototype");
+		check(!earlyWrapper.isThunk(),
+			"wrapper preceding its target was not repaired at the fixed point");
+		checkParameters(earlyWrapper);
+		checkReturn(earlyWrapper, 2);
+		check(voidTailWrapper.getReturnType() instanceof VoidDataType,
+			"tail wrapper did not inherit void return");
+		check("__tasking_c166_classic".equals(
+			noParameterConvention.getCallingConventionName()),
+			"zero-parameter function retained an unlocked default convention");
+		check(noParameterConvention.getReturnType() instanceof VoidDataType,
+			"leaf with no R4 definition was not classified void");
+		checkReturn(splitReturnBlock, 2);
+		checkReturn(callForwardedWord, 2);
+		checkReturn(wordAcrossVoidCall, 2);
+		check(unknownCallResult.getReturnType().getLength() == 1 &&
+			Undefined.isUndefined(unknownCallResult.getReturnType()),
+			"unknown/pointer call result was forced into a scalar return");
+		check(staleCallResult.getReturnType() instanceof VoidDataType,
+			"nonterminal call residue was treated as a source-level return");
+		check(mixedForwarding.getReturnType() instanceof VoidDataType,
+			"mixed forwarding and empty paths were not classified void");
+		check(highByteOnly.getReturnType().getLength() == 1 &&
+			Undefined.isUndefined(highByteOnly.getReturnType()),
+			"RH4-only write was misclassified as an RL4 char return");
+		check(concreteReturn.getReturnType() instanceof UnsignedCharDataType &&
+			"__tasking_c166_classic".equals(
+				concreteReturn.getCallingConventionName()),
+			"concrete zero-parameter return was changed or left unlocked");
 		checkParameters(liveR12, "r12");
 		checkParameters(liveR12R13, "r12", "r13");
 		check("old0".equals(liveR12R13.getParameter(0).getName()) &&
@@ -113,12 +218,18 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 			existingPointer.getParameter(0).getFormalDataType() instanceof Pointer &&
 			"r13+r12".equals(describe(existingPointer.getParameter(0).getVariableStorage())),
 			"existing four-byte pointer layout was split or truncated");
-		check(protectedSnapshot.equals(snapshot(concreteReturn, userDefined, stackSignature)),
-			"concrete return, USER_DEFINED signature, or stack signature changed");
+		check(protectedSnapshot.equals(snapshot(userDefined, stackSignature)),
+			"USER_DEFINED signature or stack signature changed");
 
 		String firstSnapshot = snapshot(wordReturn, byteReturn, liveR12, liveR12R13,
 			overwrittenR12, readAfterCall, setupOnlyTarget, existingPointer,
-			concreteReturn, userDefined, stackSignature);
+			concreteReturn, userDefined, stackSignature, wordTailWrapper,
+			fixedArgumentTarget, fixedArgumentWrapper, transparentThunk,
+			callOverrideWrapper,
+			earlyWrapper, lateTarget,
+			voidTailTarget, voidTailWrapper, noParameterConvention, splitReturnBlock,
+			callForwardedWord, wordAcrossVoidCall, pointerCallTarget,
+			unknownCallResult, staleCallResult, mixedForwarding, highByteOnly);
 		MessageLog repeatedLog = new MessageLog();
 		check(phase.added(currentProgram, currentProgram.getMemory(), monitor, repeatedLog),
 			"repeated scalar-signature analysis failed");
@@ -126,7 +237,13 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 			"repeated scalar-signature diagnostics leaked into Analysis Log: " + repeatedLog);
 		check(firstSnapshot.equals(snapshot(wordReturn, byteReturn, liveR12, liveR12R13,
 			overwrittenR12, readAfterCall, setupOnlyTarget, existingPointer,
-			concreteReturn, userDefined, stackSignature)),
+			concreteReturn, userDefined, stackSignature, wordTailWrapper,
+			fixedArgumentTarget, fixedArgumentWrapper, transparentThunk,
+			callOverrideWrapper,
+			earlyWrapper, lateTarget,
+			voidTailTarget, voidTailWrapper, noParameterConvention, splitReturnBlock,
+			callForwardedWord, wordAcrossVoidCall, pointerCallTarget,
+			unknownCallResult, staleCallResult, mixedForwarding, highByteOnly)),
 			"scalar-signature inference is not idempotent");
 		check(setupOnlyCaller != null, "missing caller-only evidence fixture");
 		println("TASKING scalar-signature inference matrix passed.");
@@ -206,6 +323,9 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 	}
 
 	private String describe(VariableStorage storage) {
+		if (storage.isVoidStorage()) {
+			return "void";
+		}
 		if (storage.isUnassignedStorage()) {
 			return "unassigned";
 		}
@@ -226,6 +346,27 @@ public class C166ScalarSignatureInferenceTest extends GhidraScript {
 	private byte[] calls(Function target) {
 		long address = target.getEntryPoint().getUnsignedOffset();
 		return bytes(0xda, (int) (address >> 16), (int) address, (int) (address >> 8));
+	}
+
+	private byte[] jmps(Function target) {
+		return jmps(target.getEntryPoint());
+	}
+
+	private byte[] jmps(Address target) {
+		long address = target.getUnsignedOffset();
+		return bytes(0xfa, (int) (address >> 16), (int) address, (int) (address >> 8));
+	}
+
+	private String instructionDiagnostics(Function function) {
+		StringBuilder result = new StringBuilder();
+		for (var instruction : currentProgram.getListing()
+				.getInstructions(function.getBody(), true)) {
+			result.append(instruction.getAddress()).append(':')
+				.append(instruction).append(':')
+				.append(instruction.getFlowType()).append(':')
+				.append(java.util.Arrays.toString(instruction.getFlows())).append(';');
+		}
+		return result.toString();
 	}
 
 	private byte[] concat(byte[]... parts) {

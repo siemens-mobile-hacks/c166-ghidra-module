@@ -143,7 +143,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			codePointerSetup(12, 13, mallocTarget.getEntryPoint().add(1)),
 			calls(nonEntry), bytes(0xdb, 0x00)));
 
-		// M55 FUN_2e5364 shape: an analyzer-owned R14:R13 data pointer overlaps
+		// Saved-program FUN_2e5364 shape: an analyzer-owned R14:R13 data pointer overlaps
 		// the real R15:R14 SEGMENT:OFFSET callback.  The callback entry is initially
 		// missing, but begins immediately after a decoded RETS and forms a valid
 		// subroutine.  Recover that entry, split R13 back to a word, and remove the

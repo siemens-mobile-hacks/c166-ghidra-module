@@ -1,4 +1,4 @@
-// Focused saved-M55 regression for the five-argument TASKING declaration whose
+// Focused saved-program regression for the five-argument TASKING declaration whose
 // R12:R13 pointer and second stack pointer were previously lost while R13:R14
 // was incorrectly collapsed into a pointer.
 import ghidra.app.decompiler.DecompInterface;
@@ -74,7 +74,7 @@ public class C166ScalarCallRealDatabaseTest extends GhidraScript {
 			decompiler.dispose();
 		}
 
-		println("M55 five-argument call regression passed for FUN_a060d6.");
+		println("Saved-program five-argument call regression passed for FUN_a060d6.");
 	}
 
 	private Function requiredFunction(long address) {

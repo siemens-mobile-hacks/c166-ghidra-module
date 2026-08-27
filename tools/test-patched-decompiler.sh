@@ -87,7 +87,7 @@ set -e
 
 if (( non_c166_status != 0 )) ||
 	grep -Eq 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${non_c166_log}"; then
-	printf 'x86 auto-structure control failed.\n' >&2
+	printf 'x86 shared-core control failed.\n' >&2
 	exit 1
 fi
 
@@ -107,6 +107,6 @@ set -e
 
 if (( arm_status != 0 )) ||
 	grep -Eq 'REPORT SCRIPT ERROR|Abort due to Headless analyzer error' "${arm_log}"; then
-	printf 'ARM auto-structure control failed.\n' >&2
+	printf 'ARM shared-core control failed.\n' >&2
 	exit 1
 fi

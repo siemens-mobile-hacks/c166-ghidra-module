@@ -1,4 +1,4 @@
-// Focused saved-M55 regression for FUN_2e5364.  R14 belongs to the real
+// Focused saved-program regression for FUN_2e5364.  R14 belongs to the real
 // R15:R14 SEGMENT:OFFSET callback while the stale signature joined it with
 // R13 as a PAGE:OFFSET data pointer to 0xcf867c.
 import ghidra.app.decompiler.DecompInterface;
@@ -102,7 +102,7 @@ public class C166OverlappingCallbackRealDatabaseTest extends GhidraScript {
 			decompiler.dispose();
 		}
 
-		println("M55 overlapping callback regression passed for FUN_2e5364; callback " +
+		println("Saved-program overlapping callback regression passed for FUN_2e5364; callback " +
 			(callbackWasMissing ? "recovered" : "already present") + ".");
 	}
 

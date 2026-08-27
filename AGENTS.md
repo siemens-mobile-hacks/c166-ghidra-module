@@ -14,6 +14,11 @@
 - Investigate complex problems in headless Ghidra before reporting them fixed.
 - Cover fixes with focused synthetic tests and, when applicable, the real
   Ghidra database that reproduced the problem.
+- Run headless tests against an independent temporary copy of every real
+  Ghidra project, never against the active/original project. Do not use hard
+  links for this copy; prefer a copy-on-write reflink with a full-copy fallback.
+  Run the copied project read-only when possible, verify the original project's
+  hashes are unchanged after the test, and remove the temporary copy.
 - Include non-C166 architecture controls for changes to shared Ghidra code.
 - Show a concise before/after example at the end of every completed fix.
 

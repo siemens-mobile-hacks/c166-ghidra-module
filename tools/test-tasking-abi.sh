@@ -50,6 +50,21 @@ project_store="${test_root}/projects"
 mkdir -p "${extension_dir}" "${project_store}"
 unzip -q "${archive}" -d "${extension_dir}"
 
+# Ghidra compiles a script directory as one OSGi bundle, but a source error can
+# surface only as a misleading "class could not be found" at execution time.
+# Compile every headless fixture explicitly first so CI reports the actual file
+# and line responsible for a broken test bundle.
+mapfile -d '' script_sources < <(
+	find "${project_dir}/src/test/ghidra_scripts" -maxdepth 1 -type f -name '*.java' \
+		-print0 | sort -z
+)
+mkdir -p "${test_root}/script-classes"
+script_classpath="${project_dir}/build/classes/java/main:$({
+	find "${ghidra_dir}/Ghidra" -type f -name '*.jar' -printf '%p:'
+})"
+javac -proc:none -cp "${script_classpath}" -d "${test_root}/script-classes" \
+	"${script_sources[@]}"
+
 run_headless() {
 	local name="$1"
 	local expected="$2"
@@ -91,7 +106,8 @@ run_headless C166DppAddressingTest \
 	-processor C166:LE:16:tasking-classic-large \
 	-cspec tasking-classic-large -noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
-	-postScript C166DppAddressingTest.java -deleteProject
+	-postScript C166DppAddressingTest.java \
+	-postScript C166SwitchRecoveryHeadlessTest.java -deleteProject
 
 run_headless C167CsTaskingClassicAbiTest \
 	'TASKING far-pointer inference matrix passed' \

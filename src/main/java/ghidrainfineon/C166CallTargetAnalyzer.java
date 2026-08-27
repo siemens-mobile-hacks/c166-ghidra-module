@@ -1,10 +1,13 @@
 package ghidrainfineon;
 
+import java.math.BigInteger;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -20,7 +23,12 @@ import ghidra.app.util.PseudoDisassembler;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressOutOfBoundsException;
 import ghidra.program.model.address.AddressSetView;
+import ghidra.program.model.data.DataUtilities;
+import ghidra.program.model.data.DataUtilities.ClearDataMode;
+import ghidra.program.model.data.UnsignedShortDataType;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Instruction;
@@ -29,12 +37,16 @@ import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.pcode.JumpTable;
 import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceManager;
+import ghidra.program.model.symbol.RefType;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.util.Msg;
 import ghidra.util.exception.CancelledException;
+import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
 
 /**
@@ -50,6 +62,8 @@ import ghidra.util.task.TaskMonitor;
 public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 
 	private static final int MAX_DIAGNOSTIC_EXAMPLES = 8;
+	private static final int MAX_SWITCH_CASES = 256;
+	private static final int MAX_SWITCH_RECOVERY_PASSES = 16;
 	private final Set<Program> analyzedPrograms =
 		Collections.newSetFromMap(new WeakHashMap<>());
 
@@ -105,6 +119,8 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 		int scannedFunctionCount = 0;
 		int callInstructionCount = 0;
 		int targetOccurrenceCount = 0;
+		int recoveredSwitchCount = 0;
+		int recoveredSwitchTargetCount = 0;
 		Set<Address> uniqueTargets = new HashSet<>();
 		Set<Address> acceptedTargets = new HashSet<>();
 		TargetDiagnostics unmapped = new TargetDiagnostics();
@@ -128,6 +144,10 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 			scannedFunctionCount++;
 			monitor.setMessage("C166 call graph: " + function.getName());
 			monitor.incrementProgress(1);
+			SwitchRecoveryStats switchStats = recoverSwitchTables(program, function,
+				monitor, log);
+			recoveredSwitchCount += switchStats.tables();
+			recoveredSwitchTargetCount += switchStats.targets();
 			InstructionIterator instructions = listing.getInstructions(function.getBody(), true);
 
 			while (instructions.hasNext()) {
@@ -241,8 +261,11 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 			acceptedTargets.size() + " accepted.");
 		report(program, "Changes: added " + referenceCount +
 			" call reference(s), disassembled " + disassembledCount +
-			" target(s), created " + functionCount + " function(s)." +
-			(referenceCount == 0 && disassembledCount == 0 && functionCount == 0
+			" target(s), created " + functionCount + " function(s), recovered " +
+			recoveredSwitchCount + " bounded switch table(s) with " +
+			recoveredSwitchTargetCount + " case target(s)." +
+			(referenceCount == 0 && disassembledCount == 0 && functionCount == 0 &&
+				recoveredSwitchCount == 0
 					? " Static call graph was already complete." : ""));
 		appendDiagnostics(program, "Unmapped", unmapped);
 		appendDiagnostics(program, "Non-executable", nonExecutable);
@@ -251,6 +274,323 @@ public class C166CallTargetAnalyzer extends AbstractAnalyzer {
 		appendDiagnostics(program, "Invalid code", invalidCode);
 		appendDiagnostics(program, "Disassembly failed", failedDisassembly);
 		return true;
+	}
+
+	/**
+	 * Recover the exact bounded jump-table sequence emitted by TASKING Classic.
+	 *
+	 * <p>The compiler manual documents jump tables for dense switch statements.
+	 * The generated sequence bounds an index, doubles it for a 16-bit table,
+	 * loads a near code offset through EXTP/DPP, and performs an unconditional
+	 * JMPI.  Every target is therefore a local basic block, never a function
+	 * pointer.  Recovering these edges before call/type analysis prevents the
+	 * decompiler from turning the branch into a spurious indirect call.</p>
+	 */
+	private SwitchRecoveryStats recoverSwitchTables(Program program, Function function,
+			TaskMonitor monitor, MessageLog log) throws CancelledException {
+		int tables = 0;
+		int targets = 0;
+		Set<Address> recovered = new HashSet<>();
+		for (int pass = 0; pass < MAX_SWITCH_RECOVERY_PASSES; pass++) {
+			monitor.checkCancelled();
+			List<Instruction> candidates = new ArrayList<>();
+			InstructionIterator instructions =
+				program.getListing().getInstructions(function.getBody(), true);
+			while (instructions.hasNext()) {
+				Instruction instruction = instructions.next();
+				if ("jmpi".equalsIgnoreCase(instruction.getMnemonicString()) &&
+					!recovered.contains(instruction.getAddress())) {
+					candidates.add(instruction);
+				}
+			}
+			boolean changed = false;
+			for (Instruction candidate : candidates) {
+				monitor.checkCancelled();
+				SwitchPattern pattern = matchSwitchPattern(program, function, candidate);
+				if (pattern == null) {
+					continue;
+				}
+				try {
+					int recoveredTargets = applySwitchPattern(program, function, pattern,
+						monitor);
+					if (recoveredTargets != 0) {
+						recovered.add(candidate.getAddress());
+						tables++;
+						targets += recoveredTargets;
+						changed = true;
+					}
+				}
+				catch (InvalidInputException e) {
+					log.appendException(e);
+				}
+			}
+			if (!changed) {
+				break;
+			}
+		}
+		return new SwitchRecoveryStats(tables, targets);
+	}
+
+	private SwitchPattern matchSwitchPattern(Program program, Function function,
+			Instruction jump) {
+		if (!isUnconditional(jump)) {
+			return null;
+		}
+		Register jumpRegister = lastOperandRegister(jump);
+		Instruction load = jump.getPrevious();
+		if (jumpRegister == null || load == null ||
+			!"mov".equalsIgnoreCase(load.getMnemonicString()) ||
+			load.getNumOperands() < 2 ||
+			!isIndirectOperand(load, 1) ||
+			!sameRegister(jumpRegister, operandRegister(load, 0)) ||
+			!sameRegister(jumpRegister, operandRegister(load, 1))) {
+			return null;
+		}
+
+		Instruction cursor = load.getPrevious();
+		Long page = null;
+		if (cursor != null && "extp".equalsIgnoreCase(cursor.getMnemonicString())) {
+			Scalar pageScalar = firstScalar(cursor);
+			if (pageScalar == null) {
+				return null;
+			}
+			page = pageScalar.getUnsignedValue() & 0x3ff;
+			cursor = cursor.getPrevious();
+		}
+		if (cursor == null || !"add".equalsIgnoreCase(cursor.getMnemonicString()) ||
+			!sameRegister(jumpRegister, operandRegister(cursor, 0))) {
+			return null;
+		}
+		Scalar tableScalar = lastScalar(cursor);
+		if (tableScalar == null) {
+			return null;
+		}
+		long tableOffset = tableScalar.getUnsignedValue() & 0xffff;
+
+		Instruction shift = cursor.getPrevious();
+		if (shift == null || !"shl".equalsIgnoreCase(shift.getMnemonicString()) ||
+			!sameRegister(jumpRegister, operandRegister(shift, 0)) ||
+			lastScalarValue(shift) != 1) {
+			return null;
+		}
+		Instruction guard = shift.getPrevious();
+		Instruction compare = guard == null ? null : guard.getPrevious();
+		if (guard == null || compare == null || !isUnsignedGreaterGuard(guard) ||
+			!compare.getMnemonicString().toLowerCase().startsWith("cmp") ||
+			!sameRegister(jumpRegister, operandRegister(compare, 0))) {
+			return null;
+		}
+		Scalar maximum = lastScalar(compare);
+		if (maximum == null || maximum.getUnsignedValue() >= MAX_SWITCH_CASES) {
+			return null;
+		}
+
+		if (page == null) {
+			int dppIndex = (int) ((tableOffset >>> 14) & 3);
+			Register dpp = program.getRegister("DPP" + dppIndex);
+			BigInteger value = dpp == null ? null : program.getProgramContext()
+				.getValue(dpp, load.getAddress(), false);
+			if (value == null) {
+				return null;
+			}
+			page = value.longValue() & 0x3ff;
+		}
+
+		try {
+			Address table = program.getAddressFactory().getDefaultAddressSpace().getAddress(
+				(page << 14) | (tableOffset & 0x3fff));
+			return validatedSwitchPattern(program, function, jump, table,
+				(int) maximum.getUnsignedValue() + 1);
+		}
+		catch (AddressOutOfBoundsException e) {
+			return null;
+		}
+	}
+
+	private SwitchPattern validatedSwitchPattern(Program program, Function function,
+			Instruction jump, Address table, int count) {
+		Memory memory = program.getMemory();
+		MemoryBlock tableBlock = memory.getBlock(table);
+		if (count < 2 || count > MAX_SWITCH_CASES || tableBlock == null ||
+			!tableBlock.isRead()) {
+			return null;
+		}
+		long codeSegment = jump.getAddress().getUnsignedOffset() & 0xff0000L;
+		ArrayList<Address> targets = new ArrayList<>(count);
+		PseudoDisassembler pseudo = new PseudoDisassembler(program);
+		for (int index = 0; index < count; index++) {
+			try {
+				Address entry = table.add(index * 2L);
+				int offset = memory.getShort(entry) & 0xffff;
+				Address target = jump.getAddress().getAddressSpace()
+					.getAddress(codeSegment | offset);
+				MemoryBlock targetBlock = memory.getBlock(target);
+				Function containing =
+					program.getFunctionManager().getFunctionContaining(target);
+				if (targetBlock == null || !targetBlock.isExecute() ||
+					(target.getUnsignedOffset() & 1) != 0 ||
+					containing != null && !containing.equals(function)) {
+					return null;
+				}
+				if (program.getListing().getInstructionAt(target) == null) {
+					pseudo.disassemble(target);
+				}
+				targets.add(target);
+			}
+			catch (Exception e) {
+				return null;
+			}
+		}
+		return new SwitchPattern(jump, table, targets);
+	}
+
+	private int applySwitchPattern(Program program, Function function,
+			SwitchPattern pattern, TaskMonitor monitor)
+			throws InvalidInputException, CancelledException {
+		Set<Address> uniqueTargets = new LinkedHashSet<>(pattern.targets());
+		for (Address target : uniqueTargets) {
+			if (program.getListing().getInstructionAt(target) == null) {
+				DisassembleCommand command = new DisassembleCommand(target,
+					program.getMemory().getExecuteSet(), true);
+				command.enableCodeAnalysis(false);
+				if (!command.applyTo(program, monitor) ||
+					program.getListing().getInstructionAt(target) == null) {
+					return 0;
+				}
+			}
+			if (!hasReference(program.getReferenceManager(), pattern.jump().getAddress(),
+				target, RefType.COMPUTED_JUMP)) {
+				program.getReferenceManager().addMemoryReference(
+					pattern.jump().getAddress(), target, RefType.COMPUTED_JUMP,
+					SourceType.ANALYSIS, Reference.MNEMONIC);
+			}
+		}
+		for (int index = 0; index < pattern.targets().size(); index++) {
+			Address entry = pattern.table().add(index * 2L);
+			if (program.getListing().getDefinedDataContaining(entry) == null) {
+				try {
+					DataUtilities.createData(program, entry,
+						new UnsignedShortDataType(program.getDataTypeManager()), 2,
+						false, ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+				}
+				catch (Exception e) {
+					// References and the override remain sufficient when an existing
+					// non-default data definition intentionally owns the table bytes.
+				}
+			}
+		}
+		CreateFunctionCmd.fixupFunctionBody(program, function, monitor);
+		new JumpTable(pattern.jump().getAddress(), pattern.targets(), true, 0)
+			.writeOverride(function);
+		return pattern.targets().size();
+	}
+
+	private boolean hasReference(ReferenceManager references, Address from,
+			Address to, RefType type) {
+		for (Reference reference : references.getReferencesFrom(from)) {
+			if (reference.getToAddress().equals(to) && reference.getReferenceType().equals(type)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean isUnconditional(Instruction instruction) {
+		if (!instruction.getFlowType().isJump() || instruction.getFlowType().isConditional()) {
+			return false;
+		}
+		for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
+			String representation = instruction.getDefaultOperandRepresentation(operand);
+			if (representation != null && representation.toLowerCase().contains("cc_uc")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean isUnsignedGreaterGuard(Instruction instruction) {
+		if (!instruction.getFlowType().isJump() || !instruction.getFlowType().isConditional()) {
+			return false;
+		}
+		for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
+			String representation = instruction.getDefaultOperandRepresentation(operand);
+			if (representation != null && representation.toLowerCase().contains("cc_ugt")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Register lastOperandRegister(Instruction instruction) {
+		for (int operand = instruction.getNumOperands() - 1; operand >= 0; operand--) {
+			Register register = operandRegister(instruction, operand);
+			if (register != null) {
+				return register;
+			}
+		}
+		return null;
+	}
+
+	private Register operandRegister(Instruction instruction, int operand) {
+		if (operand < 0 || operand >= instruction.getNumOperands()) {
+			return null;
+		}
+		for (Object object : instruction.getOpObjects(operand)) {
+			if (object instanceof Register register) {
+				return register;
+			}
+		}
+		return null;
+	}
+
+	private boolean isIndirectOperand(Instruction instruction, int operand) {
+		Register register = operandRegister(instruction, operand);
+		if (register == null) {
+			return false;
+		}
+		String rendered = instruction.toString().replace(" ", "").toLowerCase();
+		return rendered.contains("[" + register.getName().toLowerCase() + "]");
+	}
+
+	private boolean sameRegister(Register first, Register second) {
+		return first != null && second != null &&
+			first.getAddress().equals(second.getAddress()) &&
+			first.getMinimumByteSize() == second.getMinimumByteSize();
+	}
+
+	private Scalar firstScalar(Instruction instruction) {
+		for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
+			for (Object object : instruction.getOpObjects(operand)) {
+				if (object instanceof Scalar scalar) {
+					return scalar;
+				}
+			}
+		}
+		return null;
+	}
+
+	private Scalar lastScalar(Instruction instruction) {
+		for (int operand = instruction.getNumOperands() - 1; operand >= 0; operand--) {
+			Object[] objects = instruction.getOpObjects(operand);
+			for (int index = objects.length - 1; index >= 0; index--) {
+				if (objects[index] instanceof Scalar scalar) {
+					return scalar;
+				}
+			}
+		}
+		return null;
+	}
+
+	private long lastScalarValue(Instruction instruction) {
+		Scalar scalar = lastScalar(instruction);
+		return scalar == null ? -1 : scalar.getUnsignedValue();
+	}
+
+	private record SwitchPattern(Instruction jump, Address table,
+		ArrayList<Address> targets) {
+	}
+
+	private record SwitchRecoveryStats(int tables, int targets) {
 	}
 
 	@Override

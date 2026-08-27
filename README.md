@@ -15,6 +15,9 @@ Classic ABI**, with a focus on its **Large Memory Model**.
 
 - Incrementally extends the static call graph from new code, with a full-program One Shot, and safely creates missing call targets.
 - Resolves EXTP-backed switch tables without falling back to an incorrect DPP page.
+- Recovers bounded TASKING local jump tables from their guarded scaled-index
+  load sequence, preserving duplicate destinations so the decompiler emits
+  numeric case values instead of branch addresses.
 - Treats memory-mapped DPP0-DPP3 accesses as the architectural registers, so
   constant propagation no longer invents unrelated `Ram00fe00` globals.
 - Adds conservative TASKING function-start patterns for broader automatic code discovery.
@@ -239,8 +242,6 @@ argument count ambiguous are deliberately left unchanged.
 
 ## Known Limitations
 
-- Manually overridden switches show case labels as addresses (e.g., `case 0x12345:`) instead of indices
-- Nested switches may require manual script invocation for each `jmpi`
 - Generic TASKING Classic `PAGE:OFFSET` pointer arithmetic is not fully modeled
 - TASKING Classic huge-model `SEGMENT:OFFSET` pointers are not yet supported
 - Variadic calls with unused parameter registers remain ambiguous without additional type information

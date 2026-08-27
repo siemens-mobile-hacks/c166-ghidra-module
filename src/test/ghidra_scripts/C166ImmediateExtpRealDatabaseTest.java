@@ -1,4 +1,4 @@
-// Run headlessly against the saved M55 database that exposed physical EXTP pages
+// Run headlessly against the saved database that exposed physical EXTP pages
 // being reinterpreted as four-byte TASKING PAGE:OFFSET pointer encodings.
 import java.math.BigInteger;
 
@@ -20,7 +20,7 @@ public class C166ImmediateExtpRealDatabaseTest extends GhidraScript {
 			"real-program regression is not using TASKING Classic Large");
 
 		Function function = currentProgram.getFunctionManager().getFunctionAt(toAddr(TARGET));
-		check(function != null, "missing M55 function at " + toAddr(TARGET));
+		check(function != null, "missing saved-program function at " + toAddr(TARGET));
 		assertExtpFixture(0x2d3fc0L, 0x2d3fc4L, 0x00a);
 		assertExtpFixture(0x2d3fd2L, 0x2d3fd6L, 0x160);
 
@@ -46,7 +46,7 @@ public class C166ImmediateExtpRealDatabaseTest extends GhidraScript {
 			decompiler.dispose();
 		}
 
-		println("M55 physical EXTP regression passed for FUN_2d3f1c.");
+		println("Saved-program physical EXTP regression passed for FUN_2d3f1c.");
 	}
 
 	private void assertExtpFixture(long producerAddress, long loadAddress,
