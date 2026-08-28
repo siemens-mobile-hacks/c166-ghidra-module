@@ -13,11 +13,14 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.CategoryPath;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeConflictHandler;
 import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.ParameterDefinitionImpl;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.Structure;
+import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.TypedefDataType;
 import ghidra.program.model.data.Undefined;
@@ -648,6 +651,48 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 				0xf0, 0x48, 0xf0, 0x59),
 				calls(dispatcher), bytes(0xdb, 0x00)));
 
+		// FillOutStructureHelper can discover a strong descriptor after earlier
+		// consumers have supplied mutually incompatible primitive pointee types.
+		// The owned aggregate is stronger evidence and must clear that stale
+		// primitive-only conflict instead of leaving the generic void * return.
+		StructureDataType discoveredDescriptor = new StructureDataType(
+			new CategoryPath("/auto_structs"), "astruct_strong_return", 6,
+			currentProgram.getDataTypeManager());
+		discoveredDescriptor.replaceAtOffset(0,
+			new PointerDataType(new UnsignedShortDataType(
+				currentProgram.getDataTypeManager()), currentProgram.getDataTypeManager()),
+			4, "body", null);
+		discoveredDescriptor.replaceAtOffset(4,
+			new UnsignedShortDataType(currentProgram.getDataTypeManager()), 2,
+			"capacity", null);
+		Structure strongDescriptor = (Structure) currentProgram.getDataTypeManager()
+			.resolve(discoveredDescriptor, DataTypeConflictHandler.DEFAULT_HANDLER);
+		Function primitiveWordPointerConsumer = fixture(
+			"primitive_word_pointer_consumer", bytes(0xdb, 0x00));
+		setAnalysisTypedPointer(primitiveWordPointerConsumer, "value",
+			new UnsignedShortDataType(currentProgram.getDataTypeManager()));
+		Function primitiveLongPointerConsumer = fixture(
+			"primitive_long_pointer_consumer", bytes(0xdb, 0x00));
+		setAnalysisTypedPointer(primitiveLongPointerConsumer, "value",
+			new UnsignedLongDataType(currentProgram.getDataTypeManager()));
+		Function strongDescriptorConsumer = fixture(
+			"strong_descriptor_pointer_consumer", bytes(0xdb, 0x00));
+		setAnalysisTypedPointer(strongDescriptorConsumer, "descriptor", strongDescriptor);
+		Function strongDescriptorReturn = fixture(
+			"strong_descriptor_pointer_return", bytes(0xdb, 0x00));
+		setAnalysisDataPointerReturn(strongDescriptorReturn);
+		Function strongDescriptorReturnCaller = fixture(
+			"strong_descriptor_pointer_return_caller", concat(
+				calls(strongDescriptorReturn), bytes(
+					0xf0, 0x84, 0xf0, 0x95,
+					0xf0, 0xc8, 0xf0, 0xd9),
+				calls(primitiveWordPointerConsumer), bytes(
+					0xf0, 0xc8, 0xf0, 0xd9),
+				calls(primitiveLongPointerConsumer), bytes(
+					0x2d, 0x00,             // same-state branch before the strong use
+					0xf0, 0xc8, 0xf0, 0xd9),
+				calls(strongDescriptorConsumer), bytes(0xdb, 0x00)));
+
 		// Explicitly defining only R4 is negative producer evidence.  Even two
 		// typed four-byte consumers must not turn an unrelated caller extraout R5
 		// into a real long/far-pointer return.
@@ -886,11 +931,13 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			"two-word scalar return was inferred as a pointer");
 		check(Undefined.isUndefined(conflictingReturn.getReturnType()),
 			"conflicting data/code return was inferred as a data pointer");
+		checkPointerTarget(strongDescriptorReturn, strongDescriptor,
+			"strong aggregate did not supersede primitive return conflicts");
 		String returnSnapshot = snapshot(dataReturn, directPagedReturn,
 			explicitSingleUseDataReturn, explicitScalar32Return, runtimeScalarReturn,
 			explicitCodeReturn, forwardedDataReturn, mixedForwardedDataReturn,
 			partialScalarReturn, userDefinedReturn, importedReturn,
-			scalarReturn, conflictingReturn);
+			scalarReturn, conflictingReturn, strongDescriptorReturn);
 		MessageLog repeatedReturnLog = new MessageLog();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			repeatedReturnLog), "second far-pointer return inference failed");
@@ -901,7 +948,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			explicitSingleUseDataReturn, explicitScalar32Return, runtimeScalarReturn,
 			explicitCodeReturn, forwardedDataReturn, mixedForwardedDataReturn,
 			partialScalarReturn, userDefinedReturn, importedReturn,
-			scalarReturn, conflictingReturn)),
+				scalarReturn, conflictingReturn, strongDescriptorReturn)),
 			"R5:R4 return classification is not idempotent");
 
 		// Keep references live so fixture creation cannot be optimized away by a
@@ -926,7 +973,7 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 			explicitSingleUseDataReturnCaller != null &&
 			explicitCodeReturnCaller != null &&
 			partialScalarReturnCaller != null && userDefinedReturnCaller != null &&
-			importedReturnCaller != null &&
+			importedReturnCaller != null && strongDescriptorReturnCaller != null &&
 			rectangleCallers.size() == 4,
 			"missing caller fixture");
 		println("TASKING code-pointer inference matrix passed.");
@@ -1041,6 +1088,14 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 					currentProgram.getDataTypeManager()), currentProgram));
 		}
 		function.updateFunction("__tasking_c166_classic", null, pointers,
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
+	}
+
+	private void setAnalysisTypedPointer(Function function, String name, DataType target)
+			throws Exception {
+		Variable pointer = new ParameterImpl(name,
+			new PointerDataType(target, currentProgram.getDataTypeManager()), currentProgram);
+		function.updateFunction("__tasking_c166_classic", null, List.of(pointer),
 			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.ANALYSIS);
 	}
 
@@ -1263,6 +1318,13 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		check("r5+r4".equals(describe(function.getReturn().getVariableStorage())),
 			function.getName() + ": return storage is not R5:R4: " +
 				describe(function.getReturn().getVariableStorage()));
+	}
+
+	private void checkPointerTarget(Function function, DataType expected, String message) {
+		Pointer pointer = function.getReturnType() instanceof Pointer result ? result : null;
+		check(pointer != null && pointer.getDataType() != null &&
+			pointer.getDataType().isEquivalent(expected), message + ": " +
+			function.getReturnType().getDisplayName());
 	}
 
 	private void checkScalarReturn(Function function) {

@@ -39,6 +39,12 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   DPP0/EXTP page-and-offset data flow, including four-byte pointer values already
   rejoined by the patched decompiler, repeated typed call sites, and adjacent
   object-field stores whose typed consumer later dereferences the stored pair.
+- Recovers compact aggregate layouts behind analyzer-owned far-data pointers,
+  preserves concrete pointer fields, and propagates the layout through exact
+  parameter and returned-value aliases.
+- Retypes exact-size analyzer-owned user-stack objects from concrete direct-call
+  pointer parameters, including arrays and stable word-sized scalar outputs,
+  while preserving user-defined or conflicting local types.
 - Joins constant far code-pointer arguments as four-byte function pointers
   when their `SEGMENT:OFFSET` encoding names an executable function entry,
   while requiring repeated or semantic evidence before propagating that type

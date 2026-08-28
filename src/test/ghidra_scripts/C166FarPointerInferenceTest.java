@@ -21,6 +21,7 @@ import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.StructureDataType;
 import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.data.Undefined2DataType;
 import ghidra.program.model.data.UnsignedLongDataType;
 import ghidra.program.model.data.UnsignedShortDataType;
 import ghidra.program.model.data.VoidDataType;
@@ -537,6 +538,9 @@ public class C166FarPointerInferenceTest extends GhidraScript {
 		checkSignature(extprPair, Set.of(0), "r13+r12");
 		checkSignature(postIncrement, Set.of(0), "r13+r12");
 		checkSignature(storePair, Set.of(0), "r13+r12");
+		checkPointerTargetType(storePair, 0,
+			new Undefined2DataType(currentProgram.getDataTypeManager()),
+			"direct word store did not refine generic void pointer");
 		checkNoParameters(globalPair);
 		Data globalPointer = currentProgram.getListing().getDefinedDataAt(toAddr(0x1000));
 		check(globalPointer != null && globalPointer.getDataType() instanceof Pointer &&

@@ -1,5 +1,6 @@
 package ghidrainfineon;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -23,6 +24,7 @@ import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.FunctionDefinitionDataType;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.TypedefDataType;
 import ghidra.program.model.data.Undefined;
@@ -124,7 +126,9 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 				}
 				boolean explicitPair = pairState == PairReturnState.EXPLICIT;
 				boolean enoughData = item.directPagedUse() || item.dataUses().size() >= 2 ||
-					explicitPair && !item.dataUses().isEmpty();
+					explicitPair && !item.dataUses().isEmpty() ||
+					item.hasStrongConcreteDataType() &&
+						isGenericDataPointer(function.getReturnType());
 				boolean enoughCode = item.codeUses().size() >= 2 ||
 					explicitPair && !item.codeUses().isEmpty();
 				boolean enoughScalar = item.scalarUses().size() >= 2 ||
@@ -135,7 +139,7 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 				}
 				try {
 					DataType inferredType = enoughCode ? codePointer :
-						enoughData ? dataPointer : item.hasUnsignedLongUse()
+						enoughData ? item.concreteDataType(dataPointer) : item.hasUnsignedLongUse()
 							? new UnsignedLongDataType(program.getDataTypeManager())
 							: Undefined.getUndefinedDataType(4);
 					if (sameReturnCategory(function.getReturnType(), inferredType)) {
@@ -166,9 +170,12 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 	private boolean sameReturnCategory(DataType current, DataType inferred) {
 		ReturnCategory currentCategory = returnCategory(current);
-		if (currentCategory == ReturnCategory.UNKNOWN ||
-			currentCategory != returnCategory(inferred)) {
+		ReturnCategory inferredCategory = returnCategory(inferred);
+		if (currentCategory == ReturnCategory.UNKNOWN || currentCategory != inferredCategory) {
 			return false;
+		}
+		if (currentCategory == ReturnCategory.DATA && !isGenericDataPointer(inferred)) {
+			return current.isEquivalent(inferred);
 		}
 		// A proven unsigned-long consumer refines an analyzer-owned undefined4.
 		return currentCategory != ReturnCategory.SCALAR ||
@@ -187,53 +194,102 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 	private void traceCaller(Program program, Function caller,
 			Map<Function, ReturnEvidence> evidence, TaskMonitor monitor)
 			throws CancelledException {
-		Map<Integer, OriginWord> registers = new HashMap<>();
-		OriginWord activePage = null;
+		Map<Address, TraceState> entryStates = new HashMap<>();
+		ArrayDeque<Address> work = new ArrayDeque<>();
+		entryStates.put(caller.getEntryPoint(), new TraceState());
+		work.add(caller.getEntryPoint());
+		while (!work.isEmpty()) {
+			monitor.checkCancelled();
+			Address address = work.removeFirst();
+			Instruction instruction = program.getListing().getInstructionAt(address);
+			if (instruction == null || !caller.getBody().contains(address)) {
+				continue;
+			}
+			TraceState output = transferCallerInstruction(program, instruction,
+				entryStates.get(address), null);
+			for (Address successor : callerSuccessors(caller, instruction)) {
+				TraceState previous = entryStates.get(successor);
+				TraceState merged = previous == null ? output.copy() :
+					previous.intersection(output);
+				if (previous == null || !previous.equals(merged)) {
+					entryStates.put(successor, merged);
+					work.addLast(successor);
+				}
+			}
+		}
+
 		InstructionIterator instructions =
 			program.getListing().getInstructions(caller.getBody(), true);
 		while (instructions.hasNext()) {
 			monitor.checkCancelled();
 			Instruction instruction = instructions.next();
-			if (instruction.getFlowType().isCall()) {
-				Function target = directTarget(program, instruction);
-				if (target != null) {
-					recordCallUses(program, target, instruction, registers, evidence);
-				}
-				killCallClobbers(registers);
-				activePage = null;
-				if (target != null && mayTrackReturn(target)) {
-					registers.put(4, new OriginWord(target, 0));
-					registers.put(5, new OriginWord(target, 1));
-				}
-				continue;
-			}
-
-			Register pageRegister = dynamicPageSource(instruction);
-			if (pageRegister != null) {
-				Integer pageNumber = generalRegisterNumber(program, pageRegister);
-				activePage = pageNumber == null ? null : registers.get(pageNumber);
-			}
-			if (activePage != null && activePage.word() == 1) {
-				for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
-					if (!isMemoryOperand(instruction, operand)) {
-						continue;
-					}
-					Integer base = generalRegisterNumber(program,
-						operandRegister(instruction, operand));
-					OriginWord low = base == null ? null : registers.get(base);
-					if (samePair(low, activePage)) {
-						evidence.computeIfAbsent(low.function(), ignored -> new ReturnEvidence())
-							.markDirectPagedUse();
-					}
-				}
-			}
-
-			applyRegisterWrites(program, instruction, registers);
-			if (instruction.getFlowType().isJump() || instruction.getFlowType().isTerminal()) {
-				registers.clear();
-				activePage = null;
+			TraceState state = entryStates.get(instruction.getAddress());
+			if (state != null) {
+				transferCallerInstruction(program, instruction, state, evidence);
 			}
 		}
+	}
+
+	private TraceState transferCallerInstruction(Program program, Instruction instruction,
+			TraceState input, Map<Function, ReturnEvidence> evidence) {
+		TraceState output = input.copy();
+		if (instruction.getFlowType().isCall()) {
+			Function target = directTarget(program, instruction);
+			if (evidence != null && target != null) {
+				recordCallUses(program, target, instruction, output.registers(), evidence);
+			}
+			killCallClobbers(output.registers());
+			output.setActivePage(null);
+			if (target != null && mayTrackReturn(target)) {
+				output.registers().put(4, new OriginWord(target, 0));
+				output.registers().put(5, new OriginWord(target, 1));
+			}
+			return output;
+		}
+
+		Register pageRegister = dynamicPageSource(instruction);
+		if (pageRegister != null) {
+			Integer pageNumber = generalRegisterNumber(program, pageRegister);
+			output.setActivePage(pageNumber == null ? null :
+				output.registers().get(pageNumber));
+		}
+		OriginWord activePage = output.activePage();
+		if (evidence != null && activePage != null && activePage.word() == 1) {
+			for (int operand = 0; operand < instruction.getNumOperands(); operand++) {
+				if (!isMemoryOperand(instruction, operand)) {
+					continue;
+				}
+				Integer base = generalRegisterNumber(program,
+					operandRegister(instruction, operand));
+				OriginWord low = base == null ? null : output.registers().get(base);
+				if (samePair(low, activePage)) {
+					evidence.computeIfAbsent(low.function(), ignored -> new ReturnEvidence())
+						.markDirectPagedUse();
+				}
+			}
+		}
+
+		applyRegisterWrites(program, instruction, output.registers());
+		if (instruction.getFlowType().isJump() || instruction.getFlowType().isTerminal()) {
+			output.setActivePage(null);
+		}
+		return output;
+	}
+
+	private Set<Address> callerSuccessors(Function caller, Instruction instruction) {
+		Set<Address> successors = new HashSet<>();
+		Address fallThrough = instruction.getFallThrough();
+		if (fallThrough != null && caller.getBody().contains(fallThrough)) {
+			successors.add(fallThrough);
+		}
+		if (!instruction.getFlowType().isCall()) {
+			for (Address flow : instruction.getFlows()) {
+				if (caller.getBody().contains(flow)) {
+					successors.add(flow);
+				}
+			}
+		}
+		return successors;
 	}
 
 	private void recordCallUses(Program program, Function target, Instruction instruction,
@@ -289,7 +345,7 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 				// user/imported declarations remain authoritative.
 				if (target.getSignatureSource() != SourceType.ANALYSIS ||
 					!isGenericDataPointer(type)) {
-					item.markDataUse(instruction.getAddress());
+					item.markDataUse(instruction.getAddress(), type);
 				}
 			}
 		}
@@ -709,7 +765,7 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		return target instanceof VoidDataType || Undefined.isUndefined(target);
 	}
 
-	private Pointer pointerDataType(DataType type) {
+	private static Pointer pointerDataType(DataType type) {
 		DataType current = type;
 		while (current instanceof TypeDef typeDef) {
 			current = typeDef.getBaseDataType();
@@ -753,6 +809,60 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 	private record OriginWord(Function function, int word) {
 	}
 
+	private static final class TraceState {
+		private final Map<Integer, OriginWord> registers;
+		private OriginWord activePage;
+
+		private TraceState() {
+			this(new HashMap<>(), null);
+		}
+
+		private TraceState(Map<Integer, OriginWord> registers, OriginWord activePage) {
+			this.registers = registers;
+			this.activePage = activePage;
+		}
+
+		private TraceState copy() {
+			return new TraceState(new HashMap<>(registers), activePage);
+		}
+
+		private TraceState intersection(TraceState other) {
+			Map<Integer, OriginWord> common = new HashMap<>();
+			for (Map.Entry<Integer, OriginWord> entry : registers.entrySet()) {
+				if (entry.getValue().equals(other.registers.get(entry.getKey()))) {
+					common.put(entry.getKey(), entry.getValue());
+				}
+			}
+			OriginWord commonPage = activePage != null && activePage.equals(other.activePage) ?
+				activePage : null;
+			return new TraceState(common, commonPage);
+		}
+
+		private Map<Integer, OriginWord> registers() {
+			return registers;
+		}
+
+		private OriginWord activePage() {
+			return activePage;
+		}
+
+		private void setActivePage(OriginWord activePage) {
+			this.activePage = activePage;
+		}
+
+		@Override
+		public boolean equals(Object object) {
+			return object instanceof TraceState other &&
+				registers.equals(other.registers) &&
+				java.util.Objects.equals(activePage, other.activePage);
+		}
+
+		@Override
+		public int hashCode() {
+			return 31 * registers.hashCode() + java.util.Objects.hashCode(activePage);
+		}
+	}
+
 	private record ForwardedWordOrigin(Address call, Function function, int word,
 			ReturnCategory category) {
 	}
@@ -776,9 +886,51 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		private final Set<Address> scalarUses = new HashSet<>();
 		private final Set<Address> unsignedLongUses = new HashSet<>();
 		private boolean directPagedUse;
+		private DataType concreteDataType;
+		private boolean concreteDataTypeConflict;
 
 		private void markDataUse(Address address) {
 			dataUses.add(address);
+		}
+
+		private void markDataUse(Address address, DataType type) {
+			markDataUse(address);
+			Pointer pointer = pointerDataType(type);
+			if (pointer == null || pointer.getDataType() == null ||
+				pointer.getDataType() instanceof VoidDataType) {
+				return;
+			}
+			if (concreteDataType == null) {
+				concreteDataType = type;
+			}
+			else if (!concreteDataType.isEquivalent(type)) {
+				boolean existingLayout = isOwnedAutoStructurePointer(concreteDataType);
+				boolean candidateLayout = isOwnedAutoStructurePointer(type);
+				if (candidateLayout && !existingLayout) {
+					concreteDataType = type;
+					concreteDataTypeConflict = false;
+				}
+				else if (!existingLayout || candidateLayout) {
+					concreteDataTypeConflict = true;
+				}
+			}
+		}
+
+		private DataType concreteDataType(DataType fallback) {
+			return concreteDataTypeConflict || concreteDataType == null ? fallback :
+				concreteDataType;
+		}
+
+		private boolean hasStrongConcreteDataType() {
+			return !concreteDataTypeConflict &&
+				isOwnedAutoStructurePointer(concreteDataType);
+		}
+
+		private static boolean isOwnedAutoStructurePointer(DataType type) {
+			Pointer pointer = pointerDataType(type);
+			return pointer != null && pointer.getDataType() instanceof Structure structure &&
+				"/auto_structs".equals(structure.getCategoryPath().getPath()) &&
+				structure.getName().startsWith("astruct");
 		}
 
 		private void markCodeUse(Address address) {

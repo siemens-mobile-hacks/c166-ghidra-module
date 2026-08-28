@@ -2,11 +2,12 @@
 
 ## Status
 
-Planned. Switch recovery in `FUN_2e6276` is fixed and verified, but its local
-data-pointer presentation and inferred object types still need systematic
-work.
+Implemented and verified. The switch recovery, local far-pointer rendering,
+aggregate layout propagation, stack-local typing, and split far-pointer return
+handling are covered by focused synthetic tests and a read-only copy of the
+real project.
 
-## Observed behavior
+## Original behavior
 
 The function constructs a local wide string and later passes it through several
 typed consumers. The register-level pointer classification is correct:
@@ -17,7 +18,7 @@ typed consumers. The register-level pointer classification is correct:
 - `0xe413`, `0x2f6`, `0x5ab`, and `9` remain scalars.
 - The bounded `JMPI` table is control flow, not a function pointer.
 
-The remaining decompiler output is nevertheless misleading:
+The remaining decompiler output was nevertheless misleading:
 
 ```c
 int *descriptor;
@@ -64,28 +65,56 @@ FUN_224108(&selector, &auxiliary);
 No representation-only `& 0x3fff` expression should remain around a proven
 R0-relative stack address after its `DPP2:OFFSET` pair has been reconstructed.
 
-## Implementation plan
+## Implemented solution
 
-1. Add focused headless fixtures for two R0-relative locals passed as complete
-   `DPP2:OFFSET` pairs. Assert that the decompiler retains the local-address
-   identity and suppresses the representation-only offset mask.
-2. Trace the pointer join from the TASKING stack-address p-code through input
-   type propagation. Determine whether the mask survives in the module's p-code
-   emitter or in shared decompiler cast/mask simplification.
-3. Fix the narrowest responsible layer. Any shared Ghidra change must be gated
-   by the exact `c166.abi=tasking-classic-large` processor property and include
-   x86 and ARM controls.
-4. Add descriptor-layout evidence based on the stores at offsets zero, two, and
-   four and the repeated typed consumers. Do not infer a named structure from a
-   function name or firmware address.
-5. Retype the six-byte header and 76-byte body only when their sizes, stores,
-   returned alias, and downstream uses agree. Preserve user-defined types.
-6. Add a split-return fixture matching `FUN_2e8484` and remove the redundant
-   high-word temporary without changing the `R5:R4` far-pointer result.
-7. Re-run the focused synthetic tests, the full TASKING ABI suite, and a
-   read-only independent copy of the real project containing `FUN_2e6276`.
-   Verify that the original project hashes remain unchanged and inspect the
-   installed result through live Ghidra MCP.
+1. `C166AggregateLayoutPhase` propagates a concrete automatically recovered
+   structure through exact parameter aliases and direct return aliases. It
+   requires all return paths to agree and preserves concrete four-byte pointer
+   fields while refining the aggregate.
+2. `C166LocalObjectTypePhase` retypes an exact stack object only when a direct
+   call passes its complete address to a concrete, four-byte, non-function
+   pointer parameter. It preserves locked, user-defined, and non-weak types.
+   Width-specific undefined pointees are represented with a stable unsigned
+   integer of the same width.
+3. The far-pointer phase shares aggregate-pointer evidence with scalar-pair
+   classification. Stored aggregate pointers and semantically proven function
+   pointers can no longer be split back into unrelated scalar words.
+4. Signature convergence now accepts preserved multiword parameters outside
+   newly inferred pairs, eliminating no-op rewrite loops.
+5. The patched decompiler suppresses the representation-only `& 0x3fff` only
+   for proven stack `PTRSUB` values inside a C166 `SEGMENTOP`. Split return
+   PAGE/OFFSET phi nodes are rejoined only when every leaf is either a zero
+   pointer or an adjacent word-load pair.
+6. Both shared-core changes are gated by the exact processor property
+   `c166.abi=tasking-classic-large`.
+
+## Verification
+
+- The focused returned-layout/alias fixture covers recursive wrapper aliases,
+  aggregate pointer-field initialization, concrete pointer-field preservation,
+  exact stack objects, arrays, and width-specific undefined pointees.
+- The complete TASKING ABI suite passes for C166 LE and C167CS.
+- Patched-decompiler tests pass for C166, including the split-return fixture.
+- Shared-core controls pass unchanged for x86-64 and ARMv8.
+- A full, independent copy of the real project was analyzed read-only. The
+  second inference pass made no signature or local-type changes and every
+  far-pointer call-graph component converged.
+- Live Ghidra MCP with the installed core reconstructs the bounded nested
+  switch in `FUN_2e6276` as cases 0 through 4. The active project was not
+  reanalyzed or modified merely for verification.
+
+The verified real-project result is equivalent to:
+
+```c
+astruct_4 *descriptor;
+uint selector;
+uint auxiliary;
+astruct_4 local_string;
+uint local_body[38];
+
+descriptor = FUN_9056d8(&local_string, local_body, 0x26);
+FUN_224108(&selector, &auxiliary);
+```
 
 ## Acceptance criteria
 

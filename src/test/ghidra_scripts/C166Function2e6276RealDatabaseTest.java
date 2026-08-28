@@ -1,12 +1,16 @@
 // Focused saved-program regression for the nested TASKING jump table and the
 // pointer/scalar return values that meet in FUN_2e6276.
+import java.lang.reflect.Field;
+
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileProcessFactory;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.script.GhidraScript;
 import ghidra.app.util.importer.MessageLog;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.UnsignedShortDataType;
 import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.listing.Function;
@@ -39,6 +43,7 @@ public class C166Function2e6276RealDatabaseTest extends GhidraScript {
 
 	@Override
 	protected void run() throws Exception {
+		useDevelopmentDecompilerIfRequested();
 		check("tasking-classic-large".equals(
 			currentProgram.getLanguage().getProperty("c166.abi")),
 			"real-program regression is not using TASKING Classic Large");
@@ -105,16 +110,36 @@ public class C166Function2e6276RealDatabaseTest extends GhidraScript {
 			"FUN_2e6434 split its single far-data pointer into scalar words");
 		check(requiredFunction(SUBJECT).getParameter(0).getFormalDataType() instanceof Pointer,
 			"FUN_2e6276 param_1 is not a far-data pointer");
-		check(requiredFunction(0x9056d8L).getReturnType() instanceof Pointer,
+		Function descriptorFactory = requiredFunction(0x9056d8L);
+		check(descriptorFactory.getReturnType() instanceof Pointer,
 			"FUN_9056d8 no longer returns the local descriptor pointer");
+		checkPointerParameter(0x9056d8L, 0, 6);
+		println("Descriptor factory: " + descriptorFactory.getPrototypeString(true, true));
+		println("Descriptor forwarder: " +
+			requiredFunction(0x905708L).getPrototypeString(true, true));
+		println("Descriptor word-store helper: " +
+			requiredFunction(0x903c64L).getPrototypeString(true, true));
+		Pointer diagnosedReturn = (Pointer) descriptorFactory.getReturnType();
+		if (diagnosedReturn.getDataType() instanceof Structure diagnosedStructure) {
+			for (var component : diagnosedStructure.getDefinedComponents()) {
+				println("Descriptor field " + component.getOffset() + ":" +
+					component.getLength() + " " +
+					component.getDataType().getDisplayName());
+			}
+		}
+		checkPointerParameter(0x9056d8L, 1, 2);
+		Pointer descriptorReturn = (Pointer) descriptorFactory.getReturnType();
+		check(descriptorReturn.getDataType() instanceof Structure &&
+			descriptorReturn.getDataType().getLength() == 6,
+			"FUN_9056d8 return does not retain the six-byte descriptor layout");
 		checkPointerParameter(0x2e871eL, 0);
 		checkPointerParameter(0x2e8564L, 0);
 		checkPointerParameter(0x2e85e6L, 0);
 		checkPointerParameter(0x2e85e6L, 1);
 		checkPointerParameter(0x2cc274L, 1);
 		checkPointerParameter(0x905a92L, 0);
-		checkPointerParameter(0x224108L, 0);
-		checkPointerParameter(0x224108L, 1);
+		checkPointerParameter(0x224108L, 0, 2);
+		checkPointerParameter(0x224108L, 1, 2);
 
 		String firstSignatures = signatureSnapshot();
 		MessageLog repeatedTypeLog = new MessageLog();
@@ -159,14 +184,46 @@ public class C166Function2e6276RealDatabaseTest extends GhidraScript {
 				!compact.contains("(int*)FUN_") &&
 				!compact.contains("(int*)thunk_FUN_") &&
 				compact.contains("FUN_2e6434(param_1)") &&
-				compact.matches("(?s).*int\\*piVar\\d+;.*piVar\\d+=FUN_9056d8.*"),
+				compact.matches(
+					"(?s).*astruct_[A-Za-z0-9_]+\\*[A-Za-z_]\\w*;.*" +
+						"[A-Za-z_]\\w*=FUN_9056d8.*"),
 				"pointer/scalar return merge is still contaminated:\n" + code);
+			check(!code.contains("0x3fff") && !code.contains("0xffff3fff") &&
+				!code.contains("segment(") && !code.contains("CONCAT"),
+				"R0-relative local far pointers retained representation arithmetic:\n" +
+					code);
+			check(!code.matches("(?s).*undefined1\\s+auStack_[0-9a-f]+\\s*\\[6\\].*") &&
+				!code.matches("(?s).*undefined1\\s+auStack_[0-9a-f]+\\s*\\[76\\].*") &&
+				!code.matches("(?s).*undefined1\\s+auStack_[0-9a-f]+\\s*\\[2\\].*"),
+				"descriptor, body, or word output remained an untyped byte array:\n" + code);
+
+			Function splitReturn = requiredFunction(0x2e8484L);
+			DecompileResults splitResults =
+				decompiler.decompileFunction(splitReturn, 60, monitor);
+			check(splitResults.decompileCompleted(), splitResults.getErrorMessage());
+			String splitCode = splitResults.getDecompiledFunction().getC();
+			println(splitCode);
+			check(!splitCode.contains("undefined2 uVar") &&
+				!splitCode.contains("+ 0x5a") && !splitCode.contains("+ 0x6a") &&
+				!splitCode.contains("+ 0x6e") && !splitCode.contains("+ 0x72"),
+				"FUN_2e8484 retained redundant split high-word loads:\n" + splitCode);
 		}
 		finally {
 			decompiler.dispose();
 		}
 
 		println("Saved-program FUN_2e6276 pointer and switch regression passed.");
+	}
+
+	private void useDevelopmentDecompilerIfRequested() throws Exception {
+		String path = System.getenv("C166_TEST_DECOMPILER");
+		if (path == null || path.isBlank()) {
+			return;
+		}
+		Field executablePath = DecompileProcessFactory.class.getDeclaredField("exepath");
+		executablePath.setAccessible(true);
+		executablePath.set(null, path);
+		println("Using development decompiler: " + executablePath.get(null));
 	}
 
 	private Function requiredFunction(long address) {
@@ -183,10 +240,23 @@ public class C166Function2e6276RealDatabaseTest extends GhidraScript {
 	}
 
 	private void checkPointerParameter(long address, int ordinal) {
+		checkPointerParameter(address, ordinal, -1);
+	}
+
+	private void checkPointerParameter(long address, int ordinal, int targetLength) {
 		Function function = requiredFunction(address);
 		check(function.getParameterCount() > ordinal &&
 			function.getParameter(ordinal).getFormalDataType() instanceof Pointer,
 			function.getName() + " parameter " + ordinal + " is not a far-data pointer");
+		if (targetLength > 0) {
+			Pointer pointer =
+				(Pointer) function.getParameter(ordinal).getFormalDataType();
+			check(pointer.getDataType() != null &&
+				pointer.getDataType().getLength() == targetLength,
+				function.getName() + " parameter " + ordinal +
+					" does not point to a " + targetLength + "-byte object: " +
+					pointer.getDisplayName());
+		}
 	}
 
 	private String signatureSnapshot() {

@@ -8,6 +8,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,11 +29,13 @@ import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.data.AbstractIntegerDataType;
 import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeComponent;
 import ghidra.program.model.data.DataUtilities;
 import ghidra.program.model.data.DataUtilities.ClearDataMode;
 import ghidra.program.model.data.FunctionDefinition;
 import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.Structure;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.VoidDataType;
@@ -145,7 +148,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				boolean layerChanged = false;
 				for (int componentIndex : schedule.layers().get(layerIndex)) {
 					layerChanged |= analyzeComponent(program, decompiler,
-						schedule.components().get(componentIndex), graph.callees(), stats,
+						schedule.components().get(componentIndex), stats,
 						seedStats.scalarPairs(), seedStats.strictScalarPairs(), monitor, log);
 				}
 				if (layerChanged && layerIndex + 1 < schedule.layers().size()) {
@@ -183,21 +186,23 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			" stale analysis pointer(s), " +
 			"removed " + legacyReferencesRemoved + " legacy call-site reference(s), " +
 			stats.ambiguousFunctions.size() + " ambiguous, " + stats.failedFunctions.size() +
-			" decompilation failure(s), " + stats.recursivePasses +
-			" recursive fixed-point pass(es), " + stats.nonConvergentComponents +
+			" decompilation failure(s), " + stats.fixedPointPasses +
+			" signature fixed-point pass(es), " + stats.nonConvergentComponents +
 			" non-convergent component(s).");
+		if (!stats.nonConvergentDetails.isEmpty()) {
+			report(program, "Non-convergent component details: " +
+				String.join("; ", stats.nonConvergentDetails));
+		}
 		return true;
 	}
 
 	private boolean analyzeComponent(Program program, DecompInterface decompiler,
-			List<Function> component, Map<Function, Set<Function>> callees,
-			AnalysisStats stats, Map<Function, Set<Integer>> scalarPairs,
+			List<Function> component, AnalysisStats stats,
+			Map<Function, Set<Integer>> scalarPairs,
 			Map<Function, Set<Integer>> strictScalarPairs,
 			TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
-		boolean recursive = component.size() > 1 ||
-			callees.getOrDefault(component.get(0), Set.of()).contains(component.get(0));
-		Set<String> seenSignatures = new HashSet<>();
+		Set<String> seenSignatures = new LinkedHashSet<>();
 		boolean anyChange = false;
 		boolean firstPass = true;
 		while (true) {
@@ -205,6 +210,11 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			String signatureState = componentSignatureState(component);
 			if (!seenSignatures.add(signatureState)) {
 				stats.nonConvergentComponents++;
+				stats.nonConvergentDetails.add(component.stream()
+					.map(function -> function.getEntryPoint() + " " +
+						function.getPrototypeString(true, true))
+					.collect(java.util.stream.Collectors.joining(", ")) +
+					" states=" + String.join(" -> ", seenSignatures));
 				break;
 			}
 
@@ -218,7 +228,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				break;
 			}
 			if (!firstPass) {
-				stats.recursivePasses++;
+				stats.fixedPointPasses++;
 				monitor.setMaximum(monitor.getMaximum() + passFunctions.size());
 				decompiler.flushCache();
 			}
@@ -229,7 +239,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 					scalarPairs, strictScalarPairs, monitor, log);
 			}
 			anyChange |= passChanged;
-			if (!recursive || !passChanged) {
+			if (!passChanged) {
 				break;
 			}
 			firstPass = false;
@@ -251,9 +261,16 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				findSeparatelyStoredScalarPairs(program, function);
 			Set<Integer> storedPointerPairs =
 				findIndirectlyConsumedStoredPointerPairs(program, function);
-			boolean repairedSeparatedScalars = !separatedScalarPairs.isEmpty() &&
+			Map<Integer, DataType> storedAggregatePointers =
+				forwardedAggregateFieldPointerTypes(program, function);
+			Set<Integer> scalarOnlySeparated = new HashSet<>(separatedScalarPairs);
+			// Exact adjacent stores into a concrete four-byte aggregate pointer field
+			// are stronger than the fact that its PAGE and OFFSET source words are
+			// stored separately. Splitting here and rejoining below would oscillate.
+			scalarOnlySeparated.removeAll(storedAggregatePointers.keySet());
+			boolean repairedSeparatedScalars = !scalarOnlySeparated.isEmpty() &&
 				splitContradictedAnalysisPointers(program, function,
-					separatedScalarPairs) != 0;
+					scalarOnlySeparated) != 0;
 			if (repairedSeparatedScalars) {
 				stats.repairedPointers++;
 				decompiler.flushCache();
@@ -275,9 +292,11 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				result.getHighFunction().getPcodeOps(), stats.referenceSources);
 			Set<Integer> forwardedScalarPairs =
 				findForwardedScalarPairs(program, function, result.getHighFunction());
-			boolean repairedForwardedScalars = !forwardedScalarPairs.isEmpty() &&
+			Set<Integer> scalarOnlyForwarding = new HashSet<>(forwardedScalarPairs);
+			scalarOnlyForwarding.removeAll(storedAggregatePointers.keySet());
+			boolean repairedForwardedScalars = !scalarOnlyForwarding.isEmpty() &&
 				splitContradictedAnalysisPointers(program, function,
-					forwardedScalarPairs) != 0;
+					scalarOnlyForwarding) != 0;
 			if (repairedForwardedScalars) {
 				stats.repairedPointers++;
 			}
@@ -320,6 +339,13 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			}
 			Map<Integer, DataType> pointerTypes = preferDirectPagedDataTypes(program,
 				function, inference.pointerTypes(), directPagedPairs);
+			for (Map.Entry<Integer, DataType> entry : storedAggregatePointers.entrySet()) {
+				int start = entry.getKey();
+				pairStarts.add(start);
+				liveSlots.add(start);
+				liveSlots.add(start + 1);
+				mergePointerType(program, pointerTypes, start, entry.getValue());
+			}
 			for (int start : storedPointerPairs) {
 				pointerTypes.putIfAbsent(start, new PointerDataType(VoidDataType.dataType,
 					program.getDataTypeManager()));
@@ -330,12 +356,12 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				directPagedPairs, scalarPairs, strictScalarPairs);
 			if (!forwardedScalarPairs.isEmpty()) {
 				Set<Integer> retained = new HashSet<>(pairStarts);
-				retained.removeAll(forwardedScalarPairs);
+				retained.removeAll(scalarOnlyForwarding);
 				pairStarts = Set.copyOf(retained);
 			}
-			if (!separatedScalarPairs.isEmpty()) {
+			if (!scalarOnlySeparated.isEmpty()) {
 				Set<Integer> retained = new HashSet<>(pairStarts);
-				retained.removeAll(separatedScalarPairs);
+				retained.removeAll(scalarOnlySeparated);
 				pairStarts = Set.copyOf(retained);
 			}
 			if (pairStarts.isEmpty() || signatureMatches(function, pairStarts,
@@ -413,8 +439,9 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		private int inferredPointers;
 		private int referenceCount;
 		private int globalPointersCreated;
-		private int recursivePasses;
+		private int fixedPointPasses;
 		private int nonConvergentComponents;
+		private final List<String> nonConvergentDetails = new ArrayList<>();
 		private int repairedPointers;
 	}
 
@@ -868,9 +895,13 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		int split = 0;
 		for (Parameter parameter : function.getParameters()) {
 			Integer start = parameterStart(parameter.getVariableStorage());
+			boolean genericFunctionPointer =
+				isGenericFunctionPointer(parameter.getFormalDataType());
 			if (start != null && contradicted.contains(start) &&
 				(isGenericVoidPointer(parameter.getFormalDataType()) ||
-					isGenericFunctionPointer(parameter.getFormalDataType())) &&
+					genericFunctionPointer &&
+						!C166CodePointerPhase.hasSemanticCodePointerEvidence(
+							program, function, start)) &&
 				parameter.getVariableStorage().size() == 4) {
 				parameters.add(new ParameterImpl(null, Undefined.getUndefinedDataType(2), program));
 				parameters.add(new ParameterImpl(null, Undefined.getUndefinedDataType(2), program));
@@ -2203,8 +2234,80 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			scores.merge(start, 1, Integer::sum);
 			liveSlots.add(start);
 			liveSlots.add(start + 1);
-			mergePointerType(program, pointerTypes, start, type);
+			DataType directMemoryType =
+				directMemoryPointerType(program, symbol.getHighVariable());
+			mergePointerType(program, pointerTypes, start,
+				directMemoryType == null ? type : directMemoryType);
 		}
+	}
+
+	/**
+	 * Recover a pointee type which the decompiler placed on a representation-only
+	 * cast of an otherwise generic far-pointer parameter.  Only an identity
+	 * CAST/COPY used directly as the address of a LOAD or STORE is accepted;
+	 * pointer arithmetic is intentionally not followed because that would turn a
+	 * structure field access into a pointer-to-field declaration.
+	 */
+	private DataType directMemoryPointerType(Program program, HighVariable variable) {
+		if (variable == null) {
+			return null;
+		}
+		DataType recoveredTarget = null;
+		for (Varnode instance : variable.getInstances()) {
+			Iterator<PcodeOp> uses = instance.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp use = uses.next();
+				DataType target = directMemoryTarget(use, instance);
+				if (target == null &&
+					(use.getOpcode() == PcodeOp.CAST || use.getOpcode() == PcodeOp.COPY) &&
+					use.getNumInputs() == 1 && use.getInput(0) == instance &&
+					use.getOutput() != null) {
+					Iterator<PcodeOp> convertedUses = use.getOutput().getDescendants();
+					while (convertedUses.hasNext()) {
+						DataType convertedTarget =
+							directMemoryTarget(convertedUses.next(), use.getOutput());
+						if (convertedTarget == null) {
+							continue;
+						}
+						if (target != null && !target.isEquivalent(convertedTarget)) {
+							return null;
+						}
+						target = convertedTarget;
+					}
+				}
+				if (target == null) {
+					continue;
+				}
+				if (recoveredTarget != null && !recoveredTarget.isEquivalent(target)) {
+					return null;
+				}
+				recoveredTarget = target;
+			}
+		}
+		return recoveredTarget == null ? null :
+			new PointerDataType(recoveredTarget, program.getDataTypeManager());
+	}
+
+	private DataType directMemoryTarget(PcodeOp use, Varnode address) {
+		if (use.getNumInputs() <= 1 || use.getInput(1) != address) {
+			return null;
+		}
+		Varnode value;
+		if (use.getOpcode() == PcodeOp.LOAD) {
+			value = use.getOutput();
+		}
+		else if (use.getOpcode() == PcodeOp.STORE && use.getNumInputs() > 2) {
+			value = use.getInput(2);
+		}
+		else {
+			return null;
+		}
+		if (value == null || value.getSize() <= 0) {
+			return null;
+		}
+		DataType target = value.getHigh() == null ? null : value.getHigh().getDataType();
+		return target != null && target.getLength() == value.getSize() ? target :
+			Undefined.getUndefinedDataType(value.getSize());
 	}
 
 	/**
@@ -2539,6 +2642,149 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		}
 		return instruction.getDefaultOperandRepresentation(operand).trim()
 			.startsWith("[");
+	}
+
+	/**
+	 * Recover a far-pointer value which a straight-line leaf helper stores into a
+	 * known four-byte pointer field.  TASKING may expose the stored OFFSET and
+	 * PAGE as two scalar helper parameters even though the caller supplied one
+	 * far-pointer parameter.  The known aggregate field type, two adjacent stores,
+	 * and exact caller/callee ABI-word traces jointly prove both the pointer pair
+	 * and its pointee type; a scalar-only callee signature cannot veto that proof.
+	 */
+	private Map<Integer, DataType> forwardedAggregateFieldPointerTypes(Program program,
+			Function function) {
+		if (function.getSignatureSource() != SourceType.ANALYSIS) {
+			return Map.of();
+		}
+		Map<Integer, DataType> inferred = new HashMap<>();
+		C166CodePointerPhase tracer = new C166CodePointerPhase();
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction call = instructions.next();
+			if (!call.getFlowType().isCall()) {
+				continue;
+			}
+			Function target = directTarget(program, call);
+			if (target == null || !usesTaskingConvention(target) ||
+				!isStraightLineLeaf(target, program)) {
+				continue;
+			}
+			Map<Integer, List<ScalarWordStore>> stores = inputWordStores(program, target);
+			for (int valueStart = 0; valueStart < 3; valueStart++) {
+				if (!isScalarWordParameter(target, valueStart) ||
+					!isScalarWordParameter(target, valueStart + 1)) {
+					continue;
+				}
+				for (ScalarWordStore low : stores.getOrDefault(valueStart, List.of())) {
+					for (ScalarWordStore high :
+							stores.getOrDefault(valueStart + 1, List.of())) {
+						if (low.page() == null || high.page() == null ||
+							high.offset() != low.offset() + 2 ||
+							!overlaps(low.base(), high.base()) ||
+							!overlaps(low.page(), high.page()) ||
+							!sameBaseValueBetween(program, target, low, high) ||
+							!sameRegisterValueBetween(program, target,
+								low.instruction(), high.instruction(), low.page())) {
+							continue;
+						}
+						Integer targetBase = tracer.traceScalarInputWord(program, target,
+							low.instruction(), low.base());
+						Integer targetPage = tracer.traceScalarInputWord(program, target,
+							low.instruction(), low.page());
+						if (targetBase == null || targetPage == null ||
+							targetPage != targetBase + 1 || !isLegalPairStart(targetBase)) {
+							continue;
+						}
+						Integer callerBase = traceOutgoingWord(program, function, call,
+							targetBase, tracer);
+						Integer callerPage = traceOutgoingWord(program, function, call,
+							targetBase + 1, tracer);
+						if (callerBase == null || callerPage == null ||
+							callerPage != callerBase + 1) {
+							continue;
+						}
+						DataType fieldType = aggregatePointerFieldType(function, callerBase,
+							low.offset());
+						if (fieldType == null) {
+							continue;
+						}
+						Integer callerLow = traceOutgoingWord(program, function, call,
+							valueStart, tracer);
+						Integer callerHigh = traceOutgoingWord(program, function, call,
+							valueStart + 1, tracer);
+						if (callerLow == null || callerHigh == null ||
+							callerHigh != callerLow + 1 || !isLegalPairStart(callerLow)) {
+							continue;
+						}
+						mergePointerType(program, inferred, callerLow, fieldType);
+					}
+				}
+			}
+		}
+		return Map.copyOf(inferred);
+	}
+
+	private Integer traceOutgoingWord(Program program, Function caller,
+			Instruction call, int targetSlot, C166CodePointerPhase tracer) {
+		if (targetSlot < 0 || targetSlot >= 4) {
+			return null;
+		}
+		return tracer.traceScalarInputWord(program, caller, call,
+			program.getRegister("r" + (FIRST_ARGUMENT_REGISTER + targetSlot)));
+	}
+
+	private boolean isScalarWordParameter(Function function, int slot) {
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			if (Integer.valueOf(slot).equals(start) &&
+				parameter.getVariableStorage().size() == 2 &&
+				!isPointerType(parameter.getFormalDataType())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private DataType aggregatePointerFieldType(Function function, int parameterSlot,
+			int fieldOffset) {
+		for (Parameter parameter : function.getParameters()) {
+			if (!Integer.valueOf(parameterSlot).equals(
+					parameterStart(parameter.getVariableStorage()))) {
+				continue;
+			}
+			Pointer pointer = pointerDataType(parameter.getFormalDataType());
+			if (pointer == null || pointer.getLength() != 4) {
+				return null;
+			}
+			DataType target = pointer.getDataType();
+			while (target instanceof TypeDef typeDef) {
+				target = typeDef.getBaseDataType();
+			}
+			if (!(target instanceof Structure structure) ||
+				!isOwnedAutoStructure(structure)) {
+				return null;
+			}
+			DataTypeComponent component = structure.getComponentAt(fieldOffset);
+			DataType fieldType = component == null ? null : component.getDataType();
+			return component != null && component.getOffset() == fieldOffset &&
+				component.getLength() == 4 && pointerDataType(fieldType) != null &&
+				!isFunctionPointer(fieldType) ? fieldType : null;
+		}
+		return null;
+	}
+
+	private boolean isStraightLineLeaf(Function function, Program program) {
+		InstructionIterator instructions =
+			program.getListing().getInstructions(function.getBody(), true);
+		while (instructions.hasNext()) {
+			Instruction instruction = instructions.next();
+			if (instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/**
@@ -3334,8 +3580,23 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			pointerTypes.put(start, candidate);
 			return;
 		}
+		boolean existingLayout = isOwnedAutoStructure(existingTarget);
+		boolean candidateLayout = isOwnedAutoStructure(candidateTarget);
+		if (candidateLayout && !existingLayout) {
+			pointerTypes.put(start, candidate);
+			return;
+		}
+		if (existingLayout && !candidateLayout) {
+			return;
+		}
 		pointerTypes.put(start, new PointerDataType(VoidDataType.dataType,
 			program.getDataTypeManager()));
+	}
+
+	private boolean isOwnedAutoStructure(DataType type) {
+		return type instanceof Structure structure &&
+			"/auto_structs".equals(structure.getCategoryPath().getPath()) &&
+			structure.getName().startsWith("astruct");
 	}
 
 	private boolean isVoidType(DataType type) {
@@ -3541,10 +3802,14 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				slot += 2;
 			}
 			else {
-				if (parameter == null || parameter.getVariableStorage().size() != 2) {
+				if (parameter == null) {
 					return false;
 				}
-				slot++;
+				int span = Math.max(1, parameter.getVariableStorage().size() / 2);
+				if (overlapsInferredPair(slot, span, pairStarts)) {
+					return false;
+				}
+				slot += span;
 			}
 			expectedCount++;
 		}

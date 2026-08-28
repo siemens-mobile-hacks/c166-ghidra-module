@@ -151,6 +151,41 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 			word, word, charPointer);
 		Function takesDword = callee(0x2130, "takes_dword", VoidDataType.dataType,
 			new UnsignedLongDataType(currentProgram.getDataTypeManager()));
+		Function takesLocalPointers = callee(0x3600, "takes_local_pointers",
+			VoidDataType.dataType,
+			new PointerDataType(VoidDataType.dataType,
+				currentProgram.getDataTypeManager()),
+			new PointerDataType(VoidDataType.dataType,
+				currentProgram.getDataTypeManager()), word);
+		Function localPointerCaller = caller(0x2dc0,
+			"call_two_local_far_pointers", bytes(
+				0x26, 0xf0, 0x50, 0x00,             // sub r0,#0x50
+				0xe6, 0xfc, 0x26, 0x00,             // mov r12,#0x26
+				0x88, 0xc0,                         // mov [-r0],r12
+				0xe0, 0x8c,                         // mov r12,#8
+				0x00, 0xc0,                         // add r12,r0
+				0x66, 0xfc, 0xff, 0x3f,             // and r12,#0x3fff
+				0xf2, 0xfd, 0x02, 0xfe,             // mov r13,DPP1
+				0xe0, 0xee,                         // mov r14,#0xe
+				0x00, 0xe0,                         // add r14,r0
+				0x66, 0xfe, 0xff, 0x3f,             // and r14,#0x3fff
+				0xf2, 0xff, 0x02, 0xfe,             // mov r15,DPP1
+				0xda, 0x00, 0x00, 0x36,             // calls takes_local_pointers
+				0x06, 0xf0, 0x52, 0x00,             // add r0,#0x52
+				0xdb, 0x00));
+		Function splitFarPointerReturn = functionWithCode(0x7a00,
+			"split_far_pointer_return", hexBytes(
+				"e00fe00146fe09002d1c46fe0b002d0746fe0c002d0a46fe0d002d0d0d17" +
+				"dc5dd4fc6800d41c6a000d11dc5dd4fc6c00d41c6e000d0bdc5dd4fc7000" +
+				"d41c72000d05dc5dd4fc5800d41c5a00f04ff051db00"));
+		splitFarPointerReturn.setReturnType(new PointerDataType(VoidDataType.dataType,
+			currentProgram.getDataTypeManager()), SourceType.USER_DEFINED);
+		splitFarPointerReturn.updateFunction("__tasking_c166_classic", null,
+			List.of(new ParameterImpl("context",
+				new PointerDataType(VoidDataType.dataType,
+					currentProgram.getDataTypeManager()), currentProgram),
+				new ParameterImpl("selector", word, currentProgram)),
+			FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED);
 		Function returnsString = callee(0x2140, "returns_string", charPointer);
 		setCode(returnsString, bytes(
 			0xe6, 0xf4, 0x00, 0x10, // R4 = offset
@@ -1058,6 +1093,24 @@ public class C166FarPointerDecompilerTest extends GhidraScript {
 					liveStrcmpCode);
 			check(!liveStrcmpCode.contains("0x15a178d"),
 				"firmware strcmp retained raw PAGE:OFFSET concatenation:\n" + liveStrcmpCode);
+
+			String localPointerCode = decompile(decompiler, localPointerCaller);
+			check(localPointerCode.contains("takes_local_pointers(") &&
+				!localPointerCode.contains("0x3fff") &&
+				!localPointerCode.contains("0xffff3fff") &&
+				!localPointerCode.contains("segment(") &&
+				!localPointerCode.contains("CONCAT"),
+				"local DPP1:OFFSET far pointers retained representation arithmetic:\n" +
+					localPointerCode);
+
+			String splitReturnCode = decompile(decompiler, splitFarPointerReturn);
+			check(!splitReturnCode.contains("undefined2 uVar") &&
+				!splitReturnCode.contains("+ 0x5a") &&
+				!splitReturnCode.contains("+ 0x6a") &&
+				!splitReturnCode.contains("+ 0x6e") &&
+				!splitReturnCode.contains("+ 0x72"),
+				"split far-pointer return retained redundant high-word loads:\n" +
+					splitReturnCode);
 
 			String strstrUndefinedCode = decompile(decompiler, strstrUndefinedTargetCaller);
 			check(strstrUndefinedCode.contains("(char *)0x5d4c04"),

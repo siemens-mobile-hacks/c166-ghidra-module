@@ -10,8 +10,8 @@ on:
 
 env:
   GHIDRA_VERSION: "12.1.3"
-  GHIDRA_PATCHED_ARCHIVE: "ghidra_12.1.3_DEV_20260827.zip"
-  GHIDRA_PATCHED_URL: "https://github.com/siemens-mobile-hacks/ghidra-patched/releases/download/12.1.3-3/ghidra_12.1.3_DEV_20260827.zip"
+  GHIDRA_PATCHED_ARCHIVE: "ghidra_12.1.3_DEV_20260828.zip"
+  GHIDRA_PATCHED_URL: "https://github.com/siemens-mobile-hacks/ghidra-patched/releases/download/12.1.3-5/ghidra_12.1.3_DEV_20260828.zip"
 
 jobs:
   build:

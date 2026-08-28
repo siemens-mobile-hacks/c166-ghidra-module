@@ -61,6 +61,7 @@ HOME="${test_home}" XDG_CONFIG_HOME="${config_dir}" "${headless}" \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
 	-postScript C166FarPointerDecompilerTest.java \
 	-postScript C166IndirectReturnDecompilerTest.java \
+	-postScript C166StoredPointerValueTest.java \
 	-deleteProject 2>&1 | tee "${headless_log}"
 headless_status=${PIPESTATUS[0]}
 set -e
@@ -81,6 +82,7 @@ HOME="${test_home}" XDG_CONFIG_HOME="${config_dir}" "${headless}" \
 	-noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
 	-postScript NonC166AutoStructureControlTest.java \
+	-postScript NonC166PointerValueControlTest.java \
 	-deleteProject 2>&1 | tee "${non_c166_log}"
 non_c166_status=${PIPESTATUS[0]}
 set -e
@@ -101,6 +103,7 @@ HOME="${test_home}" XDG_CONFIG_HOME="${config_dir}" "${headless}" \
 	-noanalysis \
 	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
 	-postScript NonC166AutoStructureControlTest.java \
+	-postScript NonC166PointerValueControlTest.java \
 	-deleteProject 2>&1 | tee "${arm_log}"
 arm_status=${PIPESTATUS[0]}
 set -e

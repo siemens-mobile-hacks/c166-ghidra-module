@@ -97,6 +97,7 @@ run_headless C166TaskingClassicAbiTest \
 	-postScript C166ScalarSignatureInferenceTest.java \
 	-postScript C166IncrementalAnalysisTest.java \
 	-postScript C166CodePointerInferenceTest.java \
+	-postScript C166ReturnedLayoutAliasTest.java \
 	-postScript C166FarPointerInferenceTest.java -deleteProject
 
 run_headless C166DppAddressingTest \
@@ -120,4 +121,5 @@ run_headless C167CsTaskingClassicAbiTest \
 	-postScript C166ScalarSignatureInferenceTest.java \
 	-postScript C166IncrementalAnalysisTest.java \
 	-postScript C166CodePointerInferenceTest.java \
+	-postScript C166ReturnedLayoutAliasTest.java \
 	-postScript C166FarPointerInferenceTest.java -deleteProject
