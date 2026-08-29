@@ -28,6 +28,9 @@ Classic ABI**, with a focus on its **Large Memory Model**.
   inference under one analyzer with a fixed evidence order; specialized phases
   are ordinary non-analyzer classes and cannot appear as independent Auto
   Analysis entries.
+- Uses one indexed evidence pass and exact dirty-function worklists across the
+  inference phases, so incremental disassembly stays local while a full-program
+  run avoids repeated whole-listing scans and redundant decompilation.
 - Recovers analyzer-owned scalar return widths from `RL4`/`R4` and incoming
   word parameters from live `R12`–`R15` reads while preserving user-defined,
   pointer, stack-based, and variadic signatures.

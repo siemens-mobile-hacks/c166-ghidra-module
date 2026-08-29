@@ -110,6 +110,15 @@ run_headless C166DppAddressingTest \
 	-postScript C166DppAddressingTest.java \
 	-postScript C166SwitchRecoveryHeadlessTest.java -deleteProject
 
+run_headless C166TypeInferencePerformanceTest \
+	'TASKING type-inference performance work counts passed' \
+	"${project_store}" C166TypeInferencePerformanceTest \
+	-import "${project_dir}/extension.properties" \
+	-processor C166:LE:16:tasking-classic-large \
+	-cspec tasking-classic-large -noanalysis \
+	-scriptPath "${project_dir}/src/test/ghidra_scripts" \
+	-postScript C166TypeInferencePerformanceTest.java -deleteProject
+
 run_headless C167CsTaskingClassicAbiTest \
 	'TASKING far-pointer inference matrix passed' \
 	"${project_store}" C167CsTaskingClassicAbiTest \

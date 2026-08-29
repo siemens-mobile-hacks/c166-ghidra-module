@@ -1,8 +1,10 @@
 package ghidrainfineon;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -19,7 +21,10 @@ import ghidra.program.model.data.Pointer;
 import ghidra.program.model.data.TypeDef;
 import ghidra.program.model.data.Undefined;
 import ghidra.program.model.data.VoidDataType;
+import ghidra.program.model.lang.OperandType;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Variable;
@@ -31,6 +36,7 @@ import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.PcodeOpAST;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.symbol.Reference;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
@@ -43,6 +49,9 @@ import ghidra.util.task.TaskMonitor;
 public class C166LocalObjectTypePhase extends C166TaskingTypeInferencePhase {
 
 	private static final int MAX_TRACE_DEPTH = 32;
+	private static final int DECOMPILE_TIMEOUT_SECONDS = 10;
+	private int lastDecompilations;
+	private RunStatistics lastRunStatistics = RunStatistics.empty();
 
 	public C166LocalObjectTypePhase() {
 		super("C166 TASKING Local Object Types");
@@ -51,7 +60,35 @@ public class C166LocalObjectTypePhase extends C166TaskingTypeInferencePhase {
 	@Override
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor,
 			MessageLog log) throws CancelledException {
+		lastDecompilations = 0;
 		if (!canAnalyze(program)) {
+			return true;
+		}
+		List<Function> candidateFunctions = new ArrayList<>();
+		int candidatesWithWeakDatabaseLocal = 0;
+		Iterator<Function> scoped = set == null || set.isEmpty() ?
+			program.getFunctionManager().getFunctions(true) :
+			program.getFunctionManager().getFunctionsOverlapping(set);
+		while (scoped.hasNext()) {
+			monitor.checkCancelled();
+			Function function = scoped.next();
+			if (!C166AnalysisFunctions.hasUsableBody(function) || function.isThunk() ||
+				!hasConcreteLocalPointerCall(program, function)) {
+				continue;
+			}
+			candidateFunctions.add(function);
+			if (hasWeakDatabaseLocal(function)) {
+				candidatesWithWeakDatabaseLocal++;
+			}
+		}
+		int candidates = candidateFunctions.size();
+		if (candidateFunctions.isEmpty()) {
+			lastRunStatistics = RunStatistics.empty();
+			report(program, "Inspected 0 exact local-pointer candidate function(s); " +
+				"retyped 0 exact-size local stack object(s), rejected 0 conflicting " +
+				"local type candidate(s), 0 decompilation failure(s); 0 candidate(s) " +
+				"had a weak persisted stack local and 0 retype(s) required a " +
+				"dynamic-only HighSymbol.");
 			return true;
 		}
 		DecompInterface decompiler = new DecompInterface();
@@ -62,18 +99,18 @@ public class C166LocalObjectTypePhase extends C166TaskingTypeInferencePhase {
 		}
 		int changed = 0;
 		int conflicts = 0;
+		int decompileFailures = 0;
+		int retypedWithoutWeakDatabaseLocal = 0;
 		try {
-			Iterator<Function> functions = set == null || set.isEmpty() ?
-				program.getFunctionManager().getFunctions(true) :
-				program.getFunctionManager().getFunctionsOverlapping(set);
-			while (functions.hasNext()) {
+			for (Function function : candidateFunctions) {
 				monitor.checkCancelled();
-				Function function = functions.next();
-				if (function.isExternal() || function.isThunk()) {
-					continue;
-				}
-				DecompileResults results = decompiler.decompileFunction(function, 60, monitor);
+				boolean weakDatabaseLocal = hasWeakDatabaseLocal(function);
+				int changedBeforeFunction = changed;
+				lastDecompilations++;
+				DecompileResults results = decompiler.decompileFunction(function,
+					DECOMPILE_TIMEOUT_SECONDS, monitor);
 				if (!results.decompileCompleted() || results.getHighFunction() == null) {
+					decompileFailures++;
 					continue;
 				}
 				Map<LocalKey, LocalInference> inferred = new HashMap<>();
@@ -118,15 +155,175 @@ public class C166LocalObjectTypePhase extends C166TaskingTypeInferencePhase {
 					catch (InvalidInputException | ghidra.util.exception.DuplicateNameException e) {
 						log.appendException(e);
 					}
+					catch (IllegalArgumentException e) {
+						// A stale HighSymbol can have stack storage but no mappable PC address.
+						// Reject that optional local retype without aborting the analyzer.
+						conflicts++;
+					}
+				}
+				if (!weakDatabaseLocal && changed != changedBeforeFunction) {
+					retypedWithoutWeakDatabaseLocal++;
 				}
 			}
 		}
 		finally {
 			decompiler.dispose();
 		}
-		report(program, "Retyped " + changed + " exact-size local stack object(s), " +
-			"rejected " + conflicts + " conflicting local type candidate(s).");
+		lastRunStatistics = new RunStatistics(candidates,
+			candidatesWithWeakDatabaseLocal, retypedWithoutWeakDatabaseLocal,
+			changed, conflicts, decompileFailures, lastDecompilations);
+		report(program, "Inspected " + candidates + " exact local-pointer candidate " +
+			"function(s); retyped " + changed + " exact-size local stack object(s), " +
+			"rejected " + conflicts + " conflicting local type candidate(s), " +
+			decompileFailures + " decompilation failure(s); " +
+			candidatesWithWeakDatabaseLocal + " candidate(s) had a weak persisted stack " +
+			"local and " + retypedWithoutWeakDatabaseLocal +
+			" retype(s) required a dynamic-only HighSymbol.");
 		return true;
+	}
+
+	public int getLastDecompilations() {
+		return lastDecompilations;
+	}
+
+	public RunStatistics getLastRunStatistics() {
+		return lastRunStatistics;
+	}
+
+	private boolean hasWeakDatabaseLocal(Function function) {
+		for (Variable variable : function.getLocalVariables()) {
+			if (variable.getVariableStorage().isStackStorage() &&
+				variable.getSource() != SourceType.USER_DEFINED &&
+				isWeakLocalType(variable.getDataType())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Cheap TASKING preflight for a concrete pointer argument whose low word is
+	 * derived from R0 at that exact call.  Keeping the call, parameter storage,
+	 * and local-address evidence tied together avoids decompiling a whole function
+	 * merely because it contains an unrelated stack calculation and an unrelated
+	 * pointer-taking call.
+	 */
+	private boolean hasConcreteLocalPointerCall(Program program, Function function) {
+		Register stackPointer = program.getRegister("r0");
+		if (stackPointer == null) {
+			return false;
+		}
+		for (Instruction instruction :
+				C166AnalysisEvidenceIndex.flowInstructions(program, function)) {
+			if (!instruction.getFlowType().isCall()) {
+				continue;
+			}
+			Function callee = directCallee(program, instruction);
+			if (callee == null) {
+				continue;
+			}
+			for (Parameter parameter : callee.getParameters()) {
+				if (concretePointee(parameter.getFormalDataType()) == null) {
+					continue;
+				}
+				var registers = parameter.getVariableStorage().getRegisters();
+				if (registers == null) {
+					continue;
+				}
+				for (Register argument : registers) {
+					if (!overlaps(argument, stackPointer) && tracesLocalAddress(program,
+							function, instruction, argument, stackPointer)) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private Function directCallee(Program program, Instruction call) {
+		for (ghidra.program.model.address.Address flow : call.getFlows()) {
+			Function callee = program.getFunctionManager().getFunctionAt(flow);
+			if (callee != null) {
+				return callee;
+			}
+		}
+		for (Reference reference : call.getReferencesFrom()) {
+			if (reference.getReferenceType().isCall()) {
+				Function callee = program.getFunctionManager()
+					.getFunctionAt(reference.getToAddress());
+				if (callee != null) {
+					return callee;
+				}
+			}
+		}
+		return null;
+	}
+
+	private boolean tracesLocalAddress(Program program, Function function,
+			Instruction call, Register argument, Register stackPointer) {
+		Register tracked = argument;
+		Instruction instruction = program.getListing().getInstructionBefore(call.getAddress());
+		int remaining = 256;
+		while (instruction != null && function.getBody().contains(instruction.getAddress()) &&
+			remaining-- > 0) {
+			if (instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				return false;
+			}
+			Register destination = operandRegister(instruction, 0);
+			if (destination == null || !overlaps(destination, tracked)) {
+				instruction = program.getListing().getInstructionBefore(instruction.getAddress());
+				continue;
+			}
+			if (instruction.getNumOperands() < 2 ||
+				OperandType.isIndirect(instruction.getOperandType(0))) {
+				return false;
+			}
+			String mnemonic = instruction.getMnemonicString().toLowerCase();
+			Register source = operandRegister(instruction, 1);
+			if ((mnemonic.equals("add") || mnemonic.equals("mov")) && source != null) {
+				if (overlaps(source, stackPointer)) {
+					return true;
+				}
+				if (mnemonic.equals("mov") && !OperandType.isIndirect(
+						instruction.getOperandType(1))) {
+					tracked = source;
+					instruction = program.getListing()
+						.getInstructionBefore(instruction.getAddress());
+					continue;
+				}
+			}
+			if ((mnemonic.equals("and") || mnemonic.equals("add") ||
+				mnemonic.equals("sub")) && source == null &&
+				!OperandType.isIndirect(instruction.getOperandType(1))) {
+				instruction = program.getListing().getInstructionBefore(instruction.getAddress());
+				continue;
+			}
+			return false;
+		}
+		return false;
+	}
+
+	private boolean overlaps(Register left, Register right) {
+		if (left == null || right == null ||
+			!left.getAddress().getAddressSpace().equals(
+				right.getAddress().getAddressSpace())) {
+			return false;
+		}
+		long leftStart = left.getAddress().getOffset();
+		long rightStart = right.getAddress().getOffset();
+		long leftEnd = leftStart + left.getMinimumByteSize();
+		long rightEnd = rightStart + right.getMinimumByteSize();
+		return leftStart < rightEnd && rightStart < leftEnd;
+	}
+
+	private Register operandRegister(Instruction instruction, int operand) {
+		for (Object object : instruction.getOpObjects(operand)) {
+			if (object instanceof Register register) {
+				return register;
+			}
+		}
+		return null;
 	}
 
 	private void collectCallInferences(Program program, Function caller,
@@ -310,5 +507,13 @@ public class C166LocalObjectTypePhase extends C166TaskingTypeInferencePhase {
 	}
 
 	private record LocalInference(LocalObject local, DataType type) {
+	}
+
+	public record RunStatistics(int candidates, int candidatesWithWeakDatabaseLocal,
+			int retypedWithoutWeakDatabaseLocal, int retypedObjects, int conflicts,
+			int decompileFailures, int decompilations) {
+		private static RunStatistics empty() {
+			return new RunStatistics(0, 0, 0, 0, 0, 0, 0);
+		}
 	}
 }

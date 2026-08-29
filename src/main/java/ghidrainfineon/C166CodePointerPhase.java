@@ -112,7 +112,11 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			? program.getFunctionManager().getFunctions(true)
 			: program.getFunctionManager().getFunctionsOverlapping(set);
 		List<Function> callers = new ArrayList<>();
-		functions.forEachRemaining(callers::add);
+		functions.forEachRemaining(function -> {
+			if (C166AnalysisFunctions.hasUsableBody(function)) {
+				callers.add(function);
+			}
+		});
 		monitor.initialize(Math.max(1, callers.size()),
 			"C166 code-pointer inference: scanning call sites");
 
@@ -133,11 +137,9 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		Set<Address> recoveredCodeTargets = new HashSet<>();
 		for (Function caller : callers) {
 			monitor.checkCancelled();
-			InstructionIterator instructions =
-				program.getListing().getInstructions(caller.getBody(), true);
-			while (instructions.hasNext()) {
+			for (Instruction instruction :
+					C166AnalysisEvidenceIndex.flowInstructions(program, caller)) {
 				monitor.checkCancelled();
-				Instruction instruction = instructions.next();
 				Function target = directTarget(program, instruction);
 				if (target == null || !isCallOrTailJump(caller, instruction, target)) {
 					continue;
@@ -221,18 +223,29 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 
 		int forwardingEvidenceCount = 0;
 		int forwardingPasses = 0;
-		while (true) {
+		Map<Function, List<DirectCallSite>> directCallsByTarget = new HashMap<>();
+		for (DirectCallSite site : directCalls) {
+			directCallsByTarget.computeIfAbsent(site.target(), ignored -> new ArrayList<>())
+				.add(site);
+		}
+		Set<Function> activeTargets = forwardingRoots(directCallsByTarget.keySet(),
+			forwardingEvidenceByTarget);
+		while (!activeTargets.isEmpty()) {
 			monitor.checkCancelled();
-			monitor.initialize(Math.max(1, directCalls.size()),
+			int activeSites = activeTargets.stream()
+				.mapToInt(target -> directCallsByTarget.getOrDefault(target, List.of()).size())
+				.sum();
+			monitor.initialize(Math.max(1, activeSites),
 				"C166 code-pointer inference: propagating code pointers (pass " +
 					(forwardingPasses + 1) + ")");
-			int added = collectForwardingEvidence(program, directCalls, blocks,
+			ForwardingUpdate forwarding = collectForwardingEvidence(program,
+				directCallsByTarget, activeTargets, blocks,
 				scoresByTarget, semanticEvidenceByTarget, forwardingEvidenceByTarget,
 				supportedEvidenceByTarget, scalarTraceCache, monitor);
-			if (added == 0) {
+			if (forwarding.added() == 0) {
 				break;
 			}
-			forwardingEvidenceCount += added;
+			forwardingEvidenceCount += forwarding.added();
 			forwardingPasses++;
 			update = applyEvidence(program, scoresByTarget, evidenceByTarget,
 				semanticEvidenceByTarget, scalarPairs, updatedFunctions, ambiguousFunctions,
@@ -240,6 +253,7 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			inferredParameters += update.inferredParameters();
 			referenceCount += update.referenceCount();
 			referencesRemoved += update.referencesRemoved();
+			activeTargets = forwarding.changedTargets();
 		}
 		publishSemanticEvidence(program, callers, semanticEvidenceByTarget, fullScan);
 		publishScalarPairEvidence(program, callers, scalarPairs, fullScan);
@@ -982,7 +996,9 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 		return delta;
 	}
 
-	private int collectForwardingEvidence(Program program, List<DirectCallSite> directCalls,
+	private ForwardingUpdate collectForwardingEvidence(Program program,
+			Map<Function, List<DirectCallSite>> directCallsByTarget,
+			Set<Function> activeTargets,
 			BasicBlockModel blocks, Map<Function, Map<Integer, Integer>> scoresByTarget,
 			Map<Function, Set<Integer>> semanticEvidenceByTarget,
 			Map<Function, Set<Integer>> forwardingEvidenceByTarget,
@@ -990,29 +1006,49 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			ScalarCallTraceCache scalarTraceCache, TaskMonitor monitor)
 			throws CancelledException {
 		int added = 0;
-		for (DirectCallSite site : directCalls) {
-			try {
-				monitor.checkCancelled();
-				if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
-					continue;
-				}
-				for (int start : forwardedCodePointerPairs(program, site, blocks,
-					forwardingEvidenceByTarget, scalarTraceCache, monitor)) {
-					if (addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
-						site.caller(), start)) {
-						forwardingEvidenceByTarget.computeIfAbsent(site.caller(),
-							ignored -> new HashSet<>()).add(start);
-						supportedEvidenceByTarget.computeIfAbsent(site.caller(),
-							ignored -> new HashSet<>()).add(start);
-						added++;
+		Set<Function> changedTargets = new HashSet<>();
+		for (Function target : activeTargets) {
+			for (DirectCallSite site : directCallsByTarget.getOrDefault(target, List.of())) {
+				try {
+					monitor.checkCancelled();
+					if (!mayUpdate(site.caller()) || !usesTaskingConvention(site.caller())) {
+						continue;
+					}
+					for (int start : forwardedCodePointerPairs(program, site, blocks,
+						forwardingEvidenceByTarget, scalarTraceCache, monitor)) {
+						if (addSemanticEvidence(scoresByTarget, semanticEvidenceByTarget,
+							site.caller(), start)) {
+							forwardingEvidenceByTarget.computeIfAbsent(site.caller(),
+								ignored -> new HashSet<>()).add(start);
+							supportedEvidenceByTarget.computeIfAbsent(site.caller(),
+								ignored -> new HashSet<>()).add(start);
+							changedTargets.add(site.caller());
+							added++;
+						}
 					}
 				}
-			}
-			finally {
-				monitor.incrementProgress(1);
+				finally {
+					monitor.incrementProgress(1);
+				}
 			}
 		}
-		return added;
+		return new ForwardingUpdate(added, Set.copyOf(changedTargets));
+	}
+
+	private Set<Function> forwardingRoots(Set<Function> targets,
+			Map<Function, Set<Integer>> trustedEvidence) {
+		Set<Function> result = new HashSet<>();
+		for (Function target : targets) {
+			for (Parameter parameter : target.getParameters()) {
+				Integer start = parameterStart(parameter.getVariableStorage());
+				if (start != null && isTrustedForwardingParameter(target, parameter,
+					trustedEvidence.getOrDefault(target, Set.of()), start)) {
+					result.add(target);
+					break;
+				}
+			}
+		}
+		return result;
 	}
 
 	private Set<Integer> forwardedCodePointerPairs(Program program, DirectCallSite site,
@@ -1021,11 +1057,10 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			throws CancelledException {
 		Set<Integer> result = new HashSet<>();
 		for (Parameter parameter : site.target().getParameters()) {
-			if (!isFunctionPointer(parameter.getFormalDataType())) {
-				continue;
-			}
 			Integer targetStart = parameterStart(parameter.getVariableStorage());
-			if (targetStart == null) {
+			if (targetStart == null || !isTrustedForwardingParameter(site.target(),
+				parameter, trustedEvidence.getOrDefault(site.target(), Set.of()),
+				targetStart)) {
 				continue;
 			}
 			// Never use an analyzer-owned generic fpointer as its own proof.  It may
@@ -1034,12 +1069,6 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			// an R5:R4 far-indirect use.  A one-off exact-entry collision supports the
 			// local type but must not infect its callers.  Concrete USER_DEFINED or
 			// IMPORTED callbacks remain authoritative roots.
-			if (site.target().getSignatureSource() == SourceType.ANALYSIS &&
-				isGenericAnalysisFunctionPointer(site.target(),
-					parameter.getFormalDataType()) &&
-				!trustedEvidence.getOrDefault(site.target(), Set.of()).contains(targetStart)) {
-				continue;
-			}
 			// The target slot is already trusted as a callback.  Use the same
 			// conservative frame-aware tracer as scalar propagation so callbacks
 			// forwarded from an incoming stack slot across validation branches are not
@@ -1053,6 +1082,16 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			}
 		}
 		return Set.copyOf(result);
+	}
+
+	private boolean isTrustedForwardingParameter(Function target, Parameter parameter,
+			Set<Integer> trustedStarts, int start) {
+		if (!isFunctionPointer(parameter.getFormalDataType())) {
+			return false;
+		}
+		return target.getSignatureSource() != SourceType.ANALYSIS ||
+			!isGenericAnalysisFunctionPointer(target, parameter.getFormalDataType()) ||
+			trustedStarts.contains(start);
 	}
 
 	private Map<Function, Set<Integer>> mutableSetMap(
@@ -2516,6 +2555,25 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 			new BoundedCache<>(MAX_SCALAR_TRACE_CACHE_ENTRIES);
 	}
 
+	/** Shared exact TASKING call-word tracer for the data-pointer worklist. */
+	static final class ForwardingTracer {
+		private final Program program;
+		private final C166CodePointerPhase phase = new C166CodePointerPhase();
+		private final BasicBlockModel blocks;
+		private final ScalarCallTraceCache cache = new ScalarCallTraceCache();
+
+		ForwardingTracer(Program program) {
+			this.program = program;
+			blocks = new BasicBlockModel(program);
+		}
+
+		Integer trace(Function caller, Function target, Instruction call, int targetSlot,
+				TaskMonitor monitor) throws CancelledException {
+			return phase.traceScalarCallArgumentWord(program,
+				new DirectCallSite(caller, target, call), blocks, targetSlot, cache, monitor);
+		}
+	}
+
 	private static final class BoundedCache<K, V> extends LinkedHashMap<K, V> {
 		private final int maximumEntries;
 
@@ -2535,6 +2593,9 @@ public class C166CodePointerPhase extends C166TaskingTypeInferencePhase {
 
 	private record UpdateStats(int inferredParameters, int referenceCount,
 			int referencesRemoved) {
+	}
+
+	private record ForwardingUpdate(int added, Set<Function> changedTargets) {
 	}
 
 	private record PagedPointerEvidence(Address target, Set<Address> sources) {

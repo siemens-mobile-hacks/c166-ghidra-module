@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSet;
@@ -37,12 +38,39 @@ final class C166TaskingCallArguments {
 
 	private static final int FIRST_ARGUMENT_REGISTER = 12;
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
+	private static final Map<Program, RecoveryCache> ACTIVE_RECOVERY_CACHES =
+		new WeakHashMap<>();
 
 	private C166TaskingCallArguments() {
 	}
 
 	static CallWords recover(Program program, Function caller, Instruction call,
 			BasicBlockModel blocks, TaskMonitor monitor) throws CancelledException {
+		RecoveryCache cache;
+		synchronized (ACTIVE_RECOVERY_CACHES) {
+			cache = ACTIVE_RECOVERY_CACHES.get(program);
+		}
+		if (cache == null) {
+			return recoverUncached(program, caller, call, blocks, monitor);
+		}
+		synchronized (cache) {
+			CallWords cached = cache.words.get(call.getAddress());
+			if (cached != null) {
+				cache.hits++;
+				return cached;
+			}
+		}
+		CallWords recovered = recoverUncached(program, caller, call, blocks, monitor);
+		synchronized (cache) {
+			CallWords existing = cache.words.putIfAbsent(call.getAddress(), recovered);
+			cache.misses++;
+			return existing == null ? recovered : existing;
+		}
+	}
+
+	private static CallWords recoverUncached(Program program, Function caller,
+			Instruction call, BasicBlockModel blocks, TaskMonitor monitor)
+			throws CancelledException {
 		Map<Integer, WordValue> words = new HashMap<>();
 		AddressSetView setupRegion = setupRegion(program, caller, call, blocks, monitor);
 		boolean registerBankOccupied = true;
@@ -59,6 +87,56 @@ final class C166TaskingCallArguments {
 			return new CallWords(Map.copyOf(words), true, stackWords);
 		}
 		return new CallWords(Map.copyOf(words), false, stackArgumentWords(program, call));
+	}
+
+	static RecoverySession beginSharedRecovery(Program program) {
+		RecoveryCache cache = new RecoveryCache();
+		synchronized (ACTIVE_RECOVERY_CACHES) {
+			ACTIVE_RECOVERY_CACHES.put(program, cache);
+		}
+		return new RecoverySession(program, cache);
+	}
+
+	static final class RecoverySession implements AutoCloseable {
+		private final Program program;
+		private final RecoveryCache cache;
+		private boolean closed;
+
+		private RecoverySession(Program program, RecoveryCache cache) {
+			this.program = program;
+			this.cache = cache;
+		}
+
+		int hits() {
+			synchronized (cache) {
+				return cache.hits;
+			}
+		}
+
+		int misses() {
+			synchronized (cache) {
+				return cache.misses;
+			}
+		}
+
+		@Override
+		public void close() {
+			if (closed) {
+				return;
+			}
+			closed = true;
+			synchronized (ACTIVE_RECOVERY_CACHES) {
+				if (ACTIVE_RECOVERY_CACHES.get(program) == cache) {
+					ACTIVE_RECOVERY_CACHES.remove(program);
+				}
+			}
+		}
+	}
+
+	private static final class RecoveryCache {
+		private final Map<Address, CallWords> words = new HashMap<>();
+		private int hits;
+		private int misses;
 	}
 
 	/**

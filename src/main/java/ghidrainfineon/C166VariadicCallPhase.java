@@ -30,7 +30,6 @@ import ghidra.program.model.data.Undefined;
 import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
-import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Listing;
@@ -85,7 +84,8 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
 		boolean fullScan = set == null || set.isEmpty() || set.contains(program.getMemory());
-		Map<Address, Function> variadicTargets = findTypedVariadicTargets(program);
+		Map<Address, Function> variadicTargets =
+			findTypedVariadicTargets(program, set, fullScan, monitor);
 		if (variadicTargets.isEmpty()) {
 			return true;
 		}
@@ -241,29 +241,68 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 		return true;
 	}
 
-	private Map<Address, Function> findTypedVariadicTargets(Program program) {
+	private Map<Address, Function> findTypedVariadicTargets(Program program,
+			AddressSetView set, boolean fullScan, TaskMonitor monitor)
+			throws CancelledException {
 		Map<Address, Function> result = new HashMap<>();
-		FunctionIterator functions = program.getFunctionManager().getFunctions(true);
+		Iterator<Function> functions = fullScan
+			? program.getFunctionManager().getFunctions(true)
+			: program.getFunctionManager().getFunctionsOverlapping(set);
 		while (functions.hasNext()) {
+			monitor.checkCancelled();
 			Function function = functions.next();
-			if (!function.hasVarArgs() || function.getParameterCount() == 0 ||
-				function.getSignatureSource() == SourceType.DEFAULT ||
-				!usesTaskingConvention(function) ||
-				!fixedPartExhaustsArgumentRegisters(function)) {
-				continue;
-			}
-			boolean hasCompoundParameter = false;
-			for (Parameter parameter : function.getParameters()) {
-				if (parameter.getVariableStorage().getVarnodeCount() > 1) {
-					hasCompoundParameter = true;
-					break;
-				}
-			}
-			if (hasCompoundParameter) {
+			if (isTypedVariadicTarget(function)) {
 				result.put(function.getEntryPoint(), function);
+			}
+			if (!fullScan && C166AnalysisFunctions.hasUsableBody(function)) {
+				for (Instruction instruction :
+						C166AnalysisEvidenceIndex.flowInstructions(program, function)) {
+					if (!instruction.getFlowType().isCall()) {
+						continue;
+					}
+					Function target = directCallTarget(program, instruction);
+					if (isTypedVariadicTarget(target)) {
+						result.put(target.getEntryPoint(), target);
+					}
+				}
 			}
 		}
 		return result;
+	}
+
+	private boolean isTypedVariadicTarget(Function function) {
+		if (function == null || !function.hasVarArgs() ||
+			function.getParameterCount() == 0 ||
+			function.getSignatureSource() == SourceType.DEFAULT ||
+			!usesTaskingConvention(function) ||
+			!fixedPartExhaustsArgumentRegisters(function)) {
+			return false;
+		}
+		for (Parameter parameter : function.getParameters()) {
+			if (parameter.getVariableStorage().getVarnodeCount() > 1) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private Function directCallTarget(Program program, Instruction instruction) {
+		for (Reference reference : instruction.getReferencesFrom()) {
+			if (reference.getReferenceType().isCall()) {
+				Function target = program.getFunctionManager()
+					.getFunctionAt(reference.getToAddress());
+				if (target != null) {
+					return target;
+				}
+			}
+		}
+		for (Address flow : instruction.getFlows()) {
+			Function target = program.getFunctionManager().getFunctionAt(flow);
+			if (target != null) {
+				return target;
+			}
+		}
+		return null;
 	}
 
 	private boolean usesTaskingConvention(Function function) {
@@ -309,7 +348,7 @@ public class C166VariadicCallPhase extends C166TaskingTypeInferencePhase {
 					continue;
 				}
 				Function caller = functions.getFunctionContaining(reference.getFromAddress());
-				if (caller != null && !caller.isExternal() &&
+				if (C166AnalysisFunctions.hasUsableBody(caller) &&
 					(fullScan || targetAffected || caller.getBody().intersects(set))) {
 					callers.add(caller);
 				}

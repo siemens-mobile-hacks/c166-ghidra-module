@@ -912,6 +912,9 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		MessageLog returnLog = new MessageLog();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			returnLog), "far-pointer return inference failed");
+		check(returnAnalyzer.getLastRunStatistics().fixedPointRounds() <= 2,
+			"return inference repeated stable listing evidence: " +
+				returnAnalyzer.getLastRunStatistics());
 		check(!returnLog.hasMessages(),
 			"far-pointer return diagnostics leaked into the Analysis Log: " + returnLog);
 		checkDataPointerReturn(dataReturn);
@@ -941,6 +944,10 @@ public class C166CodePointerInferenceTest extends GhidraScript {
 		MessageLog repeatedReturnLog = new MessageLog();
 		check(returnAnalyzer.added(currentProgram, currentProgram.getMemory(), monitor,
 			repeatedReturnLog), "second far-pointer return inference failed");
+		check(returnAnalyzer.getLastRunStatistics().inferredReturns() == 0 &&
+			returnAnalyzer.getLastRunStatistics().fixedPointRounds() == 1,
+			"idempotent return inference repeated fixed-point work: " +
+				returnAnalyzer.getLastRunStatistics());
 		check(!repeatedReturnLog.hasMessages(),
 			"repeated return diagnostics leaked into the Analysis Log: " +
 				repeatedReturnLog);

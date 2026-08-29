@@ -59,6 +59,7 @@ import ghidra.util.task.TaskMonitor;
 public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 	private static final String CALLING_CONVENTION = "__tasking_c166_classic";
+	private RunStatistics lastRunStatistics = RunStatistics.empty();
 
 	public C166PointerReturnPhase() {
 		super("C166 TASKING Return Classification");
@@ -72,15 +73,35 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 	@Override
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
+		lastRunStatistics = RunStatistics.empty();
 		boolean fullScan = set == null || set.isEmpty() || set.contains(program.getMemory());
 		Iterator<Function> iterator = fullScan
 			? program.getFunctionManager().getFunctions(true)
 			: program.getFunctionManager().getFunctionsOverlapping(set);
 		List<Function> callers = new ArrayList<>();
-		iterator.forEachRemaining(callers::add);
+		while (iterator.hasNext()) {
+			Function caller = iterator.next();
+			if (C166AnalysisFunctions.hasUsableBody(caller)) {
+				callers.add(caller);
+			}
+		}
 		final int maximumRounds = 4;
-		monitor.initialize(Math.max(1, callers.size() * maximumRounds),
+		monitor.initialize(Math.max(1, callers.size() * (maximumRounds + 1)),
 			"C166 return classification: tracing R5:R4");
+		Map<Function, ReturnEvidence> staticEvidence = new HashMap<>();
+		Map<Function, List<ForwardedPairOrigin>> forwardedSources = new HashMap<>();
+		for (Function caller : callers) {
+			monitor.checkCancelled();
+			Map<Address, TraceState> callerStates =
+				traceCallerStates(program, caller, monitor);
+			recordCallerEvidence(program, caller, callerStates, staticEvidence, monitor);
+			List<ForwardedPairOrigin> sources =
+				forwardedReturnSources(program, caller, monitor);
+			if (!sources.isEmpty()) {
+				forwardedSources.put(caller, sources);
+			}
+			monitor.incrementProgress(1);
+		}
 		int inferred = 0;
 		int rounds = 0;
 		Set<Function> conflicts = new HashSet<>();
@@ -89,12 +110,16 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 			program.getDataTypeManager());
 		DataType codePointer = genericFunctionPointer(program);
 		for (int round = 0; round < maximumRounds; round++) {
-			Map<Function, ReturnEvidence> evidence = new HashMap<>();
-			for (Function caller : callers) {
+			// Consumer parameter types are stable throughout this phase.  Clone the
+			// listing-derived evidence instead of walking all caller instructions in
+			// every fixed-point round; only forwarded return categories are dynamic.
+			Map<Function, ReturnEvidence> evidence = copyEvidence(staticEvidence);
+			for (Map.Entry<Function, List<ForwardedPairOrigin>> entry :
+					forwardedSources.entrySet()) {
 				monitor.checkCancelled();
-				traceCaller(program, caller, evidence, monitor);
-				ReturnCategory forwarded = forwardedReturnCategory(program, caller,
-					provenThisRun, monitor);
+				Function caller = entry.getKey();
+				ReturnCategory forwarded = forwardedReturnCategory(entry.getValue(),
+					provenThisRun);
 				if (forwarded != ReturnCategory.UNKNOWN) {
 					ReturnEvidence item = evidence.computeIfAbsent(caller,
 						ignored -> new ReturnEvidence());
@@ -165,7 +190,22 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 			callers.size() + " caller function(s), inferred " + inferred +
 			" R5:R4 return(s) in " + rounds + " fixed-point round(s), rejected " +
 			conflicts.size() + " cross-category conflict(s).");
+		lastRunStatistics = new RunStatistics(callers.size(), inferred, rounds,
+			conflicts.size());
 		return true;
+	}
+
+	public RunStatistics getLastRunStatistics() {
+		return lastRunStatistics;
+	}
+
+	private Map<Function, ReturnEvidence> copyEvidence(
+			Map<Function, ReturnEvidence> source) {
+		Map<Function, ReturnEvidence> result = new HashMap<>();
+		for (Map.Entry<Function, ReturnEvidence> entry : source.entrySet()) {
+			result.put(entry.getKey(), entry.getValue().copy());
+		}
+		return result;
 	}
 
 	private boolean sameReturnCategory(DataType current, DataType inferred) {
@@ -191,8 +231,8 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 			ReturnCategory.UNKNOWN;
 	}
 
-	private void traceCaller(Program program, Function caller,
-			Map<Function, ReturnEvidence> evidence, TaskMonitor monitor)
+	private Map<Address, TraceState> traceCallerStates(Program program, Function caller,
+			TaskMonitor monitor)
 			throws CancelledException {
 		Map<Address, TraceState> entryStates = new HashMap<>();
 		ArrayDeque<Address> work = new ArrayDeque<>();
@@ -217,7 +257,13 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 				}
 			}
 		}
+		return entryStates;
+	}
 
+	private void recordCallerEvidence(Program program, Function caller,
+			Map<Address, TraceState> entryStates,
+			Map<Function, ReturnEvidence> evidence, TaskMonitor monitor)
+			throws CancelledException {
 		InstructionIterator instructions =
 			program.getListing().getInstructions(caller.getBody(), true);
 		while (instructions.hasNext()) {
@@ -414,10 +460,10 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 	 * and constructor-like functions whose callers consume only R4 even though
 	 * the callee deliberately returns the full pointer pair.
 	 */
-	private ReturnCategory forwardedReturnCategory(Program program, Function function,
-			Set<Function> provenThisRun, TaskMonitor monitor)
+	private List<ForwardedPairOrigin> forwardedReturnSources(Program program,
+			Function function, TaskMonitor monitor)
 			throws CancelledException {
-		ReturnCategory category = null;
+		List<ForwardedPairOrigin> result = new ArrayList<>();
 		boolean sawReturn = false;
 		InstructionIterator instructions =
 			program.getListing().getInstructions(function.getBody(), true);
@@ -429,25 +475,36 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 			}
 			sawReturn = true;
 			ForwardedWordOrigin low = traceForwardedReturnWord(program, function,
-				terminal, 4, provenThisRun, monitor);
+				terminal, 4, monitor);
 			ForwardedWordOrigin high = traceForwardedReturnWord(program, function,
-				terminal, 5, provenThisRun, monitor);
+				terminal, 5, monitor);
 			if (low == null || high == null || low.word() != 0 || high.word() != 1 ||
-				!low.call().equals(high.call()) || !low.function().equals(high.function()) ||
-				low.category() != high.category()) {
-				return ReturnCategory.UNKNOWN;
+				!low.call().equals(high.call()) || !low.function().equals(high.function())) {
+				return List.of();
 			}
-			if (category != null && category != low.category()) {
-				return ReturnCategory.UNKNOWN;
-			}
-			category = low.category();
+			result.add(new ForwardedPairOrigin(low.call(), low.function()));
 		}
-		return sawReturn && category != null ? category : ReturnCategory.UNKNOWN;
+		return sawReturn ? List.copyOf(result) : List.of();
+	}
+
+	private ReturnCategory forwardedReturnCategory(List<ForwardedPairOrigin> sources,
+			Set<Function> provenThisRun) {
+		ReturnCategory category = null;
+		for (ForwardedPairOrigin source : sources) {
+			ReturnCategory candidate =
+				trustedReturnCategory(source.function(), provenThisRun);
+			if (candidate == ReturnCategory.UNKNOWN ||
+				category != null && category != candidate) {
+				return ReturnCategory.UNKNOWN;
+			}
+			category = candidate;
+		}
+		return category == null ? ReturnCategory.UNKNOWN : category;
 	}
 
 	private ForwardedWordOrigin traceForwardedReturnWord(Program program,
 			Function function, Instruction terminal, int returnRegister,
-			Set<Function> provenThisRun, TaskMonitor monitor)
+			TaskMonitor monitor)
 			throws CancelledException {
 		int traced = returnRegister;
 		Instruction instruction =
@@ -468,10 +525,8 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 					return null;
 				}
 				Function target = directTarget(program, instruction);
-				ReturnCategory category = trustedReturnCategory(target, provenThisRun);
-				return category == ReturnCategory.UNKNOWN ? null :
-					new ForwardedWordOrigin(instruction.getAddress(), target,
-						traced - 4, category);
+				return target == null ? null : new ForwardedWordOrigin(
+					instruction.getAddress(), target, traced - 4);
 			}
 			if (writesGeneralRegister(program, instruction, traced)) {
 				if (!instruction.getMnemonicString().equalsIgnoreCase("mov") ||
@@ -863,8 +918,10 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		}
 	}
 
-	private record ForwardedWordOrigin(Address call, Function function, int word,
-			ReturnCategory category) {
+	private record ForwardedWordOrigin(Address call, Function function, int word) {
+	}
+
+	private record ForwardedPairOrigin(Address call, Function function) {
 	}
 
 	private enum PairReturnState {
@@ -888,6 +945,18 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 		private boolean directPagedUse;
 		private DataType concreteDataType;
 		private boolean concreteDataTypeConflict;
+
+		private ReturnEvidence copy() {
+			ReturnEvidence copy = new ReturnEvidence();
+			copy.dataUses.addAll(dataUses);
+			copy.codeUses.addAll(codeUses);
+			copy.scalarUses.addAll(scalarUses);
+			copy.unsignedLongUses.addAll(unsignedLongUses);
+			copy.directPagedUse = directPagedUse;
+			copy.concreteDataType = concreteDataType;
+			copy.concreteDataTypeConflict = concreteDataTypeConflict;
+			return copy;
+		}
 
 		private void markDataUse(Address address) {
 			dataUses.add(address);
@@ -990,6 +1059,13 @@ public class C166PointerReturnPhase extends C166TaskingTypeInferencePhase {
 
 		private boolean hasUnsignedLongUse() {
 			return !unsignedLongUses.isEmpty();
+		}
+	}
+
+	public record RunStatistics(int callers, int inferredReturns,
+			int fixedPointRounds, int conflicts) {
+		private static RunStatistics empty() {
+			return new RunStatistics(0, 0, 0, 0);
 		}
 	}
 }

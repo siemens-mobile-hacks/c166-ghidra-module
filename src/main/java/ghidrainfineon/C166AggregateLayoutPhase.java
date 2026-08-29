@@ -1,5 +1,6 @@
 package ghidrainfineon;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -50,6 +51,9 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 
 	private static final int MAX_RETURN_ALIAS_DEPTH = 2;
 	private static final int MAX_LAYOUT_SIZE = 0x1000;
+	private static final int DECOMPILE_TIMEOUT_SECONDS = 10;
+	private int lastDecompilations;
+	private int lastDecompilerCacheHits;
 
 	public C166AggregateLayoutPhase() {
 		super("C166 TASKING Aggregate Layouts");
@@ -58,11 +62,20 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 	@Override
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor,
 			MessageLog log) throws CancelledException {
+		lastDecompilations = 0;
+		lastDecompilerCacheHits = 0;
 		if (!canAnalyze(program)) {
 			return true;
 		}
 
 		List<Function> functions = candidateFunctions(program, set, monitor);
+		if (functions.isEmpty()) {
+			report(program, "Inspected 0 function(s); created 0 compact descriptor " +
+				"layout(s), extended 0, propagated 0 exact returned-layout alias(es), " +
+				"rejected 0 weak candidate(s), 0 decompilation failure(s), reused 0 " +
+				"cached HighFunction result(s).");
+			return true;
+		}
 		DecompInterface decompiler = new FillOutStructureHelper(program, monitor)
 			.setUpDecompiler(new DecompileOptions());
 		if (decompiler == null) {
@@ -73,14 +86,19 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 		int extended = 0;
 		int rejected = 0;
 		int aliases = 0;
+		int decompileFailures = 0;
+		Map<Function, DecompileResults> decompiled = new HashMap<>();
 		try {
 			for (Function function : functions) {
 				monitor.checkCancelled();
-				if (function.getSignatureSource() == SourceType.USER_DEFINED) {
+				if (!C166AnalysisFunctions.hasUsableBody(function) ||
+					function.getSignatureSource() == SourceType.USER_DEFINED) {
 					continue;
 				}
-				DecompileResults results = decompiler.decompileFunction(function, 60, monitor);
+				DecompileResults results = decompile(function, decompiler, decompiled,
+					monitor);
 				if (!results.decompileCompleted() || results.getHighFunction() == null) {
+					decompileFailures++;
 					continue;
 				}
 				for (int ordinal = 0; ordinal < function.getParameterCount(); ordinal++) {
@@ -104,13 +122,35 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 					if (symbol == null || symbol.getHighVariable() == null) {
 						continue;
 					}
+					if (!hasDirectMemoryUse(symbol.getHighVariable())) {
+						continue;
+					}
 
 					String before = create ? null : layoutSnapshot((Structure) target);
 					List<ProtectedPointerField> protectedFields = create ? List.of() :
 						protectedPointerFields((Structure) target);
-					Structure layout = new FillOutStructureHelper(program, monitor)
-						.processStructure(symbol.getHighVariable(), function, create, false,
-							decompiler);
+					Structure layout;
+					try {
+						/*
+						 * Keep structure discovery inside the already selected root function.
+						 * FillOutStructureHelper's optional decompiler recursively follows every
+						 * pointer-bearing call, bypassing this phase's bounded worklist and
+						 * repeatedly retrying malformed callees.  Exact returned-layout aliases
+						 * are propagated below by our own bounded queue.
+						 */
+						layout = new FillOutStructureHelper(program, monitor)
+							.processStructure(symbol.getHighVariable(), function, create, false,
+								null);
+					}
+					catch (IllegalArgumentException e) {
+						// FillOutStructureHelper assumes every recovered field interval is
+						// ordered.  Malformed or partial p-code can violate that assumption;
+						// reject this candidate instead of aborting the entire analysis run.
+						log.appendMsg(getName(), function.getEntryPoint() +
+							": rejected invalid aggregate candidate: " + e.getMessage());
+						rejected++;
+						continue;
+					}
 					if (layout == null) {
 						continue;
 					}
@@ -139,7 +179,8 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 					}
 				}
 			}
-			aliases = propagateReturnedLayouts(program, functions, decompiler, monitor, log);
+			aliases = propagateReturnedLayouts(program, functions, decompiler, decompiled,
+				monitor, log);
 		}
 		finally {
 			decompiler.dispose();
@@ -148,73 +189,145 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 		report(program, "Inspected " + functions.size() + " function(s); created " +
 			created + " compact descriptor layout(s), extended " + extended +
 			", propagated " + aliases + " exact returned-layout alias(es), rejected " +
-			rejected + " weak candidate(s).");
+			rejected + " weak candidate(s), " + decompileFailures +
+			" decompilation failure(s), reused " + lastDecompilerCacheHits +
+			" cached HighFunction result(s).");
 		return true;
 	}
 
+	private boolean hasDirectMemoryUse(HighVariable variable) {
+		ArrayDeque<Varnode> pending = new ArrayDeque<>();
+		Set<Varnode> visited = new HashSet<>();
+		for (Varnode instance : variable.getInstances()) {
+			pending.addLast(instance);
+		}
+		int traversed = 0;
+		while (!pending.isEmpty() && traversed++ < 512) {
+			Varnode value = pending.removeFirst();
+			if (!visited.add(value)) {
+				continue;
+			}
+			var uses = value.getDescendants();
+			while (uses.hasNext()) {
+				PcodeOp use = uses.next();
+				if ((use.getOpcode() == PcodeOp.LOAD || use.getOpcode() == PcodeOp.STORE) &&
+					use.getNumInputs() > 1 && use.getInput(1).equals(value)) {
+					return true;
+				}
+				if (use.getOutput() != null && propagatesPointerValue(use.getOpcode())) {
+					pending.addLast(use.getOutput());
+				}
+			}
+		}
+		return false;
+	}
+
+	private boolean propagatesPointerValue(int opcode) {
+		return switch (opcode) {
+			case PcodeOp.COPY, PcodeOp.CAST, PcodeOp.INDIRECT, PcodeOp.MULTIEQUAL,
+				PcodeOp.PIECE, PcodeOp.SUBPIECE, PcodeOp.INT_ZEXT, PcodeOp.INT_SEXT,
+				PcodeOp.INT_AND, PcodeOp.INT_ADD, PcodeOp.PTRADD, PcodeOp.PTRSUB,
+				PcodeOp.SEGMENTOP -> true;
+			default -> false;
+		};
+	}
+
+	public int getLastDecompilations() {
+		return lastDecompilations;
+	}
+
+	public int getLastDecompilerCacheHits() {
+		return lastDecompilerCacheHits;
+	}
+
+	private DecompileResults decompile(Function function, DecompInterface decompiler,
+			Map<Function, DecompileResults> cache, TaskMonitor monitor)
+			throws CancelledException {
+		DecompileResults result = cache.get(function);
+		if (result != null) {
+			lastDecompilerCacheHits++;
+			return result;
+		}
+		lastDecompilations++;
+		result = decompiler.decompileFunction(function, DECOMPILE_TIMEOUT_SECONDS, monitor);
+		cache.put(function, result);
+		return result;
+	}
+
 	private int propagateReturnedLayouts(Program program, List<Function> functions,
-			DecompInterface decompiler, TaskMonitor monitor, MessageLog log)
+			DecompInterface decompiler, Map<Function, DecompileResults> decompiled,
+			TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
 		int changed = 0;
-		for (int round = 0; round <= functions.size(); round++) {
-			boolean roundChanged = false;
-			for (Function function : functions) {
-				monitor.checkCancelled();
-				DataType returnedType = concreteOwnedLayoutPointer(function.getReturnType());
-				if (returnedType == null ||
-					function.getSignatureSource() != SourceType.ANALYSIS) {
-					continue;
-				}
-				DecompileResults results = decompiler.decompileFunction(function, 60, monitor);
-				if (!results.decompileCompleted() || results.getHighFunction() == null) {
-					continue;
-				}
-				ReturnedAlias alias = returnedAlias(program, results, function);
-				try {
-					Integer returnedParameter = returnedParameterAlias(program, function,
-						results, decompiler, monitor, new HashSet<>(), 0);
-					if (returnedParameter != null) {
-						Parameter parameter = function.getParameter(returnedParameter);
-						if (parameter != null && parameter.getSource() != SourceType.USER_DEFINED &&
-							isGenericDataPointer(parameter.getFormalDataType())) {
-							parameter.setDataType(returnedType, SourceType.ANALYSIS);
-							roundChanged = true;
-							changed++;
-						}
-					}
-					if (alias instanceof ParameterAlias parameterAlias) {
-						Parameter parameter = function.getParameter(parameterAlias.ordinal());
-						if (parameter != null && parameter.getSource() != SourceType.USER_DEFINED &&
-							isGenericDataPointer(parameter.getFormalDataType())) {
-							parameter.setDataType(returnedType, SourceType.ANALYSIS);
-							roundChanged = true;
-							changed++;
-						}
-					}
-					else if (alias instanceof CallAlias callAlias) {
-						Function callee = callAlias.function();
-						if (callee.getSignatureSource() == SourceType.ANALYSIS &&
-							isGenericDataPointer(callee.getReturnType())) {
-							callee.setReturnType(returnedType, SourceType.ANALYSIS);
-							roundChanged = true;
-							changed++;
-						}
+		ArrayDeque<Function> pending = new ArrayDeque<>();
+		Set<Function> queued = new HashSet<>();
+		for (Function function : functions) {
+			if (concreteOwnedLayoutPointer(function.getReturnType()) != null &&
+				function.getSignatureSource() == SourceType.ANALYSIS && queued.add(function)) {
+				pending.addLast(function);
+			}
+		}
+		while (!pending.isEmpty()) {
+			monitor.checkCancelled();
+			Function function = pending.removeFirst();
+			queued.remove(function);
+			DataType returnedType = concreteOwnedLayoutPointer(function.getReturnType());
+			if (returnedType == null ||
+				function.getSignatureSource() != SourceType.ANALYSIS) {
+				continue;
+			}
+			DecompileResults results = decompile(function, decompiler, decompiled, monitor);
+			if (!results.decompileCompleted() || results.getHighFunction() == null) {
+				continue;
+			}
+			ReturnedAlias alias = returnedAlias(program, results, function);
+			try {
+				Integer returnedParameter = returnedParameterAlias(program, function,
+					results, decompiler, decompiled, monitor, new HashSet<>(), 0);
+				if (returnedParameter != null) {
+					Parameter parameter = function.getParameter(returnedParameter);
+					if (parameter != null && parameter.getSource() != SourceType.USER_DEFINED &&
+						isGenericDataPointer(parameter.getFormalDataType())) {
+						parameter.setDataType(returnedType, SourceType.ANALYSIS);
+						changed++;
 					}
 				}
-				catch (InvalidInputException e) {
-					log.appendException(e);
+				if (alias instanceof ParameterAlias parameterAlias) {
+					Parameter parameter = function.getParameter(parameterAlias.ordinal());
+					if (parameter != null && parameter.getSource() != SourceType.USER_DEFINED &&
+						isGenericDataPointer(parameter.getFormalDataType())) {
+						parameter.setDataType(returnedType, SourceType.ANALYSIS);
+						changed++;
+					}
+				}
+				else if (alias instanceof CallAlias callAlias) {
+					Function callee = callAlias.function();
+					if (callee.getSignatureSource() == SourceType.ANALYSIS &&
+						isGenericDataPointer(callee.getReturnType())) {
+						callee.setReturnType(returnedType, SourceType.ANALYSIS);
+						changed++;
+						// The callee's HighFunction was recovered under its old generic
+						// return type.  Invalidate both caches before following the newly
+						// concrete alias.  A function already processed may be queued again;
+						// the type transition is monotonic, so this still terminates.
+						decompiled.remove(callee);
+						decompiler.flushCache();
+						if (queued.add(callee)) {
+							pending.addLast(callee);
+						}
+					}
 				}
 			}
-			if (!roundChanged) {
-				break;
+			catch (InvalidInputException e) {
+				log.appendException(e);
 			}
-			decompiler.flushCache();
 		}
 		return changed;
 	}
 
 	private Integer returnedParameterAlias(Program program, Function function,
-			DecompileResults results, DecompInterface decompiler, TaskMonitor monitor,
+			DecompileResults results, DecompInterface decompiler,
+			Map<Function, DecompileResults> decompiled, TaskMonitor monitor,
 			Set<Function> visited, int depth) throws CancelledException {
 		if (depth > MAX_RETURN_ALIAS_DEPTH || !visited.add(function)) {
 			return null;
@@ -227,12 +340,12 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 			return null;
 		}
 		Function callee = callAlias.function();
-		DecompileResults calleeResults = decompiler.decompileFunction(callee, 60, monitor);
+		DecompileResults calleeResults = decompile(callee, decompiler, decompiled, monitor);
 		if (!calleeResults.decompileCompleted() || calleeResults.getHighFunction() == null) {
 			return null;
 		}
 		Integer calleeParameter = returnedParameterAlias(program, callee, calleeResults,
-			decompiler, monitor, visited, depth + 1);
+			decompiler, decompiled, monitor, visited, depth + 1);
 		if (calleeParameter == null) {
 			return null;
 		}
@@ -508,9 +621,55 @@ public class C166AggregateLayoutPhase extends C166TaskingTypeInferencePhase {
 		List<Function> functions = new ArrayList<>();
 		while (roots.hasNext()) {
 			monitor.checkCancelled();
-			functions.add(roots.next());
+			Function function = roots.next();
+			if (isAggregateCandidate(program, function)) {
+				functions.add(function);
+			}
 		}
 		return functions;
+	}
+
+	private boolean isAggregateCandidate(Program program, Function function) {
+		if (function.isExternal() || function.isThunk() ||
+			function.getSignatureSource() == SourceType.USER_DEFINED) {
+			return false;
+		}
+		if (concreteOwnedLayoutPointer(function.getReturnType()) != null) {
+			return true;
+		}
+		boolean genericPointerParameter = false;
+		boolean ownedPointerParameter = false;
+		for (Parameter parameter : function.getParameters()) {
+			if (parameter.getSource() == SourceType.USER_DEFINED ||
+				!(parameter.getFormalDataType() instanceof Pointer pointer) ||
+				pointer.getLength() != 4 || pointer.getDataType() instanceof FunctionDefinition) {
+				continue;
+			}
+			DataType target = pointer.getDataType();
+			if (target instanceof VoidDataType ||
+				ghidra.program.model.data.Undefined.isUndefined(target)) {
+				genericPointerParameter = true;
+			}
+			else if (target instanceof Structure structure &&
+				isOwnedAutoStructure(structure)) {
+				ownedPointerParameter = true;
+			}
+		}
+		if (!genericPointerParameter && !ownedPointerParameter) {
+			return false;
+		}
+		Map<Integer, Set<Integer>> offsets =
+			new C166FarPointerPhase().directPagedDataUseOffsets(program, function);
+		if (ownedPointerParameter && !offsets.isEmpty()) {
+			return true;
+		}
+		for (Set<Integer> pairOffsets : offsets.values()) {
+			if (pairOffsets.contains(0) && pairOffsets.contains(2) &&
+				pairOffsets.stream().anyMatch(offset -> offset >= 4 && offset < MAX_LAYOUT_SIZE)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private boolean isStrongDescriptorLayout(Structure structure) {

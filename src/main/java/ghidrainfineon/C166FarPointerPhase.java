@@ -107,9 +107,16 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	private static final int MAX_SETUP_SCAN_INSTRUCTIONS = 256;
 	private static final int MIN_CONSTANT_CALL_SITES = 2;
 	private static final int MIN_TYPED_CALL_SITES = 2;
+	private final boolean layoutPropagationOnly;
+	private int lastDecompilations;
 
 	public C166FarPointerPhase() {
+		this(false);
+	}
+
+	C166FarPointerPhase(boolean layoutPropagationOnly) {
 		super("C166 TASKING Far Pointer Inference");
+		this.layoutPropagationOnly = layoutPropagationOnly;
 	}
 
 	@Override
@@ -120,14 +127,50 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	@Override
 	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 			throws CancelledException {
+		lastDecompilations = 0;
+		long phaseStart = System.nanoTime();
 		boolean fullScan = set == null || set.isEmpty() || set.contains(program.getMemory());
+		if (layoutPropagationOnly) {
+			ForwardedSeedStats forwarded = seedForwardedDataPointers(program, set, false,
+				Map.of(), Map.of(), monitor, log);
+			report(program, "Exact layout propagation: forwarded " +
+				forwarded.parameters() + " typed data-pointer parameter(s) into " +
+				forwarded.functions() + " function(s) across " + forwarded.callSites() +
+				" exact call site(s), " + forwarded.unresolvedFunctions().size() +
+				" ambiguous function(s), 0 decompilation(s), " +
+				milliseconds(phaseStart, System.nanoTime()) + " ms.");
+			return true;
+		}
 		int legacyReferencesRemoved =
 			removeLegacyCallReferences(program, set, fullScan, monitor);
+		long legacyFinished = System.nanoTime();
 		CallSiteSeedStats seedStats = seedConstantDataPointers(program, set, fullScan,
 			monitor, log);
+		long callSeedFinished = System.nanoTime();
 		C166CodePointerPhase.addScalarPairEvidence(program, seedStats.scalarPairs());
-		CandidateGraph graph = buildCandidateGraph(program, set, fullScan, monitor);
+		DirectPagedSeedStats directSeedStats = seedDirectPagedParameters(program, set,
+			fullScan, seedStats.scalarPairs(), seedStats.strictScalarPairs(), monitor, log);
+		long directSeedFinished = System.nanoTime();
+		ForwardedSeedStats forwardedSeedStats = seedForwardedDataPointers(program, set,
+			fullScan, seedStats.scalarPairs(), seedStats.strictScalarPairs(), monitor, log);
+		long seedFinished = System.nanoTime();
+		CandidateGraph graph = buildCandidateGraph(program, set, fullScan,
+			forwardedSeedStats.unresolvedFunctions(),
+			directSeedStats.unresolvedFunctions(), monitor);
 		SccSchedule schedule = buildSccSchedule(graph, monitor);
+		long graphFinished = System.nanoTime();
+		report(program, (fullScan ? "Full" : "Incremental") +
+			" worklist prepared: " + graph.functions().size() + " candidate function(s), " +
+			graph.unresolvedForwarders() + " unresolved forwarder root(s), " +
+			graph.directParameterRoots() + " direct parameter root(s), " +
+			graph.globalPointerRoots() + " global pointer root(s), " +
+			schedule.components().size() + " call-graph component(s), seed scan " +
+			milliseconds(phaseStart, seedFinished) + " ms (legacy " +
+			milliseconds(phaseStart, legacyFinished) + " ms, call sites " +
+			milliseconds(legacyFinished, callSeedFinished) + " ms, direct paged " +
+			milliseconds(callSeedFinished, directSeedFinished) + " ms, forwarding " +
+			milliseconds(directSeedFinished, seedFinished) + " ms), graph build " +
+			milliseconds(seedFinished, graphFinished) + " ms.");
 		monitor.initialize(Math.max(1, graph.functions().size()),
 			"C166 far-pointer inference: decompiling candidates");
 		if (graph.functions().isEmpty()) {
@@ -159,6 +202,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		finally {
 			decompiler.dispose();
 		}
+		lastDecompilations = stats.decompilations;
 		// Do not mutate the listing while candidate HighFunctions are still being
 		// recovered.  Clearing a false instruction/data conflict invalidates the
 		// decompiler's view and can hide otherwise independent PAGE:OFFSET pairs
@@ -180,7 +224,14 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			" global far-pointer object(s), " +
 			"seeded " + seedStats.parameters() + " parameter(s) in " +
 			seedStats.functions() + " function(s) from " + seedStats.occurrences() +
-			" corroborated constant or typed call-site occurrence(s), rejected " +
+			" corroborated constant or typed call-site occurrence(s), seeded " +
+			directSeedStats.parameters() + " direct paged parameter(s) in " +
+			directSeedStats.functions() + " function(s) and " +
+			directSeedStats.globalPointers() + " direct global pointer(s) without " +
+			"decompilation, forwarded " +
+			forwardedSeedStats.parameters() + " typed data-pointer parameter(s) into " +
+			forwardedSeedStats.functions() + " function(s) across " +
+			forwardedSeedStats.callSites() + " exact call site(s), rejected " +
 			seedStats.scalarConflicts() + " scalar-use candidate pair(s), repaired " +
 			(seedStats.repairedPointers() + stats.repairedPointers) +
 			" stale analysis pointer(s), " +
@@ -194,6 +245,14 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 				String.join("; ", stats.nonConvergentDetails));
 		}
 		return true;
+	}
+
+	public int getLastDecompilations() {
+		return lastDecompilations;
+	}
+
+	private long milliseconds(long start, long end) {
+		return (end - start) / 1_000_000L;
 	}
 
 	private boolean analyzeComponent(Program program, DecompInterface decompiler,
@@ -461,11 +520,6 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		Set<Function> scopedFunctions = new HashSet<>();
 		scoped.forEachRemaining(scopedFunctions::add);
 		Set<Function> callers = new HashSet<>(scopedFunctions);
-		if (!fullScan) {
-			for (Function target : scopedFunctions) {
-				callers.addAll(directCallers(program, target));
-			}
-		}
 
 		BasicBlockModel blocks = new BasicBlockModel(program);
 		Map<Function, Map<Integer, Set<Address>>> occurrences = new HashMap<>();
@@ -475,14 +529,13 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		Set<Function> discoveredTargets = new HashSet<>();
 		scanConstantCallers(program, callers, blocks, occurrences, constantPairs,
 			typedOccurrences, scannedCalls, discoveredTargets, monitor);
-		if (!fullScan) {
-			Set<Function> corroboratingCallers = new HashSet<>();
-			for (Function target : discoveredTargets) {
-				corroboratingCallers.addAll(directCallers(program, target));
-			}
-			scanConstantCallers(program, corroboratingCallers, blocks, occurrences,
-				constantPairs, typedOccurrences, scannedCalls, discoveredTargets, monitor);
-		}
+		/*
+		 * Incremental analysis is driven by a listing event such as interactive
+		 * disassembly.  Do not turn every callee discovered in that event into a
+		 * global fan-in scan of all its callers.  Evidence from the changed callers
+		 * is sufficient for their call sites; cross-program corroboration belongs to
+		 * the explicit full scan below.
+		 */
 
 		int seededFunctions = 0;
 		int seededParameters = 0;
@@ -934,10 +987,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			"C166 far-pointer inference: scanning constant call arguments");
 		for (Function caller : orderedFunctions(callers)) {
 			monitor.checkCancelled();
-			InstructionIterator instructions =
-				program.getListing().getInstructions(caller.getBody(), true);
-			while (instructions.hasNext()) {
-				Instruction call = instructions.next();
+			for (Instruction call :
+					C166AnalysisEvidenceIndex.flowInstructions(program, caller)) {
 				if (!call.getFlowType().isCall() || !scannedCalls.add(call.getAddress())) {
 					continue;
 				}
@@ -957,7 +1008,7 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 					}
 					C166TaskingCallArguments.WordValue low = entry.getValue();
 					C166TaskingCallArguments.WordValue high = words.words().get(start + 1);
-					if (isTypedPointerOrigin(low, high)) {
+					if (isTypedPointerOrigin(caller, low, high)) {
 						typedOccurrences.computeIfAbsent(target, ignored -> new HashMap<>())
 							.computeIfAbsent(start, ignored -> new HashSet<>())
 							.add(call.getAddress());
@@ -988,7 +1039,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	 * enough.  The call-site seeder additionally requires two distinct calls so a
 	 * single stale signature cannot create a new formal parameter by itself.
 	 */
-	private boolean isTypedPointerOrigin(C166TaskingCallArguments.WordValue low,
+	private boolean isTypedPointerOrigin(Function caller,
+			C166TaskingCallArguments.WordValue low,
 			C166TaskingCallArguments.WordValue high) {
 		if (low == null || high == null || low.parameterOrdinal() == null ||
 			high.parameterOrdinal() == null ||
@@ -998,8 +1050,13 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			!low.originType().isEquivalent(high.originType())) {
 			return false;
 		}
-		DataType type = low.originType();
-		return isPointerType(type) && !isFunctionPointer(type) && type.getLength() == 4;
+		int ordinal = low.parameterOrdinal();
+		if (ordinal < 0 || ordinal >= caller.getParameterCount()) {
+			return false;
+		}
+		DataType type = caller.getParameter(ordinal).getFormalDataType();
+		return isPointerType(type) && !isFunctionPointer(type) && type.getLength() == 4 &&
+			isPointerType(low.originType()) && !isFunctionPointer(low.originType());
 	}
 
 	private boolean isUnambiguousConstantDataPointer(Program program,
@@ -1071,6 +1128,14 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			Map<Function, Set<Integer>> strictScalarPairs) {
 	}
 
+	private record DirectPagedSeedStats(int functions, int parameters,
+			int globalPointers, Set<Function> unresolvedFunctions) {
+	}
+
+	private record ForwardedSeedStats(int functions, int parameters, int callSites,
+			Set<Function> unresolvedFunctions) {
+	}
+
 	private record ConstantWordPair(long low, long high) {
 	}
 
@@ -1092,7 +1157,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	}
 
 	private record CandidateGraph(Set<Function> functions,
-			Map<Function, Set<Function>> callees) {
+			Map<Function, Set<Function>> callees, int unresolvedForwarders,
+			int directParameterRoots, int globalPointerRoots) {
 	}
 
 	private record SccSchedule(List<List<Function>> components,
@@ -1419,13 +1485,263 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		}
 	}
 
+	private DirectPagedSeedStats seedDirectPagedParameters(Program program,
+			AddressSetView set, boolean fullScan,
+			Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> strictScalarPairs,
+			TaskMonitor monitor, MessageLog log) throws CancelledException {
+		Iterator<Function> functions = fullScan
+			? program.getFunctionManager().getFunctions(true)
+			: program.getFunctionManager().getFunctionsOverlapping(set);
+		int changedFunctions = 0;
+		int changedParameters = 0;
+		Set<Address> globalPointerStarts = new HashSet<>();
+		Set<Function> unresolved = new HashSet<>();
+		while (functions.hasNext()) {
+			monitor.checkCancelled();
+			Function function = functions.next();
+			if (!mayAnalyze(function)) {
+				continue;
+			}
+			for (Address start : directPagedGlobalPointerStarts(program, function)) {
+				if (!hasDefinedGlobalFarPointer(program, start)) {
+					globalPointerStarts.add(start);
+				}
+			}
+			Map<Integer, Integer> scores = new HashMap<>();
+			for (int start : directPagedDataUsePairs(program, function)) {
+				if (!hasExistingFourByteScalarAt(function, start)) {
+					scores.put(start, 1);
+				}
+			}
+			if (scores.isEmpty()) {
+				continue;
+			}
+			List<Integer> candidates = new ArrayList<>(scores.keySet());
+			Collections.sort(candidates);
+			Selection selection = selectPairs(candidates, scores, 0, new HashMap<>());
+			if (selection.ambiguous() || selection.starts().isEmpty()) {
+				if (selection.ambiguous()) {
+					unresolved.add(function);
+				}
+				continue;
+			}
+			Set<Integer> directPairs = selection.starts();
+			Map<Integer, DataType> pointerTypes = new HashMap<>();
+			for (int start : directPairs) {
+				pointerTypes.put(start, new PointerDataType(VoidDataType.dataType,
+					program.getDataTypeManager()));
+			}
+			directPairs = removeFunctionPointerConflicts(program, function, directPairs,
+				directPairs, pointerTypes);
+			directPairs = removeCallSiteScalarConflicts(function, directPairs, directPairs,
+				scalarPairs, strictScalarPairs);
+			if (directPairs.isEmpty()) {
+				continue;
+			}
+			Set<Integer> liveSlots = existingParameterSlots(function);
+			for (int start : directPairs) {
+				liveSlots.add(start);
+				liveSlots.add(start + 1);
+			}
+			directPairs = retainSupportedPairs(function, directPairs, liveSlots);
+			if (directPairs.isEmpty() ||
+				signatureMatches(function, directPairs, liveSlots, pointerTypes)) {
+				continue;
+			}
+			try {
+				updateSignature(program, function, directPairs, liveSlots, pointerTypes);
+				changedFunctions++;
+				changedParameters += directPairs.size();
+			}
+			catch (DuplicateNameException | InvalidInputException e) {
+				log.appendException(e);
+				unresolved.add(function);
+			}
+		}
+		int globalPointers = defineGlobalFarPointers(program, globalPointerStarts);
+		return new DirectPagedSeedStats(changedFunctions, changedParameters,
+			globalPointers, Set.copyOf(unresolved));
+	}
+
+	private boolean hasExistingFourByteScalarAt(Function function, int start) {
+		for (Parameter parameter : function.getParameters()) {
+			if (Integer.valueOf(start).equals(
+					parameterStart(parameter.getVariableStorage())) &&
+				parameter.getVariableStorage().size() == 4) {
+				return !isPointerType(parameter.getFormalDataType());
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Propagate an already typed far data pointer through exact TASKING argument-word
+	 * forwarding without invoking the decompiler.  The shared tracer accepts a pair
+	 * only when the callee's adjacent OFFSET/PAGE words come from the caller's same
+	 * adjacent formal pair.  Full analysis follows the reverse-call fixed point;
+	 * incremental analysis only retypes functions in the supplied address set.
+	 */
+	private ForwardedSeedStats seedForwardedDataPointers(Program program,
+			AddressSetView set, boolean fullScan,
+			Map<Function, Set<Integer>> scalarPairs,
+			Map<Function, Set<Integer>> strictScalarPairs,
+			TaskMonitor monitor, MessageLog log) throws CancelledException {
+		C166CodePointerPhase.ForwardingTracer tracer =
+			new C166CodePointerPhase.ForwardingTracer(program);
+		ArrayDeque<Function> targets = new ArrayDeque<>();
+		Set<Function> scopedCallers = new HashSet<>();
+		Iterator<Function> functions = fullScan
+			? program.getFunctionManager().getFunctions(true)
+			: program.getFunctionManager().getFunctionsOverlapping(set);
+		while (functions.hasNext()) {
+			monitor.checkCancelled();
+			Function function = functions.next();
+			if (!fullScan && mayAnalyze(function)) {
+				scopedCallers.add(function);
+			}
+			if (fullScan && !farDataPointerParameters(function).isEmpty()) {
+				targets.addLast(function);
+			}
+		}
+
+		if (!fullScan) {
+			Set<Function> calledTargets = new HashSet<>();
+			for (Function caller : scopedCallers) {
+				calledTargets.addAll(directTargets(program, caller));
+			}
+			for (Function target : orderedFunctions(calledTargets)) {
+				if (!farDataPointerParameters(target).isEmpty()) {
+					targets.addLast(target);
+				}
+			}
+		}
+
+		Map<Function, Set<Integer>> processedTargetSlots = new HashMap<>();
+		Set<Function> changed = new HashSet<>();
+		Set<Function> unresolved = new HashSet<>();
+		int changedParameters = 0;
+		Set<Address> exactCalls = new HashSet<>();
+		monitor.setMessage("C166 far-pointer inference: propagating typed data pointers");
+		while (!targets.isEmpty()) {
+			monitor.checkCancelled();
+			Function target = targets.removeFirst();
+			Map<Integer, DataType> targetTypes = farDataPointerParameters(target);
+			Set<Integer> processed = processedTargetSlots.computeIfAbsent(target,
+				ignored -> new HashSet<>());
+			targetTypes.keySet().removeAll(processed);
+			if (targetTypes.isEmpty()) {
+				continue;
+			}
+			processed.addAll(targetTypes.keySet());
+
+			Map<Function, Map<Integer, DataType>> inferredByCaller = new HashMap<>();
+			Map<Function, Map<Integer, Integer>> scoresByCaller = new HashMap<>();
+			ReferenceIterator references =
+				program.getReferenceManager().getReferencesTo(target.getEntryPoint());
+			while (references.hasNext()) {
+				monitor.checkCancelled();
+				Reference reference = references.next();
+				RefType referenceType = reference.getReferenceType();
+				if (!referenceType.isCall() && !referenceType.isJump()) {
+					continue;
+				}
+				Function caller = program.getFunctionManager()
+					.getFunctionContaining(reference.getFromAddress());
+				if (caller == null || caller == target || !mayAnalyze(caller) ||
+					(!fullScan && !scopedCallers.contains(caller))) {
+					continue;
+				}
+				Instruction call =
+					program.getListing().getInstructionAt(reference.getFromAddress());
+				if (call == null) {
+					continue;
+				}
+				for (Map.Entry<Integer, DataType> targetParameter : targetTypes.entrySet()) {
+					int targetStart = targetParameter.getKey();
+					Integer low = tracer.trace(caller, target, call, targetStart, monitor);
+					Integer high = tracer.trace(caller, target, call, targetStart + 1, monitor);
+					if (low == null || high == null || high != low + 1 ||
+						!isLegalPairStart(low)) {
+						continue;
+					}
+					exactCalls.add(call.getAddress());
+					Map<Integer, DataType> inferred = inferredByCaller.computeIfAbsent(caller,
+						ignored -> new HashMap<>());
+					mergePointerType(program, inferred, low, targetParameter.getValue());
+					scoresByCaller.computeIfAbsent(caller, ignored -> new HashMap<>())
+						.merge(low, 1, Integer::sum);
+				}
+			}
+
+			for (Function caller : orderedFunctions(inferredByCaller.keySet())) {
+				monitor.checkCancelled();
+				Map<Integer, DataType> pointerTypes = inferredByCaller.get(caller);
+				List<Integer> candidates = new ArrayList<>(pointerTypes.keySet());
+				Collections.sort(candidates);
+				Selection selection = selectPairs(candidates, scoresByCaller.get(caller),
+					0, new HashMap<>());
+				if (selection.ambiguous() || selection.starts().isEmpty()) {
+					if (selection.ambiguous()) {
+						unresolved.add(caller);
+					}
+					continue;
+				}
+				Set<Integer> pairs = removeFunctionPointerConflicts(program, caller,
+					selection.starts(), Set.of(), pointerTypes);
+				pairs = removeCallSiteScalarConflicts(caller, pairs, Set.of(),
+					scalarPairs, strictScalarPairs);
+				if (pairs.isEmpty()) {
+					continue;
+				}
+				Set<Integer> liveSlots = existingParameterSlots(caller);
+				for (int start : pairs) {
+					liveSlots.add(start);
+					liveSlots.add(start + 1);
+				}
+				pairs = retainSupportedPairs(caller, pairs, liveSlots);
+				if (pairs.isEmpty() || signatureMatches(caller, pairs, liveSlots,
+					pointerTypes)) {
+					continue;
+				}
+				try {
+					updateSignature(program, caller, pairs, liveSlots, pointerTypes);
+					changed.add(caller);
+					changedParameters += pairs.size();
+					targets.addLast(caller);
+				}
+				catch (DuplicateNameException | InvalidInputException e) {
+					log.appendException(e);
+					unresolved.add(caller);
+				}
+			}
+		}
+		return new ForwardedSeedStats(changed.size(), changedParameters, exactCalls.size(),
+			Set.copyOf(unresolved));
+	}
+
+	private Map<Integer, DataType> farDataPointerParameters(Function function) {
+		Map<Integer, DataType> result = new HashMap<>();
+		if (!usesTaskingConvention(function)) {
+			return result;
+		}
+		for (Parameter parameter : function.getParameters()) {
+			Integer start = parameterStart(parameter.getVariableStorage());
+			DataType type = parameter.getFormalDataType();
+			if (start != null && isPointerType(type) && !isFunctionPointer(type) &&
+				parameter.getVariableStorage().size() == 4) {
+				result.put(start, type);
+			}
+		}
+		return result;
+	}
+
 	private CandidateGraph buildCandidateGraph(Program program, AddressSetView set,
-			boolean fullScan, TaskMonitor monitor)
+			boolean fullScan, Set<Function> unresolvedForwarders,
+			Set<Function> unresolvedDirectParameters, TaskMonitor monitor)
 			throws CancelledException {
-		Set<Function> candidates = new HashSet<>();
-		List<Function> typedTargets = new ArrayList<>();
-		ArrayDeque<Function> frontier = new ArrayDeque<>();
-		Set<Function> expanded = new HashSet<>();
+		Set<Function> candidates = new HashSet<>(unresolvedForwarders);
+		candidates.addAll(unresolvedDirectParameters);
 		Iterator<Function> functions = fullScan
 				? program.getFunctionManager().getFunctions(true)
 				: program.getFunctionManager().getFunctionsOverlapping(set);
@@ -1435,19 +1751,16 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			"C166 far-pointer inference: scanning functions");
 		for (Function function : scopedFunctions) {
 			monitor.checkCancelled();
-			if (hasFarPointerParameter(function) && usesTaskingConvention(function)) {
-				typedTargets.add(function);
-			}
-			if (mayAnalyze(function) &&
-				(!fullScan || containsDynamicPagedAccessSetup(program, function))) {
-				if (candidates.add(function)) {
-					frontier.addLast(function);
-				}
+			if (!fullScan && mayAnalyze(function)) {
+				candidates.add(function);
 			}
 			monitor.incrementProgress(1);
 		}
-		frontier.addAll(typedTargets);
-		monitor.setMessage("C166 far-pointer inference: expanding forwarding callers");
+		ArrayDeque<Function> frontier = new ArrayDeque<>(candidates);
+		Set<Function> expanded = new HashSet<>();
+		C166CodePointerPhase.ForwardingTracer forwardingTracer =
+			new C166CodePointerPhase.ForwardingTracer(program);
+		monitor.setMessage("C166 far-pointer inference: expanding unresolved forwarding chains");
 		while (!frontier.isEmpty()) {
 			monitor.checkCancelled();
 			Function target = frontier.removeFirst();
@@ -1456,7 +1769,9 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			}
 			for (Function caller : directCallers(program, target)) {
 				if (caller != target && mayAnalyze(caller) &&
-					(fullScan || caller.getBody().intersects(set)) && candidates.add(caller)) {
+					(fullScan || caller.getBody().intersects(set)) &&
+					forwardsTypedDataPointer(program, caller, target, forwardingTracer,
+						monitor) && candidates.add(caller)) {
 					frontier.addLast(caller);
 				}
 			}
@@ -1476,7 +1791,160 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 			callees.put(function, Set.copyOf(relevant));
 			monitor.incrementProgress(1);
 		}
-		return new CandidateGraph(Set.copyOf(candidates), Map.copyOf(callees));
+		return new CandidateGraph(Set.copyOf(candidates), Map.copyOf(callees),
+			unresolvedForwarders.size(), unresolvedDirectParameters.size(), 0);
+	}
+
+	private Set<Address> directPagedGlobalPointerStarts(Program program,
+			Function function) {
+		return C166AnalysisEvidenceIndex.globalPointerStarts(program, function,
+			() -> computeDirectPagedGlobalPointerStarts(program, function));
+	}
+
+	private Set<Address> computeDirectPagedGlobalPointerStarts(Program program,
+			Function function) {
+		Set<Address> starts = new HashSet<>();
+		for (Instruction setup :
+				C166AnalysisEvidenceIndex.pagedSetups(program, function)) {
+			Register pageSource = dynamicPageSource(setup);
+			Address high = pageSource == null ? null :
+				traceRegisterToGlobalWord(program, function, setup, pageSource);
+			if (high == null) {
+				continue;
+			}
+			int remaining = pageAccessCount(setup);
+			Instruction access = program.getListing().getInstructionAfter(setup.getAddress());
+			while (access != null && remaining-- > 0 &&
+				function.getBody().contains(access.getAddress())) {
+				for (int operand = 0; operand < access.getNumOperands(); operand++) {
+					String spelling = access.getDefaultOperandRepresentation(operand).trim();
+					if (!spelling.startsWith("[")) {
+						continue;
+					}
+					Register base = operandRegister(access, operand);
+					Address low = base == null ? null : traceOffsetRegisterToGlobalWord(
+						program, function, access, base);
+					if (low != null && areAdjacentGlobalWords(low, high)) {
+						starts.add(low);
+					}
+				}
+				access = program.getListing().getInstructionAfter(access.getAddress());
+			}
+		}
+		return Set.copyOf(starts);
+	}
+
+	private boolean areAdjacentGlobalWords(Address low, Address high) {
+		if (!low.getAddressSpace().equals(high.getAddressSpace())) {
+			return false;
+		}
+		try {
+			return low.add(2).equals(high);
+		}
+		catch (AddressOutOfBoundsException e) {
+			return false;
+		}
+	}
+
+	private boolean hasDefinedGlobalFarPointer(Program program, Address start) {
+		Data data = program.getListing().getDefinedDataAt(start);
+		return data != null && data.getLength() == 4 &&
+			isPointerType(data.getDataType()) && !isFunctionPointer(data.getDataType());
+	}
+
+	/** Trace a global OFFSET word while ignoring only in-place offset arithmetic. */
+	private Address traceOffsetRegisterToGlobalWord(Program program, Function function,
+			Instruction before, Register source) {
+		Register traced = source;
+		Instruction instruction = program.getListing().getInstructionBefore(before.getAddress());
+		for (int scanned = 0; instruction != null && scanned < MAX_SETUP_SCAN_INSTRUCTIONS;
+				scanned++, instruction =
+					program.getListing().getInstructionBefore(instruction.getAddress())) {
+			if (!function.getBody().contains(instruction.getAddress()) ||
+				instruction.getFlowType().isCall() || instruction.getFlowType().isJump()) {
+				return null;
+			}
+			if (!writesRegister(instruction, traced)) {
+				continue;
+			}
+			String mnemonic = instruction.getMnemonicString().toLowerCase();
+			if ((mnemonic.equals("add") || mnemonic.equals("sub") ||
+				mnemonic.equals("and")) && instruction.getNumOperands() >= 2 &&
+				overlaps(traced, operandRegister(instruction, 0))) {
+				continue;
+			}
+			if (!mnemonic.equals("mov") || instruction.getNumOperands() < 2 ||
+				OperandType.isIndirect(instruction.getOperandType(1))) {
+				return null;
+			}
+			Address global = null;
+			for (Reference reference : instruction.getReferencesFrom()) {
+				if (!reference.getReferenceType().isRead() ||
+					!reference.getToAddress().isMemoryAddress()) {
+					continue;
+				}
+				if (global != null && !global.equals(reference.getToAddress())) {
+					return null;
+				}
+				global = reference.getToAddress();
+			}
+			if (global != null) {
+				return global;
+			}
+			Register previous = operandRegister(instruction, 1);
+			if (previous == null) {
+				return null;
+			}
+			traced = previous;
+		}
+		return null;
+	}
+
+	private boolean hasFarDataPointerAt(Function function, int start) {
+		for (Parameter parameter : function.getParameters()) {
+			if (!Integer.valueOf(start).equals(
+					parameterStart(parameter.getVariableStorage()))) {
+				continue;
+			}
+			DataType type = parameter.getFormalDataType();
+			return parameter.getVariableStorage().size() == 4 && isPointerType(type) &&
+				!isFunctionPointer(type);
+		}
+		return false;
+	}
+
+	private boolean forwardsTypedDataPointer(Program program, Function caller,
+			Function target, C166CodePointerPhase.ForwardingTracer tracer,
+			TaskMonitor monitor) throws CancelledException {
+		Map<Integer, DataType> targetTypes = farDataPointerParameters(target);
+		if (targetTypes.isEmpty()) {
+			return false;
+		}
+		ReferenceIterator references =
+			program.getReferenceManager().getReferencesTo(target.getEntryPoint());
+		while (references.hasNext()) {
+			monitor.checkCancelled();
+			Reference reference = references.next();
+			RefType type = reference.getReferenceType();
+			if ((!type.isCall() && !type.isJump()) ||
+				!caller.getBody().contains(reference.getFromAddress())) {
+				continue;
+			}
+			Instruction call =
+				program.getListing().getInstructionAt(reference.getFromAddress());
+			if (call == null) {
+				continue;
+			}
+			for (int targetStart : targetTypes.keySet()) {
+				Integer low = tracer.trace(caller, target, call, targetStart, monitor);
+				Integer high = tracer.trace(caller, target, call, targetStart + 1, monitor);
+				if (low != null && high != null && high == low + 1 &&
+					isLegalPairStart(low)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private Set<Function> directCallers(Program program, Function target) {
@@ -1500,14 +1968,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 
 	private Set<Function> directTargets(Program program, Function caller) {
 		Set<Function> targets = new HashSet<>();
-		InstructionIterator instructions =
-			program.getListing().getInstructions(caller.getBody(), true);
-		while (instructions.hasNext()) {
-			Instruction instruction = instructions.next();
-			if (!instruction.getFlowType().isCall() &&
-				!instruction.getFlowType().isJump()) {
-				continue;
-			}
+		for (Instruction instruction :
+				C166AnalysisEvidenceIndex.flowInstructions(program, caller)) {
 			for (Reference reference : instruction.getReferencesFrom()) {
 				RefType type = reference.getReferenceType();
 				if (!type.isCall() && !type.isJump()) {
@@ -1662,7 +2124,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		// Recovered arguments after the fixed prefix of a variadic function are
 		// call-site values, not additional formal parameters.  Extending such a
 		// signature corrupts both the declared ABI and later prototype overrides.
-		return !function.isExternal() && !function.isThunk() && !function.hasVarArgs() &&
+		return C166AnalysisFunctions.hasUsableBody(function) && !function.isThunk() &&
+			!function.hasVarArgs() &&
 			function.getCallFixup() == null &&
 			mayUpdate(function) && usesTaskingConvention(function);
 	}
@@ -1690,10 +2153,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	}
 
 	private boolean containsDynamicPagedAccessSetup(Program program, Function function) {
-		InstructionIterator instructions =
-			program.getListing().getInstructions(function.getBody(), true);
-		while (instructions.hasNext()) {
-			Instruction instruction = instructions.next();
+		for (Instruction instruction :
+				C166AnalysisEvidenceIndex.pagedSetups(program, function)) {
 			Register pageSource = dynamicPageSource(instruction);
 			if (pageSource != null && pageMayCarryPointerInput(program, function,
 				instruction, pageSource)) {
@@ -1714,10 +2175,8 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 		if (pairStart >= 4) {
 			return containsDynamicPagedAccessSetup(program, function);
 		}
-		InstructionIterator instructions =
-			program.getListing().getInstructions(function.getBody(), true);
-		while (instructions.hasNext()) {
-			Instruction instruction = instructions.next();
+		for (Instruction instruction :
+				C166AnalysisEvidenceIndex.pagedSetups(program, function)) {
 			Register source = dynamicPageSource(instruction);
 			Integer slot = source == null ? null : tracePageSourceToInputSlot(program,
 				function, instruction, source);
@@ -1736,17 +2195,29 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 	 */
 	private boolean containsDirectPagedDataUseForPair(Program program,
 			Function function, int pairStart) {
-		if (pairStart < 0 || pairStart >= 4) {
-			return false;
-		}
-		InstructionIterator instructions =
-			program.getListing().getInstructions(function.getBody(), true);
-		while (instructions.hasNext()) {
-			Instruction setup = instructions.next();
+		return directPagedDataUsePairs(program, function).contains(pairStart);
+	}
+
+	Set<Integer> directPagedDataUsePairs(Program program, Function function) {
+		return directPagedDataUseOffsets(program, function).keySet();
+	}
+
+	Map<Integer, Set<Integer>> directPagedDataUseOffsets(Program program,
+			Function function) {
+		return C166AnalysisEvidenceIndex.pagedOffsets(program, function,
+			() -> computeDirectPagedDataUseOffsets(program, function));
+	}
+
+	private Map<Integer, Set<Integer>> computeDirectPagedDataUseOffsets(Program program,
+			Function function) {
+		Map<Integer, Set<Integer>> offsets = new HashMap<>();
+		C166CodePointerPhase tracer = new C166CodePointerPhase();
+		for (Instruction setup :
+				C166AnalysisEvidenceIndex.pagedSetups(program, function)) {
 			Register page = dynamicPageSource(setup);
-			Integer pageSlot = page == null ? null : tracePageSourceToInputSlot(program,
-				function, setup, page);
-			if (pageSlot == null || pageSlot != pairStart + 1) {
+			Integer pageSlot = page == null ? null :
+				tracer.traceScalarInputWord(program, function, setup, page);
+			if (pageSlot == null) {
 				continue;
 			}
 			int remaining = pageAccessCount(setup);
@@ -1759,16 +2230,25 @@ public class C166FarPointerPhase extends C166TaskingTypeInferencePhase {
 						continue;
 					}
 					Register base = operandRegister(access, operand);
-					Integer offsetSlot = base == null ? null : tracePageSourceToInputSlot(
-						program, function, access, base);
-					if (offsetSlot != null && offsetSlot == pairStart) {
-						return true;
+					Integer offsetSlot = base == null ? null :
+						tracer.traceScalarInputWord(program, function, access, base);
+					if (offsetSlot != null && pageSlot == offsetSlot + 1 &&
+						isLegalPairStart(offsetSlot)) {
+						Scalar displacement = operandScalar(access, operand);
+						int byteOffset = displacement == null ? 0 :
+							(int) displacement.getSignedValue();
+						offsets.computeIfAbsent(offsetSlot, ignored -> new HashSet<>())
+							.add(byteOffset);
 					}
 				}
 				access = program.getListing().getInstructionAfter(access.getAddress());
 			}
 		}
-		return false;
+		Map<Integer, Set<Integer>> result = new HashMap<>();
+		for (Map.Entry<Integer, Set<Integer>> entry : offsets.entrySet()) {
+			result.put(entry.getKey(), Set.copyOf(entry.getValue()));
+		}
+		return Map.copyOf(result);
 	}
 
 	private Integer tracePageSourceToInputSlot(Program program, Function function,
